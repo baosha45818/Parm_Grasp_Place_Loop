@@ -1,0 +1,44 @@
+cd /home/dainanjun/qiuguolin/graspnet
+
+CUDA_VISIBLE_DEVICES=0 .venv/bin/python \
+  deploy/version4/run_d405_graspnet.py \
+  --checkpoint-path /home/dainanjun/qiuguolin/graspnet/checkpoint/checkpoint-rs.tar \
+  --wrist-calibration /home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/wrist1/calibration_wrist1.json \
+  --tcp-translation-calibration /home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/tcp_grasp_tcp/calibration_translation2.json \
+  --arm-host 192.168.88.1 \
+  --arm-id 1 \
+  --move-observation \
+  --d405-serial 260322270242 \
+  --d405-frame-count 5 \
+  --d405-postprocess \
+  --d405-hole-filling \
+  --d405-z-min 0.10 \
+  --d405-z-max 1.20 \
+  --d405-x-abs-max 0.80 \
+  --d405-y-abs-max 0.80 \
+  --roi 0 0 512 336 \
+  --num-point 50000 \
+  --num-view 300 \
+  --collision-thresh 0.3 \
+  --collision-voxel-size 0.005 \
+  --collision-approach-dist 0.01 \
+  --top-k 50 \
+  --disable-tabletop-filter \
+  --gripper-yaw-offset-deg 65 \
+  --pregrasp-height-m 0.02 \
+  --gripper-host localhost \
+  --gripper-hand 1 \
+  --gripper-open-width-m 0.078 \
+  --gripper-width-margin-m 0.005 \
+  --gripper-force 60 \
+  --gripper-close-force 100 \
+  --postgrasp-lift-joints-deg -6.288 -38.805 12.556 72.427 4.059 67.331 -11.391 \
+  --place-joints-deg -62.016 37.312 -23.766 55.214 1.200 -0.677 78.087 \
+  --pregrasp-duration-s 3 \
+  --descend-duration-s 2 \
+  --cartesian-speed-factor 1.0 \
+  --servo-hz 50 \
+  --max-grasp-distance-m 0.80 \
+  --display :1 \
+  --execute-grasp \
+  --confirm-real-grasp

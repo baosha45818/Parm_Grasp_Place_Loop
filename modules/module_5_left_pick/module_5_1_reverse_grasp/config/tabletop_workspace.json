@@ -1,0 +1,4 @@
+{
+  "safe_roi_xywh": [0, 120, 504, 360],
+  "description": "Left-to-central tabletop work zone in the 848x480 head RGB image. This preserves the previous normalized ROI: left edge to x=504, from y=120 through the bottom (y=480)."
+}

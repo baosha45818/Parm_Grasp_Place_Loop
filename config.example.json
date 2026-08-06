@@ -1,0 +1,31 @@
+{
+  "planner_host": "127.0.0.1",
+  "execute_url": "http://127.0.0.1:5667/middle/waypoint/execute",
+  "base_frame": "body_base",
+  "left_group": "left_arm",
+  "right_group": "right_arm",
+  "left_tool_frame": "left_hand_tool_end_link",
+  "right_tool_frame": "right_hand_tool_end_link",
+  "max_velocity": 0.1,
+  "max_acceleration": 0.1,
+  "idle_poll_seconds": 0.2,
+  "poses": {
+    "left_inspect": null,
+    "left_buffer_place": null,
+    "left_drop_flip": null,
+    "left_handoff": null,
+    "left_handoff_retreat": null,
+    "left_idle": null,
+    "right_buffer_grasp": null,
+    "right_buffer_retreat": null,
+    "right_handoff_grasp": null,
+    "right_handoff_retreat": null,
+    "right_hole_a_preinsert": null,
+    "right_hole_a_ramp_contact": null,
+    "right_hole_a_ramp_peak": null,
+    "right_hole_a_inserted": null,
+    "right_final_place": null,
+    "right_idle": null
+  },
+  "hole_a_insertion": null
+}

@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Automatically execute a reviewed grasp after all Planner checks pass.
+
+Default is dry-run.  --execute is required for any planner motion.
+"""
+from __future__ import annotations
+import argparse,json,sys,time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import numpy as np
+from scipy.spatial.transform import Rotation
+ROOT=Path(__file__).resolve().parents[4]; MODULE_ROOT=Path(__file__).resolve().parent.parent; sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'tool'))
+from planner_runtime import PlannerRuntime
+from loop_config import LoopConfig
+from loop_types import ObjectPose
+from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
+from parm_sdk.api.exceptions import ParmAPIError
+
+NO_GRASP_EXIT_CODE=20
+LEFT_GRIPPER_HOLDING_POSITION_MAX=85.0
+
+def left_gripper_opening(response):
+ """Read the new left_gripper driver's authoritative sync-command opening."""
+ payload=response.get('data') or response
+ device=(payload.get('devices') or {}).get('left_gripper') or {}
+ interfaces=device.get('state_interfaces') or {}
+ position=interfaces.get('gripper/position',payload.get('position'))
+ if position is None: raise RuntimeError(f'left gripper close response has no opening: {response}')
+ return float(position)
+
+def pose(T):
+ q=Rotation.from_matrix(T[:3,:3]).as_quat() # x,y,z,w
+ return ObjectPose(frame_id='body_base',position=T[:3,3].tolist(),orientation=q.tolist())
+def pose_debug(T):
+ r=Rotation.from_matrix(T[:3,:3]); return {'position_m':np.asarray(T[:3,3]).round(7).tolist(),'rpy_xyz_deg':r.as_euler('xyz',degrees=True).round(3).tolist(),'quaternion_xyzw':r.as_quat().round(8).tolist(),'rotation_matrix':np.asarray(T[:3,:3]).round(8).tolist()}
+def targets_for_grasp(Tg, Tb, above_m, body_z_down_m):
+ """Build direct ``left_eef`` Planner targets for one grasp orientation."""
+ target=Tb@Tg
+ Tg_above=Tg.copy(); Tg_above[:3,3]-=Tg[:3,0]*float(above_m)
+ above=Tb@Tg_above
+ # Keep the 3 cm pregrasp separation while applying the requested physical-Z bias.
+ target[2,3]-=body_z_down_m; above[2,3]-=body_z_down_m
+ return target, above, Tg_above
+
+def tilt_from_table_angle_deg(angle_deg):
+ """Map a signed table-relative approach angle to local jaw-axis tilt.
+
+ 90 deg is vertical down.  +/-60 and +/-30 deg are respectively 30 and
+ 60 degrees of tilt to the two sides about local +Y (jaw-opening axis).
+ """
+ angle=float(angle_deg)
+ return np.copysign(90.0-abs(angle), angle)
+def wait_for_left_joint_target(arm_host,target_deg,label,tolerance_deg=.5,timeout_s=90.):
+ """The planner executor is asynchronous; only continue after live left-arm feedback arrives."""
+ from parm_sdk import Arm
+ deadline=time.monotonic()+float(timeout_s);last=float('inf');target=np.asarray(target_deg,float)
+ with Arm(host=arm_host) as arm:
+  while time.monotonic()<deadline:
+   state=arm.get_state() or {};actual=np.asarray(((state.get('state') or {}).get('left') or {}).get('position') or [],float)
+   if actual.shape==(7,):
+    delta=(actual-target+180.)%360.-180.;last=float(np.max(np.abs(delta)))
+    if last<=float(tolerance_deg): print(f'{label} reached; max joint error={last:.3f}deg');return
+   time.sleep(.05)
+ raise RuntimeError(f'{label} did not arrive within {timeout_s:.1f}s; max joint error={last:.3f}deg')
+def main():
+ p=argparse.ArgumentParser();p.add_argument('--grasp-json',type=Path,required=True);p.add_argument('--body-head',type=Path,default=MODULE_ROOT/'config/body_head_calibration.json',help='body_base <- head camera calibration');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--speed',type=float,default=.20);p.add_argument('--above-m',type=float,default=.03);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.020,help='additional body_z_down_m');p.add_argument('--lift-m',type=float,default=.03,help='successful grasp: lift vertically in body_base +Z');p.add_argument('--gripper-host',default='127.0.0.1');p.add_argument('--planner-host',default='127.0.0.1');p.add_argument('--arm-host',default='192.168.88.1');p.add_argument('--execute-url',default='http://127.0.0.1:5667/middle/waypoint/execute');a=p.parse_args()
+ if a.execute and a.preflight_only: p.error('--execute and --preflight-only are mutually exclusive')
+ if a.above_m<=0 or a.lift_m<=0 or a.body_z_down_m<0 or not a.approach_angles_deg or any(not 0<abs(x)<=90 for x in a.approach_angles_deg): p.error('--above-m and --lift-m must be positive; --body-z-down-m must be non-negative; each --approach-angles-deg value must be in [-90,90] excluding 0')
+ records=json.loads(a.grasp_json.read_text());
+ if len(records) != 1:
+  raise RuntimeError(f'execution blocked: expected exactly one reverse-side grasp candidate, got {len(records)}; inspect grasp_overlay.png')
+ r=records[0]; Tg=np.eye(4);Tg[:3,:3]=r['grasp_pose']['rotation_matrix'];Tg[:3,3]=r['grasp_pose']['translation_m']
+ Tb=np.asarray(json.loads(a.body_head.read_text())['T'],float)
+ # ``left_eef`` is the URDF open-jaw grasp centre: target it directly and do
+ # not apply the retired grasp-TCP calibration or Planner-tool bridge.
+ live_planner=a.execute or a.preflight_only
+ cfg=LoopConfig(planner_host=a.planner_host,execute_url=a.execute_url,base_frame='body_base',left_group='left_arm',right_group='right_arm',left_tool_frame='left_eef',right_tool_frame='right_hand_transfer_end',max_velocity=a.speed,max_acceleration=a.speed,idle_poll_seconds=.2,live=live_planner,poses={})
+ planner=PlannerRuntime(cfg)
+ try:
+  planner.open(required_frames={'body_base','left_eef'})
+  # Higher table-relative angle has priority: first 90 (top-down), then 60,
+  # then 30.  For equal absolute angles, preserve the user-provided sign order.
+  approach_angles=sorted(dict.fromkeys(a.approach_angles_deg),key=lambda x:-abs(x))
+  candidate_groups=[]
+  for approach_deg in approach_angles:
+   tilt_deg=tilt_from_table_angle_deg(approach_deg)
+   tilt=np.eye(4); tilt[:3,:3]=Rotation.from_rotvec([0,np.deg2rad(tilt_deg),0]).as_matrix()
+   candidate_groups.append([(approach_deg,tilt_deg,0.0,Tg@tilt)])
+  reachable=[]; preflight=[]
+  def preflight_group(group):
+   # Use one independent Planner client per angular group.  The three groups
+   # can therefore be evaluated together without sharing an SDK connection.
+   group_planner=None
+   if live_planner:
+    group_planner=PlannerRuntime(cfg); group_planner.open(required_frames={'body_base','left_eef'})
+   result=[]
+   try:
+    for approach_deg,tilt_deg,degrees,Tg_candidate in group:
+     target,above,Tg_above=targets_for_grasp(Tg_candidate,Tb,a.above_m,a.body_z_down_m)
+     item={'approach_angle_from_table_deg':approach_deg,'side_approach_tilt_deg':tilt_deg,'left_eef_head_camera':pose_debug(Tg_candidate),'pregrasp_left_eef_head_camera':pose_debug(Tg_above),'left_eef_target_body_base':pose_debug(target),'above_target_body_base':pose_debug(above)}
+     if not live_planner:
+      item['reachable']=None; result.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,None,item)); continue
+     # The transit to pregrasp is collision-checked by Planner but need not be
+     # a Cartesian straight line.  RRTstar provides obstacle-avoiding joint-space freedom.
+     try: plan=group_planner.plan_cartesian_pose('left',pose(above),planner='rrtstar')
+     except ParmAPIError as exc: item['reachable']=False; item['reason']=str(exc); result.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,None,item)); continue
+     # Checking only the pregrasp target can leave the robot parked above the
+     # part when the final RRTstar descent is infeasible.  Validate the descent
+     # from the exact joint endpoint that Planner chose for the pregrasp.
+     pregrasp_joints=(plan.get('data') or {}).get('trajectory') or []
+     if not pregrasp_joints or len(pregrasp_joints[-1]) != 7:
+      item['reachable']=False; item['reason']='pregrasp planner returned no seven-joint endpoint for RRTstar-descent validation'; result.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,None,item)); continue
+     item['pregrasp_joint_target_deg']=[float(v) for v in pregrasp_joints[-1]]
+     try:
+      group_planner.plan_cartesian_pose('left',pose(target),planner='rrtstar',start_joints_deg=item['pregrasp_joint_target_deg'])
+     except (ParmAPIError, RuntimeError) as exc:
+      item['reachable']=False; item['descent_reachable']=False; item['reason']=f'pregrasp is reachable, but RRTstar descent from its endpoint is not: {exc}'; result.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,None,item)); continue
+     item['reachable']=True; item['descent_reachable']=True; result.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,plan,item))
+   finally:
+    if group_planner is not None: group_planner.close()
+   return result
+  if live_planner:
+   # 90, +60 and -60 start concurrently, one grasp orientation per angle.
+   with ThreadPoolExecutor(max_workers=len(candidate_groups)) as pool: grouped_results=list(pool.map(preflight_group,candidate_groups))
+  else: grouped_results=[preflight_group(group) for group in candidate_groups]
+  for group_result in grouped_results:
+   for approach_deg,tilt_deg,degrees,target,above,Tg_candidate,plan,item in group_result:
+    preflight.append(item)
+    if item['reachable']:
+     reachable.append((approach_deg,tilt_deg,degrees,target,above,Tg_candidate,plan,item)); print(f'Preflight approach={approach_deg:.0f}deg tilt={tilt_deg:.0f}deg: reachable (not executed)')
+    elif live_planner: print(f"Preflight approach={approach_deg:.0f}deg tilt={tilt_deg:.0f}deg: unreachable: {item['reason']}")
+  debug={'approach_preflight':preflight,'body_z_down_m':a.body_z_down_m,'planner_frame':'left_eef','grasp_target_mode':'direct_urdf_left_eef','grasp_frame_convention':r.get('grasp_frame_convention','legacy_unknown'),'pregrasp_planner_mode':'rrtstar','grasp_descent_planner_mode':'rrtstar','post_grasp_lift_planner_mode':'rrtstar'}
+  debug_path=a.grasp_json.parent/'planner_pose_debug.json'; debug_path.write_text(json.dumps(debug,indent=2)); print(json.dumps(debug,indent=2)); print('Pose debug:',debug_path)
+  if not reachable: raise RuntimeError('execution blocked: no configured approach angle has a reachable pregrasp plan; inspect planner_pose_debug.json')
+  approach_deg,tilt_deg,degrees,target,above,Tg_selected,pregrasp_plan,_=reachable[0]
+  if a.preflight_only: print('preflight complete; no trajectory was executed');return
+  if not a.execute: print('dry-run complete; live Planner preflight was not requested');return
+  print(f'Selected table approach={approach_deg:.0f}deg (side tilt={tilt_deg:.0f}deg); above target (body_base):',above[:3,3].round(4).tolist())
+  planner.execute_planned_result(pregrasp_plan)
+  wait_for_left_joint_target(a.arm_host,(pregrasp_plan.get('data') or {}).get('trajectory',[])[-1],'left pregrasp')
+  print('At pregrasp; automatically descending with RRTstar.')
+  grasp_plan=planner.plan_cartesian_pose('left',pose(target),planner='rrtstar')
+  if grasp_plan is None: raise RuntimeError('grasp descent planner returned no trajectory')
+  planner.execute_planned_result(grasp_plan)
+  wait_for_left_joint_target(a.arm_host,(grasp_plan.get('data') or {}).get('trajectory',[])[-1],'left grasp pose')
+  from parm_sdk import Gripper
+  print('At grasp pose; closing left gripper synchronously...')
+  with Gripper(host=a.gripper_host,status_port=7702) as gripper:
+   state=gripper.get_state().get(1)
+   if not is_gripper_usable(state): raise RuntimeError('left gripper hand=1 is unavailable or not initialized')
+   response=gripper.move(1,0.0,force=100.0,mode='sync',preempt=False,timeout=60.0)
+  # 新 driver 的 sync 返回包已包含本次命令的权威终态；7702 PUB 帧可能仍是
+  # 上一时刻的 executing，不能立刻用它否定已成功的同步响应。
+  payload=response.get('data') or response
+  device=(payload.get('devices') or {}).get('left_gripper') or {}
+  device_state=str(device.get('device_state','')).strip().lower()
+  if response.get('status') != 'success' or device_state not in {'arrived','gripping'}:
+   raise RuntimeError(f'left gripper close sync response is invalid: {response}')
+  opening=left_gripper_opening(response)
+  print(f'Gripper close complete; final opening={opening:.1f}%')
+  if opening>=LEFT_GRIPPER_HOLDING_POSITION_MAX:
+   print(f'NO_GRASP: left gripper opening={opening:.1f}% >= {LEFT_GRIPPER_HOLDING_POSITION_MAX:.1f}%; do not lift.',flush=True)
+   raise SystemExit(NO_GRASP_EXIT_CODE)
+  print(f'Gripper close complete; automatically lifting along body_base +Z by {a.lift_m*100:.0f} cm.')
+  lift=target.copy();lift[2,3]+=float(a.lift_m)
+  print('Lift target (body_base):',lift[:3,3].round(4).tolist())
+  lift_plan=planner.plan_cartesian_pose('left',pose(lift),planner='rrtstar')
+  if lift_plan is None: raise RuntimeError('post-grasp lift planner returned no trajectory')
+  planner.execute_planned_result(lift_plan)
+  wait_for_left_joint_target(a.arm_host,(lift_plan.get('data') or {}).get('trajectory',[])[-1],'left post-grasp lift')
+  print('grasp-and-lift complete')
+ finally: planner.close()
+if __name__=='__main__':main()

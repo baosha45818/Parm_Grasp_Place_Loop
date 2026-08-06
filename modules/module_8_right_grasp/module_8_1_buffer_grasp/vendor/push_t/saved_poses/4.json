@@ -1,0 +1,46 @@
+{
+  "saved_at_utc": "2026-07-21T02:28:49.950938+00:00",
+  "selected_arm_id": 2,
+  "joint_angle_unit": "deg",
+  "eef_pose_note": "planner TCP pose: body_base -> *_hand_transfer_base; xyz in m, rotvec in rad",
+  "eef_pose_reference_frame": "body_base",
+  "arms": {
+    "right": {
+      "arm_id": 2,
+      "joint_positions_deg": [
+        28.8486,
+        26.084300000000002,
+        -24.0216,
+        79.081,
+        -92.0023,
+        -86.3827,
+        -5.8804
+      ],
+      "eef_pose": {
+        "xyz": [
+          0.2370974854552371,
+          -0.5050823577602701,
+          -0.30670196036568614
+        ],
+        "rotvec": [
+          0.0014553157712661568,
+          -0.01751860062567341,
+          0.1344719334584405
+        ]
+      },
+      "eef_pose_ik_frame": "right_hand_transfer_base",
+      "driver_eef_pose": {
+        "rpy": [
+          0.027128791582565884,
+          -0.004894969446841048,
+          0.15344535293860273
+        ],
+        "xyz": [
+          0.21479824892744026,
+          -0.49759563693229264,
+          -0.19967510398436958
+        ]
+      }
+    }
+  }
+}

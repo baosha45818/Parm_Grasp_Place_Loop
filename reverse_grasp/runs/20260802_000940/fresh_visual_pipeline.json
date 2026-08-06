@@ -1,0 +1,7 @@
+{
+  "event": "fresh_head_sam_fixed_reverse_stl_icp",
+  "started_at": 1785600580.595381,
+  "status": "failed",
+  "error": "no server listening at tcp://127.0.0.1:7705",
+  "finished_at": 1785600580.6227984
+}

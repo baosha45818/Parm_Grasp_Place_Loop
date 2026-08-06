@@ -1,0 +1,34 @@
+{
+  "event": "fresh_head_sam_fixed_reverse_stl_icp",
+  "started_at": 1785647926.6881902,
+  "status": "complete",
+  "head": {
+    "expected_pitch_yaw_deg": [
+      38.5,
+      0.0
+    ],
+    "actual_pitch_yaw_deg": [
+      38.5,
+      0.0
+    ]
+  },
+  "raw_capture_dir": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/captures/head_rgbd_20260802_131847",
+  "capture_dir": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/manual_reverse_20260802_131846/capture",
+  "multiframe_pointcloud_fusion": {
+    "method": "median_of_consecutive_registered_depth_snapshots",
+    "snapshot_count": 5,
+    "rgb_snapshot_used": 2,
+    "valid_depth_pixels_per_snapshot": [
+      892395,
+      892353,
+      891934,
+      892319,
+      891921
+    ],
+    "valid_depth_pixels_fused": 896366
+  },
+  "sam_masks": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/manual_reverse_20260802_131846/capture/sam2_masks/sam2_masks_overlay.png",
+  "fixed_pose": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/manual_reverse_20260802_131846/capture/table_reverse_fixed_icp/fixed_reverse_pose.json",
+  "axes_overlay": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/manual_reverse_20260802_131846/capture/table_reverse_fixed_icp/fixed_reverse_axes_overlay.png",
+  "finished_at": 1785647937.8897398
+}

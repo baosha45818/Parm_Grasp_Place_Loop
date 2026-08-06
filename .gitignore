@@ -1,0 +1,73 @@
+# Logs and runtime output
+*.log
+*.log.*
+**/[Ll]og/
+**/[Ll]ogs/
+output/
+runtime/
+**/capture/
+**/captures/
+third_party/graspnet/deploy/version7/jobs/
+modules/module_4_head_judge/module_4_1_reverse_grasp_prediction/workpiece_2_pipeline/runs/
+modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/runs/
+modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/visualizations/
+tool/inspection_support/legacy_inspect/output_pc1/
+reverse_grasp/grasp/runs/
+modules/module_7_right_align/vendor/push_t/saved_poses/
+tmp/
+temp/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+ENV/
+
+# Local IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Local hardware calibration, captures, and operational configuration
+calibration/
+config.*.json
+!config.example.json
+*.bag
+*.db3
+
+# Downloaded ML checkpoints, datasets, and generated model artifacts
+**/checkpoints/
+**/models/*.pt
+**/models/*.pth
+**/models/*.onnx
+**/models/*.engine
+data/
+datasets/
+
+# Build and package artifacts
+build/
+dist/
+*.egg-info/
+install/
+*.so
+
+# Secrets and machine-specific settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key

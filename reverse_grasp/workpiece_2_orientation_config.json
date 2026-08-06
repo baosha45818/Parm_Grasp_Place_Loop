@@ -1,0 +1,19 @@
+{
+  "schema_version": 3,
+  "stl": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/workpiece_2/workpiece_2.stl",
+  "positive_face_normal_stl": [0.0, 0.0, 1.0],
+  "positive_face_definition": "The physical positive/non-reverse tabletop face has STL +Z towards the camera. For the confirmed tabletop reverse, STL +Z (= documented workpiece +Z) points into the table and STL -Z faces the camera.",
+  "minimum_score_margin_m": 0.00035,
+  "minimum_reverse_icp_fitness": 0.5,
+  "minimum_reverse_depth_match_fraction": 0.43,
+  "grasp_point_stl_m": [-0.05263, -0.03611, -0.01442],
+  "grasp_point_object_m": [0.05263, 0.03611, -0.01442],
+  "grasp_point_definition": "Operator-selected convenient convex tab: the upper-left end in the confirmed tabletop-reverse RGB view. It is a CAD surface landmark expressed in documented workpiece coordinates (X+, Y+, Z-).",
+  "grasp_width_axis_stl": [0.0, 1.0, 0.0],
+  "grasp_outward_axis_stl": [1.0, 0.0, 0.0],
+  "wide_head_outward_grasp_offset_m": 0.0,
+  "wide_head_inward_grasp_offset_m": 0.0,
+  "table_reverse_yaw_index": 2,
+  "table_reverse_yaw_selection": "operator_confirmed_fixed_yaw",
+  "table_reverse_yaw_selection_description": "The confirmed tabletop reverse has one physical yaw. Use reverse yaw initial 2: documented object +X points to the raised outer tab (left in the confirmed RGB view), +Y points upward, and +Z points into the table. ICP quality scores may not rotate these documented axes."
+}

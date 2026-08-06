@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "stl": "tool/welding_up_side_1118_only_2_small_screws_removed.stl",
+  "positive_face_normal_stl": [0.0, 0.0, 1.0],
+  "positive_face_definition": "Validated with the 20260721_221444 capture: the CAD +Z face is the physical positive (non-grasp) side. CAD -Z facing the camera is the physical reverse (grasp) side.",
+  "minimum_score_margin_m": 0.00035,
+  "minimum_reverse_icp_fitness": 0.75,
+  "minimum_reverse_depth_match_fraction": 0.70,
+  "wide_head_outward_grasp_offset_m": 0.01,
+  "wide_head_inward_grasp_offset_m": 0.010,
+  "camera_left_grasp_shift_m": 0.005
+}

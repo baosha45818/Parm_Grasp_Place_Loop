@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "event": "workpiece_2_convex_tab_grasp_prediction",
+  "source_pose": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/fixed_reverse_pose.json",
+  "frame_id": "head_d435i_color_optical_frame",
+  "object_frame": "workpiece2_top_view",
+  "grasp_contact_point_object_m": [
+    0.04996903,
+    0.00998943,
+    -0.01555655
+  ],
+  "grasp_contact_point_camera_m": [
+    -0.26301531,
+    0.11126586,
+    0.57946567
+  ],
+  "surface_point_object_m_before_down_offset": [
+    0.04996722,
+    0.00994751,
+    -0.02555646
+  ],
+  "surface_point_camera_m_before_down_offset": [
+    -0.2627949,
+    0.10461639,
+    0.57200003
+  ],
+  "grasp_down_offset_m": 0.01,
+  "nominal_grasp_contact_point_object_m_before_manual_offset": [
+    0.04996903,
+    0.00998943,
+    -0.01555655
+  ],
+  "nominal_grasp_contact_point_camera_m_before_manual_offset": [
+    -0.26301531,
+    0.11126586,
+    0.57946567
+  ],
+  "manual_grasp_offset": {
+    "enabled": false,
+    "frame_id": "workpiece2_top_view",
+    "offset_object_m": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "image_pixel": [
+    239,
+    531
+  ],
+  "outward_direction_camera": [
+    0.02204071,
+    -0.66494765,
+    -0.74656469
+  ],
+  "approach_direction_camera": [
+    -0.02204071,
+    0.66494765,
+    0.74656469
+  ],
+  "approach_direction_source": "negative_table_normal_camera",
+  "placement_constraint": "confirmed tabletop reverse: object +Z points into the table; object -Z faces the camera/outward",
+  "grasp_point_definition": "Operator-selected convenient convex tab: the upper-left end in the confirmed tabletop-reverse RGB view. It is a CAD surface landmark expressed in documented workpiece coordinates (X+, Y+, Z-).",
+  "local_refinement": {
+    "method": "sam_mask_icp_positive_x_raised_structure_center",
+    "pixel": [
+      239,
+      531
+    ],
+    "median_depth_m": 0.5720000271685421,
+    "object_x_percentile": 80.0,
+    "object_x_threshold_m": 0.04401851273581668,
+    "height_percentile_within_positive_x": 70.0,
+    "height_threshold_table_normal_m": -0.5103443171763733,
+    "component_area_px": 916,
+    "component_centroid_pixel": [
+      239.276,
+      531.142
+    ],
+    "point_selection": "3d_component_medoid",
+    "note": "Automatic grasp selection: largest raised coherent SAM point-cloud structure within the ICP workpiece +X outer end; its 3-D medoid supplies the contact point."
+  },
+  "artifacts": {
+    "overlay": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/convex_tab_check/convex_tab_grasp_overlay.png",
+    "pointcloud_npz": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/convex_tab_check/convex_tab_pointcloud.npz",
+    "pointcloud_3d": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/convex_tab_check/convex_tab_pointcloud_3d.png"
+  },
+  "created_at": 1785687084.4573834
+}

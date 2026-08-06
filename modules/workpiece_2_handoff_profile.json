@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "profile_id": "workpiece_2_high_handoff_v1",
+  "workpiece": "2",
+  "left_observation": {
+    "prepare_joints_deg": [
+      14.281,
+      -29.886,
+      -85.633,
+      102.504,
+      37.378,
+      56.016,
+      9.241
+    ],
+    "observation_joints_deg": [
+      -14.704,
+      36.499,
+      -75.262,
+      92.138,
+      -91.44,
+      50.882,
+      88.0
+    ],
+    "head_pose_deg": {
+      "pitch": 2.0,
+      "yaw": 26.5
+    },
+    "alignment": "calibration/sdk_base_alignment/sdk_base_to_planner_alignment_pitch2_yaw26p5_kinematic.json"
+  },
+  "handoff": {
+    "center_body_m": [0.42, 0.1, 0.25],
+    "axis_tolerance_deg": 2.0,
+    "center_tolerance_mm": 25.0
+  },
+  "right_handoff": {
+    "prepare_joints_deg": [
+      173.9519,
+      50.8063,
+      -79.5218,
+      85.0397,
+      -25.3112,
+      4.5552,
+      79.6344
+    ],
+    "pregrasp_joints_deg": [
+      173.9519,
+      50.8063,
+      -79.5218,
+      85.0397,
+      -25.3112,
+      4.5552,
+      79.6344
+    ],
+    "grasp_joints_deg": [
+      162.5467,
+      59.2095,
+      -70.8701,
+      76.9661,
+      -21.2146,
+      0.4807,
+      80.0175
+    ],
+    "place_ready_joints_deg": [
+      102.2483,
+      21.8477,
+      -87.2013,
+      83.4439,
+      -147.2882,
+      -32.2943,
+      -66.0196
+    ],
+    "post_release_clearance_minus_x_m": 0.03,
+    "post_release_clearance_plus_z_m": 0.03
+  },
+  "left_return_joints_deg": [
+    14.281,
+    -29.886,
+    -85.633,
+    102.504,
+    37.378,
+    56.016,
+    9.241
+  ]
+}

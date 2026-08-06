@@ -1,0 +1,32 @@
+{
+  "workpiece": {
+    "stl_path": "/home/dainanjun/qiuguolin/graspnet/deploy/tools/welding_up_side_1118_only_2_small_screws_removed.stl",
+    "face_axes_stl": {
+      "front": [0.0, 0.0, -1.0],
+      "back": [0.0, 0.0, 1.0],
+      "left": [-1.0, 0.0, 0.0],
+      "right": [1.0, 0.0, 0.0]
+    }
+  },
+  "point_cloud": {
+    "min_depth_m": 0.20,
+    "max_depth_m": 1.50,
+    "erode_px": 2,
+    "observed_voxel_m": 0.002,
+    "min_points_per_view": 200,
+    "cad_sample_points": 12000,
+    "icp_max_corr_m": 0.008,
+    "icp_max_iters": 60,
+    "icp_max_cad_points": 6000,
+    "icp_max_observed_points": 6000,
+    "quality_max_rmse_m": 0.005,
+    "quality_min_fitness": 0.20,
+    "seed": 0
+  },
+  "routing_by_down_face": {
+    "front": {"grasp_class": "front_grip", "next_step": "front_flow"},
+    "back": {"grasp_class": "back_grip", "next_step": "manual_review"},
+    "left": {"grasp_class": "side_grip", "next_step": "go_pc2"},
+    "right": {"grasp_class": "side_grip", "next_step": "go_pc2"}
+  }
+}

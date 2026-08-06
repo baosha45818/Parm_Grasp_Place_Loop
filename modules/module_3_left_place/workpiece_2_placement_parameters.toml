@@ -1,0 +1,37 @@
+# Module 3 工件2正反面放置参数。
+# 所有位置相对 body_base，长度单位为米，角度单位为度。
+# roll、pitch、yaw 均定义在工件局部坐标系，列表顺序即候选优先级。
+
+[shared]
+body_base_z_face_selection_max_angle_deg = 40.0
+allowed_handoff_weight_classes = ["SINGLE", "MULTIPLE"]
+use_multiple_holding_min_g = true
+rotation_convention = "local_rpy"
+target_xy_radius_m = 0.0
+xy_radius_factors = [0.0]
+
+[front]
+# release_z_candidates_m = [] 表示到 target 位直接松爪，不执行第二段 LIN。
+target_object_xyz_m = [0.507668, -0.028779, -0.300000]
+target_z_candidates_m = [-0.335]
+release_z_candidates_m = []
+
+# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 3 个 roll × 5 个 pitch × 6 个 yaw = 90。
+yaw_candidates_deg = [30.0, 0.0, 60.0, -45.0, -90.0, -135.0]
+roll_candidates_deg = [20.0, 30.0, 40.0]
+pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
+# 零候选：工件 +X/+Y/+Z 与 body_base +X/+Y/+Z 对齐。
+base_rpy_deg = [0.0, 0.0, 0.0]
+
+[reversed]
+# release_z_candidates_m = [] 表示到 target 位直接松爪，不执行第二段 LIN。
+target_object_xyz_m = [0.437668, 0.338779, -0.300000]
+target_z_candidates_m = [-0.335]
+release_z_candidates_m = []
+
+# 基准姿态先绕工件局部 X 翻转 180 度。
+# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 3 个 roll × 5 个 pitch × 5 个 yaw = 75。
+yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0]
+roll_candidates_deg = [0,-10.0,-20.0,10.0]
+pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
+base_rpy_deg = [180.0, 0.0, 0.0]

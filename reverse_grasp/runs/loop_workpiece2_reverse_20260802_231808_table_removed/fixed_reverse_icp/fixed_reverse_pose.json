@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "event": "workpiece_2_fixed_table_reverse_pose",
+  "face_definition": "Operator-confirmed tabletop reverse: STL +Z (= documented workpiece +Z) points into the table, and STL -Z faces the camera. No score-margin rejection was applied.",
+  "legacy_source_hypothesis": "reverse",
+  "frame_id": "head_d435i_color_optical_frame",
+  "object_frame": "workpiece2_top_view",
+  "R_object_stl": [
+    [
+      -1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "mask_index": 0,
+  "T_camera_object": [
+    [
+      -0.998405514,
+      -0.053066052,
+      -0.021701811,
+      -0.212937843
+    ],
+    [
+      0.024715522,
+      -0.746476191,
+      0.664943364,
+      0.127850796
+    ],
+    [
+      -0.051073632,
+      0.669557803,
+      0.74098796,
+      0.586941411
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "object_pose": {
+    "translation_m": [
+      -0.212937843,
+      0.127850796,
+      0.586941411
+    ],
+    "rotation_matrix": [
+      [
+        -0.998405514,
+        -0.053066052,
+        -0.021701811
+      ],
+      [
+        0.024715522,
+        -0.746476191,
+        0.664943364
+      ],
+      [
+        -0.051073632,
+        0.669557803,
+        0.74098796
+      ]
+    ]
+  },
+  "table_normal_camera": [
+    0.022040708,
+    -0.664947648,
+    -0.746564688
+  ],
+  "icp": {
+    "rmse_m": 0.004360736846062971,
+    "fitness": 0.6612142857142858,
+    "render_score_m": 0.008758726457100997,
+    "yaw_starts": 4,
+    "match_fraction": 0.8000691503154983,
+    "quality_gate_passed": true,
+    "yaw_selection": "operator_confirmed_fixed_table_reverse_yaw",
+    "yaw_index": 2,
+    "yaw_basis": "Operator-confirmed fixed tabletop-reverse yaw 2; ICP scores validate this pose but cannot change documented object axes."
+  },
+  "yaw_trials": [
+    {
+      "yaw_index": 0,
+      "rmse_m": 0.00473305203378195,
+      "fitness": 0.6375,
+      "render_score_m": 0.007506806931245068,
+      "render": {
+        "match_fraction": 0.7044688391390785,
+        "depth_mae_m": 0.0063246822878013816,
+        "weighted_feature_fraction": 0.04012269938650307
+      }
+    },
+    {
+      "yaw_index": 1,
+      "rmse_m": 0.004790530036742669,
+      "fitness": 0.6072142857142857,
+      "render_score_m": 0.007132179362418957,
+      "render": {
+        "match_fraction": 0.5390267093093613,
+        "depth_mae_m": 0.005288286199656401,
+        "weighted_feature_fraction": 0.011385503527902501
+      }
+    },
+    {
+      "yaw_index": 2,
+      "rmse_m": 0.004360736846062971,
+      "fitness": 0.6612142857142858,
+      "render_score_m": 0.008758726457100997,
+      "render": {
+        "match_fraction": 0.8000691503154983,
+        "depth_mae_m": 0.00795900305836299,
+        "weighted_feature_fraction": 0.05942091616248919
+      }
+    },
+    {
+      "yaw_index": 3,
+      "rmse_m": 0.0039321763340250514,
+      "fitness": 0.5246428571428572,
+      "render_score_m": 0.004717330774153998,
+      "render": {
+        "match_fraction": 0.47644567378338665,
+        "depth_mae_m": 0.0026231134692875453,
+        "weighted_feature_fraction": 0.0
+      }
+    }
+  ],
+  "artifacts": {
+    "axes_overlay": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/fixed_reverse_axes_overlay.png",
+    "pose_3d": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/fixed_reverse_pose_3d.png",
+    "yaw_cad_axes_overlays": [
+      "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/yaw_0_cad_axes_overlay.png",
+      "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/yaw_1_cad_axes_overlay.png",
+      "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/yaw_2_cad_axes_overlay.png",
+      "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/loop_workpiece2_reverse_20260802_231808_table_removed/fixed_reverse_icp/yaw_3_cad_axes_overlay.png"
+    ]
+  },
+  "created_at": 1785686656.1422741
+}

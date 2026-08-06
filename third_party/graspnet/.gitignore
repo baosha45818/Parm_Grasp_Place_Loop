@@ -1,0 +1,25 @@
+**/__pycache__/**
+*.ipynb
+**/.ipynb_checkpoints/**
+*.npy
+*.npz
+**/.vscode/**
+**/grasp_label*/**
+**/log*/**
+**/dump*/**
+**/build/**
+*.o
+*.so
+*.egg
+**/*.egg-info/**
+logs
+dataset/tolerance
+
+# Local runtime environments, model weights, and device-generated artifacts.
+.venv*/
+checkpoint/
+Log/
+deploy/**/output/
+deploy/calibration/output/
+example/**/video/
+example/**/*.jsonl

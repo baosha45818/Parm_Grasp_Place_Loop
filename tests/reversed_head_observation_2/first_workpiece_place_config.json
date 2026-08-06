@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "strategy": "reuse_first_workpiece_module9_force_servo",
+  "right_place_ready_joints_deg": [
+    102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196
+  ],
+  "module9_initial_right_joints_deg": [
+    22.43, 23.33, 0.52, 66.99, -62.20, -64.44, 25.51
+  ],
+  "module9_planner_config": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/config.hole_a_first_live_fast_return.json",
+  "right_idle_pose": "/home/dainanjun/zhuyiming/push_T/saved_poses/3.json",
+  "post_release_lift_m": 0.05,
+  "source": "first-workpiece simple_dual_arm_loop Module 8-2 -> Module 9 -> Module 10",
+  "operator_authorized_for_workpiece_2": true
+}

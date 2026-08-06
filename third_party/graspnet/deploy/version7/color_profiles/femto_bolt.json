@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "femto_dark_metal_workpiece",
+  "camera": "femto_bolt",
+  "enabled": true,
+  "mode": "exclude_table_like",
+  "color_space": "CIELab (OpenCV 8-bit Lab)",
+  "object_samples_rgb": [[39, 38, 34], [43, 41, 36], [44, 43, 38], [46, 45, 40], [52, 50, 44], [61, 58, 51]],
+  "max_lab_distance": 60.0,
+  "lab_l_range": [0, 110],
+  "table_samples_rgb": [[175, 184, 181], [190, 198, 196], [205, 212, 210], [220, 225, 222], [235, 238, 235]],
+  "max_table_lab_distance": 20.0,
+  "min_component_seed_points": 12,
+  "component_close_kernel_px": 5,
+  "source_capture": "dual_20260722_105205_277394/raw/femto_bolt",
+  "notes": "Table color is the only hard color rejection. object_samples_rgb is retained for audit/calibration, but rusty or highlighted workpiece pixels are kept unless they positively resemble the table."
+}

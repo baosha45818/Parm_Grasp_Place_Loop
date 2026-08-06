@@ -1,0 +1,115 @@
+{
+  "prediction_json": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/runs/full_reverse_20260802_010954/capture/convex_tab_grasp/convex_tab_grasp_prediction.json",
+  "left_finger_axis_camera": [
+    -0.88383128,
+    -0.36432745,
+    0.29344127
+  ],
+  "right_finger_axis_camera": [
+    0.88383128,
+    0.36432745,
+    -0.29344127
+  ],
+  "candidates": [
+    {
+      "table_approach_angle_deg": 90.0,
+      "side_tilt_about_tcp_y_deg": 0.0,
+      "T_camera_tcp": {
+        "translation_m": [
+          -0.28273883,
+          0.08194405,
+          0.60254405
+        ],
+        "rotation_matrix": [
+          [
+            -0.01998777,
+            -0.88383128,
+            0.4673786
+          ],
+          [
+            0.65610867,
+            -0.36432745,
+            -0.66089857
+          ],
+          [
+            0.75440168,
+            0.29344127,
+            0.58717146
+          ]
+        ]
+      },
+      "pregrasp_tcp_camera_m": [
+        -0.28153956,
+        0.04257753,
+        0.55727995
+      ]
+    },
+    {
+      "table_approach_angle_deg": 15.0,
+      "side_tilt_about_tcp_y_deg": 75.0,
+      "T_camera_tcp": {
+        "translation_m": [
+          -0.28273883,
+          0.08194405,
+          0.60254405
+        ],
+        "rotation_matrix": [
+          [
+            -0.45662627,
+            -0.88383128,
+            0.10165978
+          ],
+          [
+            0.80819242,
+            -0.36432745,
+            0.46269917
+          ],
+          [
+            -0.37191055,
+            0.29344127,
+            0.88066723
+          ]
+        ]
+      },
+      "pregrasp_tcp_camera_m": [
+        -0.25534125,
+        0.0334525,
+        0.62485868
+      ]
+    },
+    {
+      "table_approach_angle_deg": -15.0,
+      "side_tilt_about_tcp_y_deg": -75.0,
+      "T_camera_tcp": {
+        "translation_m": [
+          -0.28273883,
+          0.08194405,
+          0.60254405
+        ],
+        "rotation_matrix": [
+          [
+            0.44627984,
+            -0.88383128,
+            0.14027318
+          ],
+          [
+            -0.46856558,
+            -0.36432745,
+            -0.80480545
+          ],
+          [
+            0.7624176,
+            0.29344127,
+            -0.57672491
+          ]
+        ]
+      },
+      "pregrasp_tcp_camera_m": [
+        -0.30951562,
+        0.11005798,
+        0.55679899
+      ]
+    }
+  ],
+  "overlay": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/grasp/visualizations/full_reverse_20260802_010954/grasp_prediction_overlay.png"
+}

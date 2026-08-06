@@ -1,0 +1,19 @@
+# Default initial positions for scene's ros2_control fake system
+
+initial_positions:
+  left_arm_joint1: 0
+  left_arm_joint2: 0
+  left_arm_joint3: 0
+  left_arm_joint4: 0
+  left_arm_joint5: 0
+  left_arm_joint6: 0
+  left_arm_joint7: 0
+  left_hand_gripper_finger1_joint: 0
+  right_arm_joint1: 0
+  right_arm_joint2: 0
+  right_arm_joint3: 0
+  right_arm_joint4: 0
+  right_arm_joint5: 0
+  right_arm_joint6: 0
+  right_arm_joint7: 0
+  right_hand_joint_link1: 0

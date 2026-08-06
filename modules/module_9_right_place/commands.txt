@@ -1,0 +1,58 @@
+# 在仓库根目录 /home/dainanjun/Public/Parm_Grasp_Place_Loop 执行
+
+# 0. 抓取右腕 D405 的 RGB、对齐深度、深度伪彩图和元数据
+/home/dainanjun/Public/data_collector/.venv/bin/python3 modules/module_7_right_place/capture_right_d405_rgbd.py
+
+# 1. Dry-run：读取保存位姿，打印“上方 2 cm -> 目标点”两段轨迹
+python3 modules/module_7_right_place/go_saved_pose_from_above.py
+
+# 2. 实际运动：先 PTP 到保存点上方 2 cm，再 LIN 下降到保存点
+python3 modules/module_7_right_place/go_saved_pose_from_above.py --live
+
+# 3. 只回孔 A preinsert；不启动插入
+python3 modules/module_7_right_place/run_hole_a_insertion.py --config config.hole_a_first_live.json --live --return-to-preinsert-only
+
+# 4. 从 preinsert 开始，以一次连续 servo-pose session 执行孔 A 插入
+python3 modules/module_7_right_place/run_hole_a_insertion.py --config config.hole_a_first_live.json --live --already-at-preinsert --direct-cartesian-servo
+
+# 5. 数值 Z 减小 1 mm 的受控偏移试验（仅确认物理向下对应数值 Z 减小时使用）
+python3 modules/module_7_right_place/run_hole_a_insertion.py --config config.hole_a_first_live.json --live --already-at-preinsert --direct-cartesian-servo --driver-z-offset-m -0.001
+
+# 6. 采集
+/home/dainanjun/Public/data_collector/.venv/bin/python3 \
+  modules/module_7_right_place/capture_right_d405_rgbd.py
+
+7.
+cd /home/dainanjun/shurenbin/desktop_grasp
+/home/dainanjun/Public/data_collector/.venv/bin/python main.py --execute
+
+
+8.
+/home/dainanjun/Public/data_collector/.venv/bin/python modules/module_9_right_place/place_hole_a_wiggle.py   --live --confirm-live
+
+9.
+PY=/home/dainanjun/Public/data_collector/.venv/bin/python
+SCRIPT=/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/inspection_support/legacy_inspect/capture_selected_rgbd.py
+
+$PY $SCRIPT --list
+$PY $SCRIPT --camera 3
+
+
+10. 新工件
+        84.32130000000001,
+        28.6373,
+        -77.21470000000001,
+        74.9638,
+        -143.2233,
+        -35.1246,
+        -71.3301
+
+11.
+python3 modules/module_9_right_place/place_hole_a_wiggle_new_config.py \
+  --workpiece 2 \
+  --live --confirm-live
+
+12. 力传感器数据可视化
+/home/dainanjun/Public/data_collector/.venv/bin/python \
+  modules/module_9_right_place/plot_place_hole_a_log.py \
+  --all --workpiece 1

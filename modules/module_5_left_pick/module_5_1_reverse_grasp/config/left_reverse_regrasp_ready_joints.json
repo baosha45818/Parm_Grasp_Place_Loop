@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "arm": "left",
+  "motion": "planner_move_j_ptp",
+  "joint_unit": "deg",
+  "joint_angles_deg": [14.281, -29.886, -85.633, 102.504, 37.378, 56.016, 9.241],
+  "arrival_tolerance_deg": 0.5,
+  "arrival_timeout_s": 90.0,
+  "description": "Fixed left-arm ready pose after fresh head RGB-D capture and before reverse-workpiece grasp planning."
+}

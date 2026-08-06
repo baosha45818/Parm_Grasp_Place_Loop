@@ -1,0 +1,11 @@
+# Add after plucky_hjt_parm/docker-compose.handoff.yml.  The project itself is
+# already mounted at /handoff by that overlay; this selects the workpiece-2
+# generated collision config and its independent owner handshake state.
+services:
+  plucky_hjt_parm:
+    environment:
+      - HANDOFF_CONFIG_FILE=/handoff/tests/reversed_head_observation_2/handoff_config.ready.json
+      - HANDOFF_ATTACHMENT_STATE_FILE=/handoff_state_workpiece_2.json
+    volumes:
+      - /home/dainanjun/Public/Parm_Grasp_Place_Loop/tests/reversed_head_observation_2/handoff_attachment_state.json:/handoff_state_workpiece_2.json:rw
+

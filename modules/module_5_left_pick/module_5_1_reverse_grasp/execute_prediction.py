@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""模块 5-1：消费 Module 4-1 的唯一反抓预测并执行左臂反抓。
+
+该文件不控制云台、不采集图像、不运行 SAM2/ICP。云台与抓取点预测完全属于
+Module 4-1；本模块仅负责左臂到预备关节位并执行已确认的真实抓取。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+
+MODULE_DIR = Path(__file__).resolve().parent
+LOOP_ROOT = MODULE_DIR.parents[2]
+IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
+CONFIG_DIR = MODULE_DIR / "config"
+READY_JOINTS = CONFIG_DIR / "left_reverse_regrasp_ready_joints.json"
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--prediction-file", type=Path, required=True)
+    parser.add_argument("--planner-host", default="127.0.0.1")
+    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument(
+        "--speed",
+        type=float,
+        default=0.1 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0")),
+    )
+    parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=[90.0, 15.0, -15.0])
+    parser.add_argument("--body-z-down-m", type=float, default=0.020)
+    return parser.parse_args()
+
+
+def load_prediction(prediction_file: Path) -> tuple[dict, Path, Path, Path]:
+    payload = json.loads(prediction_file.read_text(encoding="utf-8"))
+    if payload.get("event") != "module_4_1_reverse_grasp_predicted":
+        raise RuntimeError("prediction-file 不是 Module 4-1 的反抓预测结果")
+    if int(payload.get("candidate_count", 0)) != 1:
+        raise RuntimeError("Module 5-1 只接受唯一的反抓预测")
+    capture_dir = Path(payload["capture_dir"]).resolve()
+    grasp_json = Path(payload["grasp_json"]).resolve()
+    body_head = Path(payload.get("body_head_calibration", CONFIG_DIR / "body_head_calibration.json")).resolve()
+    if not (capture_dir / "metadata.json").is_file() or not grasp_json.is_file() or not body_head.is_file():
+        raise RuntimeError("Module 4-1 预测引用的 RGB-D 或 grasp_poses.json 不存在")
+    if len(json.loads(grasp_json.read_text(encoding="utf-8"))) != 1:
+        raise RuntimeError("grasp_poses.json 已不再是唯一候选，拒绝执行")
+    return payload, capture_dir, grasp_json, body_head
+
+
+def move_left_to_ready(capture_dir: Path, planner_host: str, arm_host: str, speed: float) -> None:
+    """在执行抓取前到固定预备位，并由 Arm 状态反馈确认到位。"""
+    sys.path[:0] = [str(LOOP_ROOT), str(LOOP_ROOT / "tool")]
+    from loop_config import LoopConfig
+    from parm_sdk import Arm
+    from planner_runtime import PlannerRuntime
+
+    config = json.loads(READY_JOINTS.read_text(encoding="utf-8"))
+    target = [float(value) for value in config["joint_angles_deg"]]
+    if config.get("arm") != "left" or len(target) != 7:
+        raise RuntimeError(f"无效左臂反抓预备位配置: {READY_JOINTS}")
+    runtime = PlannerRuntime(
+        LoopConfig(
+            planner_host=planner_host,
+            execute_url="http://127.0.0.1:5667/middle/waypoint/execute",
+            base_frame="body_base",
+            left_group="left_arm",
+            right_group="right_arm",
+            left_tool_frame="left_eef",
+            right_tool_frame="right_hand_transfer_end",
+            max_velocity=speed,
+            max_acceleration=speed,
+            idle_poll_seconds=0.2,
+            live=True,
+            poses={},
+        )
+    )
+    event = {"motion": config["motion"], "target_joint_angles_deg": target, "started_at": time.time()}
+    try:
+        runtime.open(required_frames={"body_base", "left_eef"})
+        print(f"[module-5-1] Planner RRTStar 到反抓预备位 (left deg): {target}")
+        runtime.move_left_joints(target, planner="rrtstar")
+        deadline = time.monotonic() + float(config["arrival_timeout_s"])
+        tolerance = float(config["arrival_tolerance_deg"])
+        last_error = None
+        with Arm(host=arm_host) as arm:
+            while time.monotonic() < deadline:
+                state = arm.get_state() or {}
+                actual = ((state.get("state") or {}).get("left") or {}).get("position") or []
+                if len(actual) == 7:
+                    error = (np.asarray(actual, dtype=float) - target + 180.0) % 360.0 - 180.0
+                    last_error = float(np.max(np.abs(error)))
+                    if last_error <= tolerance:
+                        event.update(status="reached", max_joint_error_deg=last_error)
+                        print(f"[module-5-1] 反抓预备位已到位，最大关节误差={last_error:.3f}deg")
+                        return
+                time.sleep(0.05)
+        raise RuntimeError(f"左臂反抓预备位未到达；最大关节误差={last_error}")
+    except Exception as exc:
+        event.update(status="failed", error=str(exc))
+        raise
+    finally:
+        event["finished_at"] = time.time()
+        (capture_dir / "motion_before_reverse_grasp.json").write_text(
+            json.dumps(event, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        runtime.close()
+
+
+def execute_grasp(args: argparse.Namespace, grasp_json: Path, body_head: Path) -> None:
+    command = [
+        str(Path(sys.executable)),
+        str(IMPLEMENTATION_DIR / "execute_confirmed_grasp.py"),
+        "--grasp-json", str(grasp_json),
+        "--body-head", str(body_head),
+        "--planner-host", args.planner_host,
+        "--arm-host", args.arm_host,
+        "--gripper-host", args.gripper_host,
+        "--speed", str(args.speed),
+        "--approach-angles-deg", *(str(value) for value in args.approach_angles_deg),
+        "--body-z-down-m", str(args.body_z_down_m),
+        "--execute",
+    ]
+    print("[module-5-1] 执行已确认反抓: " + " ".join(command))
+    import subprocess
+    subprocess.run(command, cwd=IMPLEMENTATION_DIR, check=True)
+
+
+def main() -> int:
+    args = parse_args()
+    if not args.execute:
+        raise RuntimeError("Module 5-1 真实反抓必须显式传入 --execute")
+    _, capture_dir, grasp_json, body_head = load_prediction(args.prediction_file)
+    move_left_to_ready(capture_dir, args.planner_host, args.arm_host, args.speed)
+    execute_grasp(args, grasp_json, body_head)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)

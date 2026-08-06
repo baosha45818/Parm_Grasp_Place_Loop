@@ -1,0 +1,5 @@
+{
+  "reference_color_size_wh": [1280, 720],
+  "safe_roi_xywh": [0, 180, 760, 540],
+  "description": "Left-to-central tabletop work zone in the 1280x720 head RGB image. This is the former 848x480 ROI mapped by the same normalized bounds: x=0..760 and y=180..720."
+}

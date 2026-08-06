@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+    <xacro:macro name="身体" params="prefix parent *origin">
+        <link name="${prefix}plate">
+            <inertial>
+                <origin xyz="0.0075914 0.001027 0.33127" rpy="0 0 0"/>
+                <mass value="20.141"/>
+                <inertia ixx="0.58443" ixy="-0.00076085" ixz="-0.0017574" iyy="0.60128" iyz="-0.0033173" izz="0.55683"/>
+            </inertial>
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <mesh filename="package://anchor_config/description/meshes/body/plate.STL"/>
+                </geometry>
+                <material name="">
+                    <color rgba="1 1 1 1"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <mesh filename="package://anchor_config/description/meshes/body/plate.STL"/>
+                </geometry>
+            </collision>
+        </link>
+        <joint name="${prefix}joint_plate" type="fixed">
+            <xacro:insert_block name="origin" />
+            <parent link="${parent}" />
+            <child link="${prefix}plate" />
+        </joint>
+        <link name="${prefix}base"/>
+        <link name="${prefix}left_link"/>
+        <link name="${prefix}right_link"/>
+        <link name="${prefix}middle_link">
+            <inertial>
+                <origin xyz="0.0076584 0.00055 2.2204E-16" rpy="0 0 0"/>
+                <mass value="0.27089"/>
+                <inertia ixx="0.00029188" ixy="-1.3168E-20" ixz="-2.8231E-21" iyy="0.00012895" iyz="4.6322E-21" izz="0.00035415"/>
+            </inertial>
+            <visual>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <mesh filename="package://anchor_config/description/meshes/body/middle_link.STL"/>
+                </geometry>
+                <material name="">
+                    <color rgba="1 1 1 1"/>
+                </material>
+            </visual>
+            <collision>
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+                <geometry>
+                    <mesh filename="package://anchor_config/description/meshes/body/middle_link.STL"/>
+                </geometry>
+            </collision>
+        </link>
+        <joint name="${prefix}joint_base" type="fixed">
+            <origin xyz="0 0 1.1763" rpy="0 0 0"/>
+            <parent link="${prefix}plate"/>
+            <child link="${prefix}base"/>
+            <axis xyz="0 0 0"/>
+        </joint>
+        <joint name="${prefix}joint_left" type="fixed">
+            <origin xyz="-5.9285E-05 0.10253 -0.0014458" rpy="0 -1.3614 -1.5708"/>
+            <parent link="${prefix}base"/>
+            <child link="${prefix}left_link"/>
+            <axis xyz="0 0 0"/>
+        </joint>
+        <joint name="${prefix}joint_right" type="fixed">
+            <origin xyz="-6.5522E-05 -0.10253 -0.0014374" rpy="0 -1.3614 1.5708"/>
+            <parent link="${prefix}base"/>
+            <child link="${prefix}right_link"/>
+            <axis xyz="0 0 0"/>
+        </joint>
+                <joint name="${prefix}joint_middle" type="revolute">
+            <origin xyz="0.125 0 -0.16818" rpy="0 0 0"/>
+            <parent link="${prefix}base"/>
+            <child link="${prefix}middle_link"/>
+            <axis xyz="0 1 0"/>
+            <limit lower="-1.2" upper="1.2" effort="5" velocity="5"/>
+        </joint>
+    </xacro:macro>
+</robot>

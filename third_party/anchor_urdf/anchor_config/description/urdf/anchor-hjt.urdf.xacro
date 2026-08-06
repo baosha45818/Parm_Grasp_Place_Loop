@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://ros.org/wiki/xacro" name="stand-hjt">
+
+	<!-- <link name="base_link" /> -->
+
+    <!-- 身体 -->
+    <xacro:include filename="$(find anchor_config)/description/urdf/body/body.urdf.xacro" />
+    <xacro:身体 prefix="body_" parent="base_link">
+		<origin xyz="0 0 0" rpy="0 0 0" /> 
+	</xacro:身体>
+
+	<!-- 头部 -->
+	<xacro:include filename="$(find anchor_config)/description/urdf/head/head.urdf.xacro" />
+    <xacro:头部 prefix="head_" parent="body_base">
+		<origin xyz="0 0 0" rpy="0 0 0" /> 
+	</xacro:头部>
+
+    <!-- 左臂 -->
+    <xacro:include filename="$(find anchor_config)/description/urdf/arm/left/left_arm.urdf.xacro" />
+    <xacro:左臂 prefix="left_arm_" parent="body_left_link">
+		<origin xyz="0 0 0" rpy="0 0 0" /> 
+	</xacro:左臂>
+
+	<!-- 右臂 -->
+    <xacro:include filename="$(find anchor_config)/description/urdf/arm/right/right_arm.urdf.xacro" />
+    <xacro:右臂 prefix="right_arm_" parent="body_right_link">
+		<origin xyz="0 0 0" rpy="0 0 0" /> 
+	</xacro:右臂>
+
+	<!-- 左夹爪(大寰 AG95,固定姿态) -->
+    <xacro:include filename="$(find anchor_config)/description/urdf/hand_tool/left/left_hand.urdf.xacro" />
+    <xacro:左手 prefix="left_hand_" parent="left_arm_end_link">
+		<origin xyz="0 0 0" rpy="0 0 0" />
+	</xacro:左手>
+
+	<!-- 右夹爪 -->
+    <xacro:include filename="$(find anchor_config)/description/urdf/hand_tool/right/right_hand.urdf.xacro" />
+    <xacro:右手 prefix="right_hand_" parent="right_arm_end_link">
+		<origin xyz="0 0 0" rpy="0 0 0" /> 
+	</xacro:右手>
+
+	<!-- 左相机 -->
+    <link name="left_arm_cam"/>
+	<joint name="left_joint_cam" type="fixed">
+		<origin xyz="0.10586 0 0.09515" rpy="0 0.43633 0"/>
+		<parent link="left_arm_end_link"/>
+		<child link="left_arm_cam"/>
+	</joint>
+
+	<!-- 右相机 -->
+    <link name="right_arm_cam"/>
+	<joint name="right_joint_cam" type="fixed">
+		<origin xyz="0.10586 0 0.09515" rpy="0 0.43633 0"/>
+		<parent link="right_arm_end_link"/>
+		<child link="right_arm_cam"/>
+	</joint>
+
+	<!-- 胸部相机 -->
+    <link name="body_cam"/>
+	<joint name="body_joint_cam" type="fixed">
+		<origin xyz="0.04 0 0" rpy="0 0 0"/>
+		<parent link="body_middle_link"/>
+		<child link="body_cam"/>
+	</joint>
+
+	<!-- 头部相机 -->
+    <link name="head_cam"/>
+	<joint name="head_joint_cam" type="fixed">
+		<origin xyz="0.08305 0.04376 0.11778" rpy="0 0.1745 0"/>
+		<parent link="head_link2"/>
+		<child link="head_cam"/>
+	</joint>
+    
+</robot>
