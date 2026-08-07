@@ -1,0 +1,26 @@
+# Module 7 工件1预抓取与闭爪后“调整到右手可直接抓取范围”的候选。
+#
+# 工件1语义坐标系：+X 从窄尾指向宽头，+Y 为正面视图左侧，+Z 为正面外法向。
+# front_base_rpy_deg=[0,0,0] 定义正面向 body_base +Z，+X/+Y 分别平行
+# body_base +X/+Y；局部 R/P/Y 均绕该工件自身局部轴，不相对抬起姿态。
+
+[turn]
+planner = "rrtstar"
+front_base_rpy_deg = [0.0, 0.0, 0.0]
+
+# 到达预抓取点时，绕 TCP 自身局部 X/Y/Z 的 R/P/Y 候选（deg）。
+# 列表顺序即搜索优先级；组合顺序为对称夹爪方向 -> roll -> pitch -> yaw，
+# 因此 yaw 变化最快。总数还要乘以两个对称夹爪方向，轴夹角过滤前共 1666 个。
+pregrasp_roll_candidates_deg = [0.0, 10.0, -10.0]
+pregrasp_pitch_candidates_deg = [0.0, 15.0, -15.0, 30.0, -30.0]
+pregrasp_yaw_candidates_deg = [0.0, 10.0, -10.0]
+
+# 相对闭爪、抬升后实际工件中心的 body_base 平移候选（m）。
+x_offset_candidates_m = [0.0, 0.1]
+y_offset_candidates_m = [-0.3, -0.2, -0.1]
+z_offset_candidates_m = [0.0]
+
+# 工件自身局部 R/P/Y 候选（deg）；列表顺序即优先级。
+roll_candidates_deg = [0.0, 10.0, -10.0, 20.0, -20.0, 30.0, -30.0]
+pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
+yaw_candidates_deg = [45.0, 60.0, 30.0, 0.0, 75.0, 15.0]

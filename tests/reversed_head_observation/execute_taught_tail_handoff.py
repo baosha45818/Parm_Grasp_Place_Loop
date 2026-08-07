@@ -60,29 +60,19 @@ from tests.reversed_head_observation.preflight_handoff import (
     trajectory_summary,
     validate_icp_for_motion,
 )
+from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
 
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "handoff_config.json"
 DEFAULT_EXECUTE_URL = "http://127.0.0.1:5667/middle/waypoint/execute"
-DEFAULT_RIGHT_GRASP_JOINTS_DEG = [
-    137.9291,
-    63.7194,
-    -224.1829,
-    -75.0421,
-    146.0811,
-    -12.4104,
-    62.1332,
-]
-DEFAULT_RIGHT_PLACE_READY_JOINTS_DEG = [
-    -5.6937,
-    43.1502,
-    -112.7074,
-    -53.3867,
-    77.7186,
-    -39.9765,
-    28.4257,
-]
+_WORKPIECE_1_HANDOFF = load_workpiece_handoff_profile("1")
+DEFAULT_RIGHT_GRASP_JOINTS_DEG = list(
+    _WORKPIECE_1_HANDOFF["right_handoff"]["grasp_joints_deg"]
+)
+DEFAULT_RIGHT_PLACE_READY_JOINTS_DEG = list(
+    _WORKPIECE_1_HANDOFF["right_handoff"]["place_ready_joints_deg"]
+)
 REQUIRE_CONFIRMATION = False
 
 
@@ -145,7 +135,10 @@ def parse_args() -> argparse.Namespace:
         help="最终示教关节位的最大单关节到位误差，默认0.5deg",
     )
     parser.add_argument(
-        "--expected-center-m", type=float, nargs=3, default=[0.42, 0.20, 0.12]
+        "--expected-center-m",
+        type=float,
+        nargs=3,
+        default=list(_WORKPIECE_1_HANDOFF["handoff"]["center_body_m"]),
     )
     parser.add_argument(
         "--taught-object-tilt-deg",

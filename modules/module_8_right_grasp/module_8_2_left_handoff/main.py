@@ -32,8 +32,8 @@ from modules.module_8_right_grasp.module_8_2_left_handoff.gripper_compat import 
     read_gripper_state as read_gripper_state_compatible,
     release_left_gripper,
 )
-from modules.workpiece_2_handoff_profile import (
-    load_workpiece_2_handoff_profile,
+from modules.reverse_grasp_handoff_positions import (
+    load_workpiece_handoff_profile,
 )
 PYTHON = ROOT / ".venv/bin/python"
 if not PYTHON.is_file():
@@ -47,74 +47,16 @@ if __name__ == "__main__" and Path(sys.executable).resolve() != PYTHON.resolve()
             *sys.argv[1:],
         ],
     )
-# 旧低位交接中心：WORKPIECE_1_HANDOFF_CENTER_BODY_M = [0.42, 0.20, 0.12]
-WORKPIECE_1_HANDOFF_CENTER_BODY_M = [0.42, 0.10, 0.25]
-# 之前的第一类右手交接示教位（旧低位，仅保留追溯，不再参与运行）：
-# WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG = [
-#     140.76377027358308,
-#     62.196061926698746,
-#     -224.71147359413794,
-#     -78.53473274909176,
-#     147.66658974190358,
-#     -10.32597076936349,
-#     57.48824167350307,
-# ]
-# 上一版第一类高位交接示教位（仅保留追溯，不再参与运行）：
-# WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG = [
-#     163.7964,
-#     70.7547,
-#     -81.6257,
-#     73.309,
-#     -8.5007,
-#     -3.3398,
-#     90.8418,
-# ]
-# 当前第一类高位交接现场示教位。公共交接状态机由其FK建立
-# “名义工件 -> 右TCP”关系，再按本轮实时左TCP × ICP关系修正最终抓取点。
-# WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG = [
-#     138.4509,
-#     32.2229,
-#     -15.4880,
-#     82.7312,
-#     -54.506,
-#     19.9923,
-#     52.7838,
-# ]
-
-WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG = [
-        164.5464,
-        56.8637,
-        -68.9227,
-        78.2515,
-        -24.3923,
-        3.9098,
-        78.3202
-]
-# Historical name retained for standalone imports; it now resolves to the
-# current workpiece-1 taught grasp rather than the commented legacy pose.
+# 交接预设位全部存于 modules/reverse_grasp_handoff_positions.toml。
+# 下面四个名称只保留给旧的独立脚本 import；总控执行路径会在每次运行时重读 TOML。
+_WORKPIECE_1_DEFAULTS = load_workpiece_handoff_profile("1")
+WORKPIECE_1_HANDOFF_CENTER_BODY_M = list(_WORKPIECE_1_DEFAULTS["handoff"]["center_body_m"])
+WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG = list(_WORKPIECE_1_DEFAULTS["right_handoff"]["grasp_joints_deg"])
+WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG = list(_WORKPIECE_1_DEFAULTS["right_handoff"]["place_ready_joints_deg"])
+WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG = float(_WORKPIECE_1_DEFAULTS["right_handoff"]["place_ready_tolerance_deg"])
 V2_RIGHT_GRASP_JOINTS_DEG = list(WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG)
-# 第二类工件放置准备位（仅保留追溯；第一类流程不再使用）：
-# [102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196]
-# 第一类工件原 right_place_ready，沿用既有 Module 8 -> Module 9 接口。
-WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG = [
-    30.4353,
-    23.8637,
-    0.5905,
-    66.3409,
-    -62.0439,
-    -64.3304,
-    25.7149,
-]
-WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG = 0.5
-# Compatibility aliases for historical standalone imports.  They resolve to
-# the original workpiece-1 Module 8-2 -> Module 9 transition; workpiece 2 keeps
-# its different target in the independent handoff profile.
-V2_RIGHT_ABOVE_MODULE_9_JOINTS_DEG = list(
-    WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG
-)
-V2_RIGHT_ABOVE_MODULE_9_TOLERANCE_DEG = (
-    WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG
-)
+V2_RIGHT_ABOVE_MODULE_9_JOINTS_DEG = list(WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG)
+V2_RIGHT_ABOVE_MODULE_9_TOLERANCE_DEG = WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG
 WORKPIECE_2_RUNTIME_DIR = Path(__file__).resolve().parent / "workpiece_2_runtime"
 WORKPIECE_2_HANDOFF_EXECUTOR = (
     WORKPIECE_2_RUNTIME_DIR / "execute_icp_tail_handoff.py"
@@ -191,17 +133,20 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
     from tool.planner_runtime import PlannerRuntime
     from tests.reversed_head_observation import execute_taught_tail_handoff as handoff
 
-    shared_left_profile = load_workpiece_2_handoff_profile()
-    high_handoff_center = list(WORKPIECE_1_HANDOFF_CENTER_BODY_M)
+    profile = load_workpiece_handoff_profile("1")
+    right_handoff = profile["right_handoff"]
+    high_handoff_center = list(profile["handoff"]["center_body_m"])
+    high_grasp_joints_deg = list(right_handoff["grasp_joints_deg"])
+    place_ready_joints_deg = list(right_handoff["place_ready_joints_deg"])
+    place_ready_tolerance_deg = float(right_handoff["place_ready_tolerance_deg"])
     # This taught pose was recorded directly at the new high handoff center;
     # applying the old->new center TF delta again would double-count the move.
     taught_grasp_tcp = handoff.validate_transform(
         handoff.taught_right_tcp_from_joints(
-            list(WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG)
+            high_grasp_joints_deg
         ),
         "workpiece_1_updated_high_right_grasp",
     )
-    high_grasp_joints_deg = list(WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG)
 
     original_plan_joint = PlannerRuntime.plan_joint_trajectory
     original_validate_arm_plan = handoff.validate_arm_joint_plan
@@ -226,7 +171,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
             )
         is_above_module_9 = (
             handoff.max_joint_error_deg(
-                list(joints_deg), WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG
+                list(joints_deg), place_ready_joints_deg
             )
             <= 1e-6
         )
@@ -241,7 +186,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
             )
         is_exact_taught_grasp = (
             handoff.max_joint_error_deg(
-                list(joints_deg), WORKPIECE_1_RIGHT_GRASP_JOINTS_DEG
+                list(joints_deg), high_grasp_joints_deg
             )
             <= 1e-6
         )
@@ -329,18 +274,18 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
             handoff.wait_for_joint_target(
                 args.arm_host,
                 2,
-                WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG,
-                WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG,
+                place_ready_joints_deg,
+                place_ready_tolerance_deg,
                 "workpiece-1 right place-ready",
                 timeout_s=90.0,
             )
             return {
                 "gate": "joint_feedback",
                 "target_joints_deg": list(
-                    WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG
+                    place_ready_joints_deg
                 ),
                 "tolerance_deg": float(
-                    WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG
+                    place_ready_tolerance_deg
                 ),
             }
         return original_wait_for_pose_close(
@@ -400,11 +345,11 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         "--arrival-translation-tolerance-mm",
         "1.0",
         "--right-place-ready-joints-deg",
-        *[str(value) for value in WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG],
+        *[str(value) for value in place_ready_joints_deg],
         "--right-place-ready-tolerance-deg",
-        str(WORKPIECE_1_RIGHT_PLACE_READY_TOLERANCE_DEG),
+        str(place_ready_tolerance_deg),
         "--left-return-joints-deg",
-        *[str(value) for value in shared_left_profile["left_return_joints_deg"]],
+        *[str(value) for value in profile["left_return_joints_deg"]],
         *(
             ["--right-place-ready-file", str(args.right_place_ready_file)]
             if args.right_place_ready_file
@@ -479,7 +424,7 @@ def write_right_place_ready_marker(
 
 def execute_workpiece_2_handoff(result: Path, args: argparse.Namespace) -> int:
     """Run only workpiece-2 handoff; final right placement remains Module 9."""
-    profile = load_workpiece_2_handoff_profile()
+    profile = load_workpiece_handoff_profile("2")
     handoff = profile["handoff"]
     right_handoff = profile["right_handoff"]
     for path, label in (

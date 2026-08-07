@@ -29,6 +29,7 @@ from graspnet_client import infer, infer_batch, status as graspnet_status  # noq
 from pointcloud_preprocess import prepare_capture  # noqa: E402
 from workpiece2_cloud_thickening import (  # noqa: E402
     build_thickened_inference_cloud,
+    rank_candidate_indices_by_steep_surface,
     validate_args as validate_workpiece2_cloud_thickening_args,
 )
 
@@ -36,6 +37,41 @@ from workpiece2_cloud_thickening import (  # noqa: E402
 SERVICE_JOBS = HERE / "jobs"
 _BASE_BUILD_PARSER = planner_execute.build_parser
 NO_GRASP_EXIT_CODE = 20
+WEIGHT_CONFIG_PATH = HERE.parents[3] / "config" / "grasp_weight_thresholds.conf"
+
+
+def load_shared_weight_defaults() -> dict[str, float | int]:
+    """Read the Loop-wide weight settings for direct Python invocations too."""
+    required = {
+        "WEIGHT_EMPTY_MAX_G": "weight_empty_max_g",
+        "WEIGHT_SINGLE_MIN_G": "weight_single_min_g",
+        "WEIGHT_SINGLE_MAX_G": "weight_single_max_g",
+        "WEIGHT_MULTIPLE_MIN_G": "weight_multiple_min_g",
+        "WEIGHT_MAX_AXIS_MAD_N": "weight_max_axis_mad_n",
+        "WEIGHT_CHECK_SAMPLES": "weight_check_samples",
+        "WEIGHT_CHECK_TIMEOUT_S": "weight_check_timeout_s",
+        "WEIGHT_CHECK_SETTLE_S": "weight_check_settle_s",
+    }
+    if not WEIGHT_CONFIG_PATH.is_file():
+        raise FileNotFoundError(f"共享重量配置不存在: {WEIGHT_CONFIG_PATH}")
+
+    values: dict[str, str] = {}
+    for raw_line in WEIGHT_CONFIG_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator:
+            raise ValueError(f"共享重量配置格式错误: {raw_line!r}")
+        values[key.strip()] = value.strip()
+
+    missing = [key for key in required if key not in values]
+    if missing:
+        raise ValueError(f"共享重量配置缺少字段: {missing}")
+    result: dict[str, float | int] = {}
+    for source, target in required.items():
+        result[target] = int(values[source]) if source == "WEIGHT_CHECK_SAMPLES" else float(values[source])
+    return result
 
 
 def print_elapsed(label: str, started: float) -> float:
@@ -46,17 +82,10 @@ def print_elapsed(label: str, started: float) -> float:
 
 def build_parser():
     parser = _BASE_BUILD_PARSER()
-    # Version7 accepts one continuous practical single-workpiece band.  The
-    # shared weight-check module deliberately requires strict gaps between
-    # classes, so use machine-epsilon gaps at the two boundaries: <=30 g is
-    # EMPTY, >=130 g is MULTIPLE, and every physically representable measured
-    # value between them is SINGLE.  The epsilon avoids changing the shared
-    # module used by older flows.
+    # The Shell entry and direct Python entry share one editable Loop config.
+    weight_defaults = load_shared_weight_defaults()
     parser.set_defaults(
-        weight_empty_max_g=30.0,
-        weight_single_min_g=30.000000001,
-        weight_single_max_g=129.999999999,
-        weight_multiple_min_g=130.0,
+        **weight_defaults,
         weight_contiguous_single_band=True,
         # The resident Camera Broker enables D405 hole filling by default.
         # Keep the front-end's expected configuration identical so its
@@ -113,8 +142,8 @@ def build_parser():
     )
     group.add_argument(
         "--grasp-downward-probe-m", type=float, default=0.0,
-        help=("optional additional final descent along arm1_base -Z from the predicted grasp TCP (meters); "
-              "Version7 defaults to zero so the LIN descent ends exactly at the predicted grasp point"),
+        help=("signed final Z adjustment from the predicted grasp TCP in arm1_base (meters): "
+              "positive descends along -Z, negative raises along +Z; Version7 defaults to zero"),
     )
     group.add_argument(
         "--stop-after-graspup",
@@ -164,6 +193,22 @@ def build_parser():
         "--workpiece2-cloud-thickening-min-plane-angle-deg", type=float, default=65.0,
         help=("only extrude local planes at least this angle from the table "
               "(default: 65; vertical is 90)"),
+    )
+    group.add_argument(
+        "--workpiece2-steep-surface-priority", action=argparse.BooleanOptionalAction,
+        default=True,
+        help=("workpiece-2 only: rank candidates whose centre and jaw-contact samples are near "
+              "physical D405 surfaces >= the configured table angle before raw GraspNet score"),
+    )
+    group.add_argument(
+        "--workpiece2-steep-surface-contact-distance-m", type=float, default=.015,
+        help=("maximum distance from a candidate centre/jaw-contact sample to a physical steep "
+              "surface for workpiece-2 ranking (default: 0.015 m)"),
+    )
+    group.add_argument(
+        "--workpiece2-steep-surface-min-score-ratio", type=float, default=.60,
+        help=("only a steep-surface candidate whose raw GraspNet score is at least this ratio of "
+              "the frame best score may be promoted (default: 0.60)"),
     )
     return parser
 
@@ -584,8 +629,32 @@ def find_selected_grasp(args, cycle_root: Path) -> tuple[dict | None, tuple | No
         indices = filter_grasp_edge_clearance(
             args, grasps, sources, indices, object_summary, merged.parent,
         )
+        indices, steep_surface_record = rank_candidate_indices_by_steep_surface(
+            args, d405_run / "d405", grasps, indices,
+        )
+        (merged.parent / "workpiece2_steep_surface_priority.json").write_text(
+            json.dumps(steep_surface_record, indent=2), encoding="utf-8"
+        )
+        if steep_surface_record.get("reason") == "preferred_steep_surface_candidates_ranked_first":
+            print(
+                "[workpiece-2] steep-surface priority: preferred {}/{} candidates "
+                "({} high-score eligible; plane-to-table>={:.1f}deg; contact distance<={:.1f}mm; "
+                "score floor={:.3f})".format(
+                    steep_surface_record["preferred_candidates"], len(indices),
+                    steep_surface_record["priority_eligible_candidates"],
+                    float(steep_surface_record["minimum_plane_to_table_angle_deg"]),
+                    float(args.workpiece2_steep_surface_contact_distance_m) * 1000.0,
+                    float(steep_surface_record["raw_score_priority_floor"]),
+                )
+            )
+        elif bool(args.enable_workpiece2_cloud_thickening):
+            print(
+                "[workpiece-2] steep-surface priority fallback: {}; preserving raw GraspNet score order".format(
+                    steep_surface_record.get("reason", "unavailable")
+                )
+            )
         if len(indices):
-            selected_index = int(indices[np.argmax(grasps[indices, 0])])
+            selected_index = int(indices[0])
             selected = version5.grasp_result(merged.parent, grasps[selected_index])
             selected["source_grasp_index"] = selected_index
             selected["grasp_source"] = str(sources[selected_index])
@@ -617,7 +686,9 @@ def build_ranked_planner_candidates(
     args, grasps: np.ndarray, sources: np.ndarray, indices: np.ndarray, d405_run: Path,
 ) -> list[dict]:
     """Keep the nearest parallel-jaw-equivalent orientation for each ranked grasp."""
-    ranked_indices = indices[np.argsort(grasps[indices, 0])[::-1]]
+    # find_selected_grasp has already applied the W2 steep-surface preference
+    # (or the exact legacy raw-score fallback) to this ordered index array.
+    ranked_indices = np.asarray(indices, dtype=np.int64)
     current_eef_rotation = version5.capture_eef_rotation(
         d405_run, version5.load_wrist_calibration(Path(args.wrist_calibration))
     )
@@ -662,11 +733,13 @@ def build_ranked_planner_candidates(
         else:
             plan["opening_policy"] = "predicted_width_plus_configured_margin"
         probe_m = float(args.grasp_downward_probe_m)
-        if probe_m > 0.0:
+        if probe_m != 0.0:
             # Keep the full GraspNet orientation and the active grasp-center
             # model. Only the final target is translated vertically in
-            # arm1_base, so Planner checks the configured probe as a real LIN
-            # motion in both legacy-TCP and direct-left_eef modes.
+            # arm1_base, so Planner checks the configured signed adjustment as
+            # a real LIN motion in both legacy-TCP and direct-left_eef modes.
+            # Positive values descend; negative values raise the final
+            # closure point while leaving pregrasp unchanged.
             predicted_tcp = np.asarray(plan["grasp_center_base_m"], dtype=np.float64)
             probed_tcp = predicted_tcp - np.array([0.0, 0.0, probe_m], dtype=np.float64)
             predicted_eef = np.asarray(plan["grasp_eef_pose"], dtype=np.float64)
@@ -921,8 +994,8 @@ def main() -> None:
         or not 0.0 < float(args.empty_failure_orientation_deg) <= 180.0
     ):
         raise RuntimeError("--empty-failure-orientation-deg must be in (0, 180]")
-    if not np.isfinite(float(args.grasp_downward_probe_m)) or not 0.0 <= float(args.grasp_downward_probe_m) <= 0.05:
-        raise RuntimeError("--grasp-downward-probe-m must be finite and in [0, 0.05]")
+    if not np.isfinite(float(args.grasp_downward_probe_m)) or not -0.05 <= float(args.grasp_downward_probe_m) <= 0.05:
+        raise RuntimeError("--grasp-downward-probe-m must be finite and in [-0.05, 0.05]; positive=down, negative=up")
     profiles = [("D405", args.d405_color_profile)]
     if not args.disable_femto:
         profiles.append(("Femto", args.femto_color_profile))

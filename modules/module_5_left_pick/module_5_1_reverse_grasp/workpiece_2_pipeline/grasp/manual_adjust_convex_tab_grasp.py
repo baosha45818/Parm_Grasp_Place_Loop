@@ -28,6 +28,11 @@ from execute_convex_tab_grasp import (  # noqa: E402
     wait_left, within_here,
 )
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
+from modules.module_5_left_pick.reverse_grasp_weight_check import (
+    POST_CLOSE_CHECK_LIFT_M,
+    capture_open_gripper_baseline,
+    verify_object_after_lift,
+)
 
 
 @contextmanager
@@ -64,7 +69,8 @@ def args_parse() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--execute", action="store_true", help="允许移动左臂、张开/闭合夹爪")
     parser.add_argument("--pregrasp-m", type=float, default=.060)
-    parser.add_argument("--lift-m", type=float, default=.060)
+    parser.add_argument("--lift-m", type=float, default=POST_CLOSE_CHECK_LIFT_M,
+                        help="固定为 0.03m：闭夹爪后上提3cm再做力传感器判断")
     parser.add_argument("--jog-m", type=float, default=.005, help="每次按键移动量，固定默认 5 mm")
     parser.add_argument("--speed", type=float, default=.10)
     parser.add_argument("--close-force", type=float, default=100.)
@@ -77,8 +83,9 @@ def args_parse() -> argparse.Namespace:
 
 def main() -> int:
     args = args_parse()
-    if args.pregrasp_m <= 0 or args.lift_m <= 0 or args.jog_m <= 0 or not (0 < args.speed <= 1):
-        raise ValueError("pregrasp/lift/jog 必须为正，speed 必须在 (0,1]")
+    if (args.pregrasp_m <= 0 or abs(args.lift_m - POST_CLOSE_CHECK_LIFT_M) > 1e-9
+            or args.jog_m <= 0 or not (0 < args.speed <= 1)):
+        raise ValueError(f"pregrasp/jog 必须为正，lift 必须固定为 {POST_CLOSE_CHECK_LIFT_M:.2f}m，speed 必须在 (0,1]")
     output = within_here(args.output_dir)
     if output.exists():
         raise FileExistsError(f"输出目录已存在，拒绝覆盖: {output}")
@@ -123,7 +130,8 @@ def main() -> int:
         from loop_config import LoopConfig
         from planner_runtime import PlannerRuntime
         from parm_sdk import Gripper
-        ready = [float(x) for x in load_json(CONFIG / "left_reverse_regrasp_ready_joints.json")["joint_angles_deg"]]
+        from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
+        ready = list(load_workpiece_handoff_profile("2")["left_reverse_grasp"]["ready_joints_deg"])
         cfg = LoopConfig(planner_host=args.planner_host, execute_url="http://127.0.0.1:5667/middle/waypoint/execute",
                          base_frame="body_base", left_group="left_arm", right_group="right_arm",
                          left_tool_frame="left_eef", right_tool_frame="right_hand_transfer_end",
@@ -133,7 +141,7 @@ def main() -> int:
             runtime.open(required_frames={"body_base", "left_eef"})
             runtime.move_left_joints(ready, planner="rrtstar")
             wait_left(args.arm_host, ready, "左臂预备位")
-            with Gripper(host=args.gripper_host) as gripper:
+            with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                 state = gripper.get_state().get(1)
                 if not is_gripper_usable(state):
                     raise RuntimeError("左夹爪不可用或未初始化")
@@ -208,18 +216,26 @@ def main() -> int:
                         event["error"] = str(exc)
                         print(f"  {label} 无法规划，未移动：{exc}")
                     report["adjustments"].append(event)
-            with Gripper(host=args.gripper_host) as gripper:
+            weight_baseline = capture_open_gripper_baseline()
+            with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                 response = gripper.move(1, 0., force=args.close_force, mode="sync", preempt=False, timeout=60.)
-            lift = current_target.copy()
-            lift[2, 3] += args.lift_m
-            lift_plan = runtime.plan_cartesian_pose("left", pose(lift), planner="lin", start_joints_deg=current_joints)
+            check_lift = current_target.copy()
+            check_lift[2, 3] += POST_CLOSE_CHECK_LIFT_M
+            lift_plan = runtime.plan_cartesian_pose("left", pose(check_lift), planner="lin", start_joints_deg=current_joints)
             lift_end = ((lift_plan or {}).get("data") or {}).get("trajectory") or []
             if not lift_end:
                 raise RuntimeError("抬升规划没有返回终点")
             runtime.execute_planned_result(lift_plan)
-            wait_left(args.arm_host, [float(x) for x in lift_end[-1]], "左臂抬升位")
+            current_joints = [float(x) for x in lift_end[-1]]
+            wait_left(args.arm_host, current_joints, "左臂上提3cm检查位")
+            post_lift_force = verify_object_after_lift(weight_baseline)
+            report["post_lift_force_check"] = post_lift_force
+            if not post_lift_force["accepted"]:
+                with Gripper(host=args.gripper_host, status_port=7702) as gripper:
+                    gripper.move(1, 100.0, force=100.0, mode="sync", preempt=False, timeout=60.0)
+                raise RuntimeError("手动反抓上提3cm后力传感器未确认抓到工件；已重新张开左夹爪")
             report.update({"status": "manual_adjust_grasp_and_lift_complete", "gripper_close_response": response,
-                           "final_grasp_body_base": debug_pose(current_target), "final_lift_body_base": debug_pose(lift)})
+                           "final_grasp_body_base": debug_pose(current_target), "final_lift_body_base": debug_pose(check_lift)})
         finally:
             runtime.close()
     except Exception as exc:

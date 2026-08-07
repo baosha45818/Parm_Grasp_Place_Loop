@@ -32,6 +32,7 @@ from modules.module_8_right_grasp.module_8_2_left_handoff.gripper_compat import 
     read_gripper_state,
     release_left_gripper,
 )
+from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile  # noqa: E402
 from tests.reversed_head_observation.execute_taught_tail_handoff import (  # noqa: E402
     validate_arm_joint_plan,
     validate_right_cartesian_plan,
@@ -56,20 +57,22 @@ from tests.reversed_head_observation.preflight_handoff import (  # noqa: E402
 )
 HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE / "handoff_config.json"
-DEFAULT_RIGHT_PREGRASP_JOINTS_DEG = [
-    173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344,
-]
-# Previous workpiece-2 taught grasp (trace only):
-# [173.1142, 56.1951, -73.7979, 88.5512, -20.1174, 1.6864, 72.4699]
-# [162.5673, 58.7975, -71.0898, 78.7033, -21.5511, -1.0972, 79.6811]
-DEFAULT_RIGHT_GRASP_JOINTS_DEG = [
-    162.5467, 59.2095, -70.8701, 76.9661, -21.2146, 0.4807, 80.0175,
-]
-DEFAULT_RIGHT_PLACE_READY_JOINTS_DEG = [
-    102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196,
-]
-DEFAULT_POST_RELEASE_CLEARANCE_MINUS_X_M = 0.03
-DEFAULT_POST_RELEASE_CLEARANCE_PLUS_Z_M = 0.03
+_WORKPIECE_2_HANDOFF = load_workpiece_handoff_profile("2")
+DEFAULT_RIGHT_PREGRASP_JOINTS_DEG = list(
+    _WORKPIECE_2_HANDOFF["right_handoff"]["pregrasp_joints_deg"]
+)
+DEFAULT_RIGHT_GRASP_JOINTS_DEG = list(
+    _WORKPIECE_2_HANDOFF["right_handoff"]["grasp_joints_deg"]
+)
+DEFAULT_RIGHT_PLACE_READY_JOINTS_DEG = list(
+    _WORKPIECE_2_HANDOFF["right_handoff"]["place_ready_joints_deg"]
+)
+DEFAULT_POST_RELEASE_CLEARANCE_MINUS_X_M = float(
+    _WORKPIECE_2_HANDOFF["right_handoff"]["post_release_clearance_minus_x_m"]
+)
+DEFAULT_POST_RELEASE_CLEARANCE_PLUS_Z_M = float(
+    _WORKPIECE_2_HANDOFF["right_handoff"]["post_release_clearance_plus_z_m"]
+)
 # Workpiece 2 uses one exact RRTStar handoff orientation.  Two degrees only
 # cover arrival/TF error; yaw-redundant handoff poses must be rejected.
 DEFAULT_HANDOFF_AXIS_TOLERANCE_DEG = 2.0
@@ -96,12 +99,19 @@ def parse_args() -> argparse.Namespace:
         help="右手已夹稳且左夹爪已打开：跳过抓取，先右手离开交接区再恢复左手",
     )
     parser.add_argument(
-        "--expected-center-m", type=float, nargs=3, default=[0.42, 0.10, 0.25]
+        "--expected-center-m",
+        type=float,
+        nargs=3,
+        default=list(_WORKPIECE_2_HANDOFF["handoff"]["center_body_m"]),
     )
-    parser.add_argument("--center-tolerance-mm", type=float, default=25.0)
+    parser.add_argument(
+        "--center-tolerance-mm",
+        type=float,
+        default=float(_WORKPIECE_2_HANDOFF["handoff"]["center_tolerance_mm"]),
+    )
     parser.add_argument(
         "--axis-tolerance-deg", type=float,
-        default=DEFAULT_HANDOFF_AXIS_TOLERANCE_DEG,
+        default=float(_WORKPIECE_2_HANDOFF["handoff"]["axis_tolerance_deg"]),
         help="工件2交接轴向到位/TF误差上限；不允许yaw冗余，默认2°",
     )
     parser.add_argument(

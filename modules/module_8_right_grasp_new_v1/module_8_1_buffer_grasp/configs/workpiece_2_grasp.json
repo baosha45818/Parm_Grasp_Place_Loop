@@ -1,0 +1,42 @@
+{
+  "schema": "direct-grasp-workpiece-config/v2",
+  "workpiece": "workpiece_2",
+  "description": "工件2：从视觉计算的语义原点沿工件自身 -X 30 mm 得到几何抓取点；TCP 到达该点后沿自身 +Z 补偿 5 mm，并相对工件局部 Z 偏转 -3 度。",
+  "semantic_grasp_rule": {
+    "origin": "T_body_base_workpiece_semantic translation",
+    "semantic_offset_m": [-0.03, 0.0, 0.0],
+    "tcp_local_offset_at_grasp_m": [0.0, 0.0, 0.005],
+    "formula": "P_tcp = TransformPoint(T_body_base_workpiece_semantic, semantic_offset_m) + Rotate(R_body_base_tcp, tcp_local_offset_at_grasp_m) + system_tcp_correction"
+  },
+  "direct_grasp_arguments": {
+    "--grasp-point-semantic-offset-m": [-0.02, 0.0, 0.003],
+    "--tcp-local-offset-at-grasp-m": [0.0, 0.0, 0.005],
+    "--tcp-yaw-toward-workpiece-y-deg": -3.0,
+    "--line-entry-clearance-m": 0.02,
+    "--line-max-rear-distance-m": 0.06,
+    "--line-scan-count": 15,
+    "--planner": "rrtstar",
+    "--final-approach-mode": "servo",
+    "--servo-linear-speed-mps": 0.05,
+    "--servo-angular-speed-radps": 0.3,
+    "--servo-max-linear-accel-mps2": 0.1,
+    "--servo-max-angular-accel-radps2": 0.6,
+    "--servo-hz": 50.0,
+    "--servo-position-tolerance-m": 0.0005,
+    "--servo-orientation-tolerance-rad": 0.035,
+    "--servo-settle-timeout-s": 8.0,
+    "--max-vel": 0.1,
+    "--max-acc": 0.1,
+    "--start-sync-retries": 3,
+    "--gripper-timeout-s": 5.0,
+    "--gripper-position-tolerance": 5.0,
+    "--grasp-position-min": 6.0,
+    "--grasp-position-max": 20.0,
+    "--grasp-retry-z-step-m": 0.007,
+    "--q1-post-grasp-lift-m": [0.05, 0.04, 0.03, 0.02, 0.01],
+    "--q1-xy-tolerance-m": 0.0005,
+    "--q1-z-tolerance-m": 0.0005,
+    "--q1-pitch-tolerance-rad": 0.0017453292519943296,
+    "--z-pitch-correction-attempts": 8
+  }
+}

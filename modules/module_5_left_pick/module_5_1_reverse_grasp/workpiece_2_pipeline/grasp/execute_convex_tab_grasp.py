@@ -25,10 +25,16 @@ QUALITY_GATE = HERE / "execution_quality_gate.json"
 sys.path[:0] = [str(PROJECT), str(PROJECT / "tool")]
 
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
+from modules.module_5_left_pick.reverse_grasp_weight_check import (
+    POST_CLOSE_CHECK_LIFT_M,
+    capture_open_gripper_baseline,
+    verify_object_after_lift,
+)
+from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
 
 
 NO_GRASP_EXIT_CODE = 20
-LEFT_GRIPPER_HOLDING_POSITION_MAX = 85.0
+REVERSE_GRASP_CONFIG = load_workpiece_handoff_profile("2")["left_reverse_grasp"]
 
 
 def within_here(path: Path) -> Path:
@@ -188,22 +194,6 @@ def wait_gripper_terminal(gripper: object, hand: int, label: str, timeout: float
     raise RuntimeError(f"{label}在 {timeout:.1f}s 内未到终态，最后状态: {last_state}")
 
 
-def require_left_gripper_holding(state: dict) -> None:
-    """A new left gripper holds one object only when its opening is below 85%."""
-    position = state.get("position")
-    if position is None:
-        raise RuntimeError(f"左夹爪闭合状态未提供开度: {state}")
-    opening = float(position)
-    print(f"左夹爪闭合终态开度={opening:.1f}%", flush=True)
-    if opening >= LEFT_GRIPPER_HOLDING_POSITION_MAX:
-        print(
-            f"NO_GRASP: 左夹爪开度={opening:.1f}% >= "
-            f"{LEFT_GRIPPER_HOLDING_POSITION_MAX:.1f}%；不执行抬升。",
-            flush=True,
-        )
-        raise SystemExit(NO_GRASP_EXIT_CODE)
-
-
 def check_head(head_host: str, expected: dict) -> None:
     from parm_sdk import Head
     with Head(host=head_host) as head:
@@ -221,7 +211,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--execute", action="store_true", help="显式允许机器人、夹爪与 Planner 运动")
     p.add_argument("--preflight-only", action="store_true", help="仅做 Planner RRTStar+LIN 可达性检查，不运动")
     p.add_argument("--pregrasp-m", type=float, default=.060)
-    p.add_argument("--lift-m", type=float, default=.060)
+    p.add_argument(
+        "--lift-m",
+        type=float,
+        default=float(REVERSE_GRASP_CONFIG["post_close_lift_m"]),
+        help="固定为 0.03m：闭夹爪后沿 body_base +Z 上提 3cm 再做力传感器判断",
+    )
     p.add_argument("--approach-angles-deg", type=float, nargs="+", default=[90., 15., -15.],
                    help="相对桌面的接近角；90 为竖直，15/-15 为绕两指轴侧向接近")
     p.add_argument("--speed", type=float, default=.15)
@@ -237,9 +232,9 @@ def main() -> int:
     args = parse_args()
     if args.execute and args.preflight_only:
         raise ValueError("--execute 与 --preflight-only 不能同时使用")
-    if (args.pregrasp_m <= 0 or args.lift_m <= 0 or not (0 < args.speed <= 1)
+    if (args.pregrasp_m <= 0 or abs(args.lift_m - POST_CLOSE_CHECK_LIFT_M) > 1e-9 or not (0 < args.speed <= 1)
             or not args.approach_angles_deg or any(not 0 < abs(x) <= 90 for x in args.approach_angles_deg)):
-        raise ValueError("pregrasp/lift 必须为正，speed 必须在 (0,1]")
+        raise ValueError(f"pregrasp 必须为正，lift 必须固定为 {POST_CLOSE_CHECK_LIFT_M:.2f}m，speed 必须在 (0,1]")
     output = within_here(args.output_dir)
     if output.exists():
         raise FileExistsError(f"输出目录已存在，拒绝覆盖: {output}")
@@ -301,7 +296,7 @@ def main() -> int:
         from loop_config import LoopConfig
         from planner_runtime import PlannerRuntime
         from parm_sdk import Gripper
-        ready = [float(x) for x in load_json(CONFIG / "left_reverse_regrasp_ready_joints.json")["joint_angles_deg"]]
+        ready = list(load_workpiece_handoff_profile("2")["left_reverse_grasp"]["ready_joints_deg"])
         report["preflight_start_joint_angles_deg"] = ready
         cfg = LoopConfig(planner_host=args.planner_host, execute_url="http://127.0.0.1:5667/middle/waypoint/execute",
             base_frame="body_base", left_group="left_arm", right_group="right_arm",
@@ -362,18 +357,33 @@ def main() -> int:
             if not descent_end:
                 raise RuntimeError("LIN 下探没有返回终点")
             wait_left(args.arm_host, descent_end[-1], "左臂抓取位")
+            weight_baseline = capture_open_gripper_baseline()
             with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                 response = gripper.move(1, 0., force=args.close_force, mode="sync", preempt=False, timeout=60.)
                 state = wait_gripper_terminal(gripper, 1, "左夹爪闭合")
                 report["gripper_close_state"] = state
-                require_left_gripper_holding(state)
-            lift = target.copy(); lift[2, 3] += args.lift_m
-            lift_plan = runtime.plan_cartesian_pose("left", pose(lift), planner="lin")
+            check_lift = target.copy(); check_lift[2, 3] += POST_CLOSE_CHECK_LIFT_M
+            # 先固定上提 3 cm，脱离桌面后才以同姿态力差判断抓空/有工件。
+            lift_plan = runtime.plan_cartesian_pose("left", pose(check_lift), planner="rrtstar")
             runtime.execute_planned_result(lift_plan)
             lift_end = ((lift_plan or {}).get("data") or {}).get("trajectory") or []
             if not lift_end:
                 raise RuntimeError("抬升规划没有返回终点")
-            wait_left(args.arm_host, lift_end[-1], "左臂抬升位")
+            wait_left(args.arm_host, lift_end[-1], "左臂上提3cm检查位")
+            post_lift_weight = verify_object_after_lift(weight_baseline)
+            report["post_lift_force_check"] = post_lift_weight
+            if not post_lift_weight["accepted"]:
+                with Gripper(host=args.gripper_host, status_port=7702) as gripper:
+                    gripper.move(
+                        1, 100.0, force=100.0, mode="sync",
+                        preempt=False, timeout=60.0,
+                    )
+                print(
+                    "NO_GRASP: 反抓上提3cm后力传感器未确认抓到工件；"
+                    "已打开左夹爪，返回预备位后重拍。",
+                    flush=True,
+                )
+                raise SystemExit(NO_GRASP_EXIT_CODE)
             report["status"] = "grasp_and_lift_complete"
             report["gripper_close_response"] = response
         finally:

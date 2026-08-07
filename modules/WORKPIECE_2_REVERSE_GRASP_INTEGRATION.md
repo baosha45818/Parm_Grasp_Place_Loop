@@ -45,7 +45,7 @@
 2. 重新读取 `source_pose` 并检查 ICP 质量门限；不通过时禁止任何运动。
 3. 由 `body_head_calibration.json`、`grasp_tcp_calibration.json`、`planner_tool_bridge.json` 将头部相机下的抓取 TCP 转为 Planner 的 `body_base` 下左臂末端目标。
 4. 构造抓取坐标系：TCP `+X` 为向桌面的接近方向，TCP `+Y` 与工件 `+X` 在桌面平面的投影对齐；因此左指对应工件 `+X` 侧，右指对应工件 `-X` 侧。
-5. 首先到 `left_reverse_regrasp_ready_joints.json` 的固定预备关节位。
+5. 首先到 `reverse_grasp_handoff_positions.toml` 中工件2的固定反抓预备关节位。
 6. 对多个接近角做离线预检：PTP 到预抓取位，再 LIN 下探到抓取位。只有预抓取和下探都可规划时才接受该候选。
 7. `--preflight-only` 只做规划预检，不发送机械臂或夹爪命令。
 8. `--execute` 才执行：PTP 预抓取 -> LIN 下探 -> 夹爪闭合 -> LIN 抬升。每一段都会检查 Planner 返回轨迹和机械臂到位状态。
@@ -99,9 +99,9 @@ Module 10：仍由原总控调度，负责右手 Idle
 ```
 
 Module 5-2、Module 8-2 与模块化总控共同读取
-`modules/workpiece_2_handoff_profile.json`。该文件也是两类工件共用高位区域的
-左手运动参数接口，统一保存左手较高准备/观察/回程位、云台观察角和交接中心；
-其中右手预交接/预抓取/抓取/放置准备位以及释放后撤离量仅属于工件2。握手中的 `profile_id` 和工件
+`modules/reverse_grasp_handoff_positions.toml`。该文件按工件分区统一保存左手反抓
+预备位、左手准备/观察/回程位、云台观察角、交接中心和右手交接位；其中右手
+预交接/预抓取位与释放后撤离量仅属于工件2。握手中的 `profile_id` 和工件
 类型必须与本次总控选择一致，否则在右臂运动前拒绝继续。
 
 工件1保留自己的 STL、SAM2/ICP 参数和右手抓取相对几何，但观察与交接也使用

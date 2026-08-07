@@ -62,6 +62,7 @@ except ImportError as exc:
 
 from deploy.version5 import run_dual_camera_fused_graspnet as version5  # noqa: E402
 from deploy.version4.run_d405_graspnet import (  # noqa: E402
+    collector_gripper_session,
     close_collector_gripper_session,
     close_gripper,
     move_gripper,
@@ -74,6 +75,9 @@ DEFAULT_WEIGHT_CHECK_ROOT = LOOP_ROOT
 LEFT_ARM_ID = 1
 LEFT_GROUP = "left_arm"
 LEFT_JOINT_NAMES = [f"left_arm_joint{index}" for index in range(1, 8)]
+GRIPPER_HOLD_STABLE_S = 0.5
+GRIPPER_HOLD_POLL_S = 0.1
+GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
 class RetryGrasp(RuntimeError):
@@ -351,6 +355,53 @@ def print_weight_result(result: Any) -> None:
         f"{[round(float(value), 4) for value in result.loaded.axis_mad_n]} N"
     )
     print(f"   reason: {result.reason}")
+
+
+def require_left_gripper_holding(args: argparse.Namespace, *, phase: str) -> None:
+    """Require the schema-3 left gripper to report a stable held state.
+
+    This check intentionally runs only after the arm has reached ``graspup``.
+    A closing gripper can briefly report a non-holding state while the workpiece
+    is still supported by the table, so it must never prevent the configured
+    post-grasp lift from being attempted.
+    """
+
+    gripper = collector_gripper_session(args)
+    deadline = time.monotonic() + GRIPPER_HOLD_TIMEOUT_S
+    last_state: dict[str, Any] | None = None
+    stable_since: float | None = None
+    stable_samples = 0
+    while time.monotonic() < deadline:
+        state = gripper.get_state().get(args.gripper_hand)
+        if isinstance(state, dict):
+            last_state = state
+            motion_state = str(state.get("motion_state", "")).strip().lower()
+            if motion_state == "gripping":
+                stable_since = stable_since or time.monotonic()
+                stable_samples += 1
+                if time.monotonic() - stable_since >= GRIPPER_HOLD_STABLE_S:
+                    print(
+                        "-> gripper hold check passed: "
+                        f"gripping stable for {GRIPPER_HOLD_STABLE_S:.1f}s "
+                        f"({stable_samples} samples), position={state.get('position')}",
+                        flush=True,
+                    )
+                    return
+            else:
+                stable_since = None
+                stable_samples = 0
+            if motion_state in {"dropped", "error"} or state.get("error"):
+                break
+        time.sleep(GRIPPER_HOLD_POLL_S)
+
+    print(
+        f"-> gripper hold check failed at {phase}: "
+        f"expected motion_state='gripping', got {last_state}; "
+        "opening at the current graspup pose and starting fresh inference",
+        flush=True,
+    )
+    move_gripper(args, 100.0, "release non-holding grasp at graspup")
+    raise RetryGrasp("EMPTY")
 
 
 def apply_contiguous_single_band(
@@ -1012,9 +1063,9 @@ def execute_grasp_with_planner(args: argparse.Namespace, plan: dict[str, Any]) -
             except Exception as exc:
                 raise ForceSensorDataError("stream", exc) from exc
 
-        # Use pregrasp as the common force-check pose: it is only a short
-        # vertical distance above the table and has the same wrist pose before
-        # and after grasping.  The empty baseline does not require closing.
+        # Record the empty reference before descent.  The actual hold decision
+        # is intentionally deferred until graspup, after the object is fully
+        # lifted clear of the table.
         permit_value = os.environ.get("LOOP_GRASPNET_EXECUTION_PERMIT_FILE")
         if permit_value:
             permit_path = Path(permit_value)
@@ -1063,25 +1114,17 @@ def execute_grasp_with_planner(args: argparse.Namespace, plan: dict[str, Any]) -
             raise CandidatePlanRejected("grasp_descent", exc) from exc
         execute_trajectory(args, grasp_trajectory, "grasp descent")
         close_gripper(args)
-        # Plan each stage after the preceding stage finishes.  Planner uses
-        # live joint state as its start state, so pre-planning later stages
-        # before the descent would produce an invalid start configuration.
+        # Always reach the configured graspup pose after closing.  The table
+        # can still support the workpiece while the jaws close, so neither the
+        # gripper state nor the force sensor is a reliable success indicator
+        # at the low grasp pose.
+        execute_trajectory(args, plan_joint(planner, args, args.postgrasp_lift_joints_deg, "post-grasp lift"), "post-grasp lift")
+        require_left_gripper_holding(args, phase="graspup")
         if weight_api is not None:
-            execute_trajectory(
-                args,
-                plan_cartesian(
-                    planner,
-                    args,
-                    plan["pregrasp_eef_pose"],
-                    "lin",
-                    "short post-grasp lift for weight check",
-                    bridge_base,
-                    bridge_tool,
-                    planning_base_bridge_base,
-                    bridge_tool_planning_tool,
-                ),
-                "short post-grasp lift for weight check",
-            )
+            # Classification is deliberately deferred until the configured
+            # graspup pose.  At this point the object is unsupported by the
+            # table and the force/gripper state represents the actual handoff
+            # condition for Module 2.
             grasp_class, _, _, verify_grasp_after_lift = weight_api
             try:
                 result = verify_grasp_after_lift(
@@ -1093,7 +1136,12 @@ def execute_grasp_with_planner(args: argparse.Namespace, plan: dict[str, Any]) -
                     timeout_s=float(args.weight_check_timeout_s),
                 )
             except Exception as exc:
-                raise ForceSensorDataError("loaded", exc) from exc
+                print(
+                    "-> force data unavailable for graspup weight check; releasing and "
+                    "starting a fresh GraspNet loop"
+                )
+                move_gripper(args, 100.0, "release after graspup weight-check failure")
+                raise RetryGrasp("UNKNOWN") from exc
             result = apply_contiguous_single_band(
                 result,
                 weight_thresholds,
@@ -1103,23 +1151,27 @@ def execute_grasp_with_planner(args: argparse.Namespace, plan: dict[str, Any]) -
             print_weight_result(result)
             if result.grasp_class is not grasp_class.SINGLE:
                 print(
-                    f"-> rejected {result.grasp_class.value} grasp; "
-                    "opening at the low pregrasp pose and starting a fresh inference"
+                    f"-> graspup weight check rejected {result.grasp_class.value}; releasing and "
+                    "starting a fresh GraspNet loop"
                 )
-                move_gripper(args, 100.0, "release rejected grasp")
+                move_gripper(args, 100.0, "release rejected grasp at graspup")
                 raise RetryGrasp(result.grasp_class.value, result)
+            graspup_load_signature = {
+                "median_force_n": [float(value) for value in result.loaded.median_force_n],
+                "axis_mad_n": [float(value) for value in result.loaded.axis_mad_n],
+                "sample_count": int(result.loaded.sample_count),
+                "mass_g": float(result.mass_g),
+                "classification": result.grasp_class.value,
+            }
             args.verified_weight_handoff = {
                 "classification": result.grasp_class.value,
                 "mass_g": float(result.mass_g),
                 "baseline": {
-                    "median_force_n": [
-                        float(value) for value in result.baseline.median_force_n
-                    ],
-                    "axis_mad_n": [
-                        float(value) for value in result.baseline.axis_mad_n
-                    ],
+                    "median_force_n": [float(value) for value in result.baseline.median_force_n],
+                    "axis_mad_n": [float(value) for value in result.baseline.axis_mad_n],
                     "sample_count": int(result.baseline.sample_count),
                 },
+                "loaded_at_graspup": graspup_load_signature,
                 "thresholds": {
                     "empty_max_g": float(weight_thresholds.empty_max_g),
                     "single_min_g": float(weight_thresholds.single_min_g),
@@ -1134,88 +1186,9 @@ def execute_grasp_with_planner(args: argparse.Namespace, plan: dict[str, Any]) -
                 "timeout_s": float(args.weight_check_timeout_s),
                 "settle_s": float(args.weight_check_settle_s),
             }
-            print("-> exactly one object verified; continuing to full post-grasp lift")
-            try:
-                pre_lift_result = verify_grasp_after_lift(
-                    force_sensor,
-                    baseline,
-                    weight_thresholds,
-                    settle_s=float(args.weight_check_settle_s),
-                    sample_count=int(args.weight_check_samples),
-                    timeout_s=float(args.weight_check_timeout_s),
-                )
-            except Exception as exc:
-                print(
-                    "-> force data unavailable before post-grasp lift; "
-                    "treating held state as UNKNOWN and restarting GraspNet"
-                )
-                move_gripper(args, 100.0, "release after weight recheck failure")
-                raise RetryGrasp("UNKNOWN") from exc
-            pre_lift_result = apply_contiguous_single_band(
-                pre_lift_result,
-                weight_thresholds,
-                grasp_class,
-                bool(getattr(args, "weight_contiguous_single_band", False)),
-            )
-            print_weight_result(pre_lift_result)
-            if pre_lift_result.grasp_class is not grasp_class.SINGLE:
-                print(
-                    "-> object no longer satisfies SINGLE before post-grasp lift; "
-                    "opening and starting a fresh GraspNet loop"
-                )
-                move_gripper(args, 100.0, "release after detected object drop")
-                raise RetryGrasp(
-                    pre_lift_result.grasp_class.value, pre_lift_result
-                )
-        execute_trajectory(args, plan_joint(planner, args, args.postgrasp_lift_joints_deg, "post-grasp lift"), "post-grasp lift")
-        if weight_api is not None:
-            # Module 2 starts from this same graspup joint pose.  Record a
-            # held-object force signature here instead of later comparing a
-            # graspup reading against the pregrasp empty baseline, whose
-            # gravity component is from a different arm attitude.
-            try:
-                time.sleep(float(args.weight_check_settle_s))
-                graspup_loaded = collect_force_window(
-                    force_sensor,
-                    sample_count=int(args.weight_check_samples),
-                    timeout_s=float(args.weight_check_timeout_s),
-                )
-            except Exception as exc:
-                print(
-                    "-> force data unavailable at graspup; releasing and "
-                    "starting a fresh GraspNet loop"
-                )
-                move_gripper(args, 100.0, "release after graspup force-signature failure")
-                raise RetryGrasp("UNKNOWN") from exc
-            if graspup_loaded.max_axis_mad_n > weight_thresholds.max_axis_mad_n:
-                print(
-                    "-> unstable force data at graspup; releasing and "
-                    "starting a fresh GraspNet loop"
-                )
-                move_gripper(args, 100.0, "release after unstable graspup force signature")
-                raise RetryGrasp("UNKNOWN")
-            # A complete object loss changes the force by approximately its
-            # weight.  Permit normal sensor drift, while retaining sensitivity
-            # for the lightest valid 35 g workpiece.
-            max_delta_n = max(
-                0.20,
-                0.5 * float(result.mass_g) * float(weight_thresholds.gravity_m_s2) / 1000.0,
-            )
-            args.verified_weight_handoff["graspup_load_signature"] = {
-                "median_force_n": [
-                    float(value) for value in graspup_loaded.median_force_n
-                ],
-                "axis_mad_n": [
-                    float(value) for value in graspup_loaded.axis_mad_n
-                ],
-                "sample_count": int(graspup_loaded.sample_count),
-                "max_force_delta_n": float(max_delta_n),
-                "max_axis_mad_n": float(weight_thresholds.max_axis_mad_n),
-            }
             print(
-                "-> graspup held-object force signature: "
-                f"median={[round(float(value), 4) for value in graspup_loaded.median_force_n]} N, "
-                f"max allowed delta={max_delta_n:.3f} N"
+                "-> exactly one object verified at graspup; "
+                "keeping the gripper closed for Module 2 handoff"
             )
         if bool(getattr(args, "stop_after_graspup", False)):
             print(

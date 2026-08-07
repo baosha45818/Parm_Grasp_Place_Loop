@@ -41,7 +41,7 @@ DEFAULT_Q1_XY_TOLERANCE_M = 0.0005
 DEFAULT_Q1_Z_TOLERANCE_M = 0.0005
 DEFAULT_Q1_PITCH_TOLERANCE_RAD = math.radians(0.1)
 DEFAULT_Q1_POST_GRASP_LIFT_M = (0.050, 0.040, 0.030, 0.020, 0.010)
-RRTCONNECT_TIMEOUT_S = 30.0
+RRTSTAR_TIMEOUT_S = 30.0
 Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE = 20
 POSE_OUTPUT_ROOT = MODULE_ROOT.parents[2] / "output/module_4_2"
 WORKPIECE_CONFIGS = {
@@ -83,6 +83,7 @@ CONFIGURABLE_OPTIONS = frozenset({
     "--line-scan-count",
     "--max-vel",
     "--max-acc",
+    "--trajectory-execution-speed-scale",
     "--start-sync-retries",
     "--gripper-timeout-s",
     "--gripper-position-tolerance",
@@ -312,8 +313,8 @@ def planner_target(tcp_target: list[float], tcp_offset: list[float]) -> list[flo
     return compose_pose(tcp_target, inverse_pose(tcp_offset))
 
 
-def preplan_tcp_trajectory(planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, stage: str = "direct_grasp_plan") -> tuple[list, float]:
-    """Plan via the table-aware Cartesian RRTConnect profile (cart+ompl)."""
+def preplan_tcp_trajectory(planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, stage: str = "direct_grasp_plan", rrtstar_goal_tolerance: bool = False) -> tuple[list, float]:
+    """Plan a Cartesian TCP target with optional planner-side RRTstar tolerance."""
     target_for_ik = planner_target(target, tcp_offset)
     start = planner_start_pose(planner, frame_id, ik_frame)
     started = time.perf_counter()
@@ -323,33 +324,28 @@ def preplan_tcp_trajectory(planner: object, *, arm_id: int, group: str, frame_id
         "ik_pose_xyz_rotvec": target_for_ik,
     }
     try:
-        transport = getattr(planner, "_trajectory", None)
-        if transport is None:
-            raise TrajectoryPlanningError("当前 parm_sdk 不支持 RRTConnect 所需的 _trajectory 接口")
-        payload = {
-            "waypoints": [{
-                "name": "configured_workpiece_rrtconnect_target", "type": "cart", "group": group,
-                "planner": "ompl", "max_velocity_scaling_factor": max_vel,
-                "max_acceleration_scaling_factor": max_acc, "frame_id": frame_id,
-                "ik_frame": ik_frame, "position": target_for_ik[:3],
-                "orientation": rotvec_to_quat(target_for_ik[3:]),
-            }],
-            "topp": {"max_vel_factor": max_vel, "max_acc_factor": max_acc,
-                     "final_phase_ratio": 0.05, "final_phase_oversample": 2.0},
-        }
-        result = transport.send_payload(payload, timeout=RRTCONNECT_TIMEOUT_S)
+        request = dict(
+            group=group, planner=planner_kind, frame_id=frame_id, ik_frame=ik_frame,
+            position=target_for_ik[:3], orientation=rotvec_to_quat(target_for_ik[3:]),
+            max_vel=max_vel, max_acc=max_acc, timeout=RRTSTAR_TIMEOUT_S,
+        )
+        # The planner's default without this field is exact Cartesian goal matching.
+        # Do not send ``False``: older planner servers only recognise the opt-in field.
+        if rrtstar_goal_tolerance:
+            request["rrtstar_goal_tolerance"] = True
+        result = planner.plan_cart_trajectory(**request)
         data = result.get("data") or {}
         trajectory, planned_arm_id, frequency = data.get("trajectory"), data.get("arm_id"), data.get("sample_frequency", 10.0)
         if planned_arm_id != arm_id or not isinstance(trajectory, list) or not trajectory or not isinstance(frequency, (int, float)) or frequency <= 0:
-            raise TrajectoryPlanningError("RRTConnect 未返回当前右臂的有效轨迹")
+            raise TrajectoryPlanningError("RRTstar 未返回当前右臂的有效轨迹")
     except Exception as exc:
-        planning_event(stage=stage, method=f"{planner_kind}/RRTConnect", start=start,
+        planning_event(stage=stage, method=planner_kind, start=start,
                        target=target_record, started_at=started, success=False,
                        failure_reason=f"{type(exc).__name__}: {exc}", arm_id=arm_id)
         if isinstance(exc, TrajectoryPlanningError):
             raise
-        raise TrajectoryPlanningError(f"RRTConnect 轨迹规划失败: {exc}") from exc
-    planning_event(stage=stage, method=f"{planner_kind}/RRTConnect", start=start,
+        raise TrajectoryPlanningError(f"RRTstar 轨迹规划失败: {exc}") from exc
+    planning_event(stage=stage, method=planner_kind, start=start,
                    target=target_record, started_at=started, success=True,
                    arm_id=arm_id, trajectory_waypoints=len(trajectory),
                    sample_frequency_hz=float(frequency))
@@ -361,7 +357,7 @@ def can_plan_target(
     tcp_offset: list[float], target: list[float], target_is_tcp: bool,
     planner_kind: str, max_vel: float, max_acc: float, timeout_s: float = 5.0,
 ) -> tuple[bool, str]:
-    """Check one non-RRTConnect Cartesian target without executing it."""
+    """Check one Cartesian target without executing it."""
     target_for_ik = planner_target(target, tcp_offset) if target_is_tcp else target
     start = planner_start_pose(planner, frame_id, ik_frame)
     started = time.perf_counter()
@@ -393,12 +389,13 @@ def can_plan_target(
     return True, f"{len(trajectory)} 个关节路点"
 
 
-def plan_and_follow(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, stage: str) -> None:
-    print(f"{stage} RRTConnect TCP target: {[round(value, 6) for value in target]}")
+def plan_and_follow(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, stage: str, execution_speed_scale: float, rrtstar_goal_tolerance: bool = False) -> None:
+    print(f"{stage} RRTstar TCP target: {[round(value, 6) for value in target]}")
     for attempt in range(retries + 1):
-        trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=target, planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, stage=f"{stage} planning attempt {attempt + 1}/{retries + 1}")
+        trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=target, planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, stage=f"{stage} planning attempt {attempt + 1}/{retries + 1}", rrtstar_goal_tolerance=rrtstar_goal_tolerance)
         try:
-            arm.follow_trajectory(arm_id=arm_id, trajectory=trajectory, sample_frequency=frequency)
+            arm.follow_trajectory(arm_id=arm_id, trajectory=trajectory,
+                                  sample_frequency=frequency * execution_speed_scale)
             return
         except Exception as exc:
             if "DiscreteTask::validate: first point mismatch" not in str(exc) or attempt >= retries:
@@ -408,7 +405,7 @@ def plan_and_follow(arm: object, planner: object, *, arm_id: int, group: str, fr
 
 def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo_eef_offset: list[float], args: argparse.Namespace, stage: str) -> None:
     """Move a native right_eef target through ServoPose's calibrated TCP."""
-    print(f"{stage}：使用控制器 servo 直线段，不经过 RRTConnect 碰撞预检。")
+    print(f"{stage}：使用控制器 servo 直线段，不经过 RRTstar 碰撞预检。")
     servo_move_l(
         arm, arm_id, tcp_target,
         linear_speed_mps=args.servo_linear_speed_mps,
@@ -421,8 +418,8 @@ def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo
     )
 
 
-def recover_target_tcp_pose(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, xy_tolerance_m: float, z_tolerance_m: float, orientation_tolerance_rad: float, correction_attempts: int, stage: str) -> None:
-    """Verify the complete TCP pose and correct it with RRTConnect if needed."""
+def recover_target_tcp_pose(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, xy_tolerance_m: float, z_tolerance_m: float, orientation_tolerance_rad: float, correction_attempts: int, stage: str, execution_speed_scale: float) -> None:
+    """Verify the complete TCP pose and correct it with RRTstar if needed."""
     target_rpy = rotvec_to_rpy(target[3:])
     for attempt in range(correction_attempts + 1):
         time.sleep(0.2)
@@ -449,7 +446,7 @@ def recover_target_tcp_pose(arm: object, planner: object, *, arm_id: int, group:
                 f"{math.degrees(orientation_errors[1]):.3f}°/"
                 f"{math.degrees(orientation_errors[2]):.3f}°"
             )
-        plan_and_follow(arm, planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=target, planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, retries=retries, stage=f"{stage}（{attempt + 1}/{correction_attempts}）")
+        plan_and_follow(arm, planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=target, planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, retries=retries, stage=f"{stage}（{attempt + 1}/{correction_attempts}）", execution_speed_scale=execution_speed_scale)
 
 
 def parse_args() -> argparse.Namespace:
@@ -482,7 +479,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
     parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
-    parser.add_argument("--planner", choices=("ompl",), default="ompl", help="固定使用 table-aware RRTConnect")
+    parser.add_argument("--planner", choices=("rrtstar",), default="rrtstar", help="固定使用 RRTstar")
     parser.add_argument("--final-approach-mode", choices=("servo", "rrt"), default="servo",
                         help="最后后方点到抓取点：servo 控制器直线段（默认）或 rrt")
     parser.add_argument("--servo-linear-speed-mps", type=float, default=0.05)
@@ -498,6 +495,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--line-scan-count", type=int, default=15)
     parser.add_argument("--max-vel", type=float, default=0.1)
     parser.add_argument("--max-acc", type=float, default=0.1)
+    parser.add_argument("--trajectory-execution-speed-scale", type=float, default=2.0)
     parser.add_argument("--start-sync-retries", type=int, default=3)
     parser.add_argument("--gripper-timeout-s", type=float, default=5.0)
     parser.add_argument("--gripper-position-tolerance", type=float, default=5.0)
@@ -641,7 +639,7 @@ def main() -> int:
             candidate_xyz = [approach_anchor_xyz[axis] + parameter * tcp_x_axis[axis] for axis in range(3)]
             candidate = candidate_xyz + orientation
             try:
-                trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=candidate, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, stage=f"Q1 rear alignment candidate {candidate_index}/{len(parameters)}")
+                trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=candidate, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, stage=f"Q1 rear alignment candidate {candidate_index}/{len(parameters)}", rrtstar_goal_tolerance=True)
             except TrajectoryPlanningError as exc:
                 failures.append(f"{parameter * 1000:.1f} mm: {exc}")
                 continue
@@ -651,9 +649,9 @@ def main() -> int:
             break
         if alignment_trajectory is None or alignment_frequency is None or alignment_xy is None or alignment_target is None:
             raise Q1DirectPathUnavailableError("工件 −X 抓取线后方安全窗口内没有直接轨迹；" + "；".join(failures))
-        print(f"执行沿 TCP −X 后移 + X/Y 轴对齐的 RRTConnect 轨迹，终点 xy(m)={alignment_xy}。")
-        arm.follow_trajectory(arm_id=args.arm_id, trajectory=alignment_trajectory, sample_frequency=alignment_frequency)
-        recover_target_tcp_pose(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=alignment_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, xy_tolerance_m=args.q1_xy_tolerance_m, z_tolerance_m=args.q1_z_tolerance_m, orientation_tolerance_rad=args.q1_pitch_tolerance_rad, correction_attempts=args.z_pitch_correction_attempts, stage="−X 对齐后 TCP 位姿校验")
+        print(f"执行沿 TCP −X 后移 + X/Y 轴对齐的 RRTstar 轨迹，终点 xy(m)={alignment_xy}。")
+        arm.follow_trajectory(arm_id=args.arm_id, trajectory=alignment_trajectory, sample_frequency=alignment_frequency * args.trajectory_execution_speed_scale)
+        recover_target_tcp_pose(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=alignment_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, xy_tolerance_m=args.q1_xy_tolerance_m, z_tolerance_m=args.q1_z_tolerance_m, orientation_tolerance_rad=args.q1_pitch_tolerance_rad, correction_attempts=args.z_pitch_correction_attempts, stage="−X 对齐后 TCP 位姿校验", execution_speed_scale=args.trajectory_execution_speed_scale)
 
         # The final contact point is the configured semantic -X grasp point,
         # plus the optional final-only body-base Z calibration.
@@ -665,8 +663,8 @@ def main() -> int:
                 stage="沿 TCP +X 从后方延长线推进至抓取点",
             )
         else:
-            plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage="沿 TCP +X 从后方延长线推进至抓取点")
-            recover_target_tcp_pose(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, xy_tolerance_m=args.q1_xy_tolerance_m, z_tolerance_m=args.q1_z_tolerance_m, orientation_tolerance_rad=args.q1_pitch_tolerance_rad, correction_attempts=args.z_pitch_correction_attempts, stage="抓取点 TCP 位姿校验")
+            plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage="沿 TCP +X 从后方延长线推进至抓取点", execution_speed_scale=args.trajectory_execution_speed_scale)
+            recover_target_tcp_pose(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, xy_tolerance_m=args.q1_xy_tolerance_m, z_tolerance_m=args.q1_z_tolerance_m, orientation_tolerance_rad=args.q1_pitch_tolerance_rad, correction_attempts=args.z_pitch_correction_attempts, stage="抓取点 TCP 位姿校验", execution_speed_scale=args.trajectory_execution_speed_scale)
 
         grasp_attempt_targets = [
             ("初始抓取点", grasp_target),
@@ -709,7 +707,16 @@ def main() -> int:
         lift_failures: list[str] = []
         for lift_m in args.q1_post_grasp_lift_m:
             try:
-                plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=tcp[:2] + [tcp[2] + lift_m] + tcp[3:], planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage=f"Q1 抓后 +Z 上抬 {lift_m * 1000:.0f} mm")
+                plan_and_follow(
+                    arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
+                    ik_frame=ik_frame, tcp_offset=tcp_offset,
+                    target=tcp[:2] + [tcp[2] + lift_m] + tcp[3:],
+                    planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc,
+                    retries=args.start_sync_retries,
+                    stage=f"Q1 抓后 +Z 上抬 {lift_m * 1000:.0f} mm",
+                    execution_speed_scale=args.trajectory_execution_speed_scale,
+                    rrtstar_goal_tolerance=True,
+                )
                 break
             except TrajectoryPlanningError as exc:
                 lift_failures.append(str(exc))

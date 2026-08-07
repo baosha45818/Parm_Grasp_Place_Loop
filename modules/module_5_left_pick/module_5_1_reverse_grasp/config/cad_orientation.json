@@ -8,5 +8,7 @@
   "minimum_reverse_depth_match_fraction": 0.70,
   "wide_head_outward_grasp_offset_m": 0.01,
   "wide_head_inward_grasp_offset_m": 0.010,
-  "camera_left_grasp_shift_m": 0.005
+  "grasp_width_axis_stl": [-0.00040286, -0.99999954, -0.00086799],
+  "grasp_lateral_offset_m": 0.005,
+  "grasp_lateral_offset_axis": "grasp_frame_+Y"
 }

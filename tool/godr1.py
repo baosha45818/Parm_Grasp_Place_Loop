@@ -14,17 +14,18 @@ from planner_joint_motion import build_parser, plan_and_execute
 #         70.5734
 # ]
 
-# 1 new
-OBSERVATION_JOINTS_DEG =[
-        164.5464,
-        56.8637,
-        -68.9227,
-        78.2515,
-        -24.3923,
-        3.9098,
-        78.3202
-]
+# # 1 new
+# OBSERVATION_JOINTS_DEG =[
+#         164.5464,
+#         56.8637,
+#         -68.9227,
+#         78.2515,
+#         -24.3923,
+#         3.9098,
+#         78.3202
+# ]
 
+# # 2 old
 # OBSERVATION_JOINTS_DEG =[
 #         162.5673,
 #         58.7975,
@@ -35,6 +36,16 @@ OBSERVATION_JOINTS_DEG =[
 #         79.6811
 #       ]
 
+# 2 new
+OBSERVATION_JOINTS_DEG = [
+    163.136,
+    59.4977,
+    -71.1186,
+    80.2579,
+    -21.8408,
+    -0.7594,
+    79.0549,
+]
 def main() -> None:
     args = build_parser("通过规划器移动右臂到 PC 观察关节位").parse_args()
     plan_and_execute(

@@ -7,8 +7,18 @@ ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 # The canonical D405 eye-in-hand calibration is maintained with the Loop
 # configuration rather than under the vendored GraspNet source tree.
 LOOP_ROOT="$(cd "$ROOT_DIR/../.." && pwd)"
+# Module 1-1 的所有重量/力稳定性阈值只从此共享配置读取。
+# Module 2/3 会继承本次 handoff 中记录的实际值，而不各自维护一份阈值。
+source "$LOOP_ROOT/config/grasp_weight_thresholds.conf"
 cd "$ROOT_DIR"
-LEFT_SPEED_SCALE="${PARM_LEFT_SPEED_SCALE:-2.0}"
+# GraspNet needs a slightly faster approach than the rest of the Loop, but
+# this must not change the shared left-arm speed used by Module 2/3.  This is
+# passed directly to both RRTStar and LIN planning below (valid range (0, 1]).
+GRASPNET_PLANNER_SPEED="${GRASPNET_PLANNER_SPEED:-0.3}"
+if ! awk "BEGIN { exit !($GRASPNET_PLANNER_SPEED > 0 && $GRASPNET_PLANNER_SPEED <= 1) }"; then
+  echo "Invalid GRASPNET_PLANNER_SPEED=$GRASPNET_PLANNER_SPEED; use a value in (0, 1]." >&2
+  exit 2
+fi
 VISUALIZATION_ARGS=()
 case "${GRASPNET_VISUALIZATION:-1}" in
   0|false|FALSE|no|NO)
@@ -34,6 +44,13 @@ case "${GRASPNET_WORKPIECE_ID:-}" in
     ;;
   1|2)
     WORKPIECE_ARGS+=(--workpiece-id "$GRASPNET_WORKPIECE_ID")
+    # Dense workpiece-2 stacks frequently leave only a millimetre of visible
+    # support near a usable contact edge.  Keep workpiece 1 at the global
+    # 4 mm safety default; only workpiece 2 receives this ranking/filtering
+    # relaxation.  Collision and closing-volume support checks remain active.
+    if [[ "${GRASPNET_WORKPIECE_ID}" == "2" ]]; then
+      WORKPIECE_ARGS+=(--min-grasp-edge-clearance-m 0.001)
+    fi
     ;;
   *)
     echo "Invalid GRASPNET_WORKPIECE_ID=${GRASPNET_WORKPIECE_ID}; use 1 or 2." >&2
@@ -96,8 +113,8 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --planner-tool-frame left_eef \
   --planner-direct-grasp-center \
   --planner-group left_arm \
-  --planner-max-vel "$(awk "BEGIN {print 0.1 * $LEFT_SPEED_SCALE}")" \
-  --planner-max-acc "$(awk "BEGIN {print 0.1 * $LEFT_SPEED_SCALE}")" \
+  --planner-max-vel "$GRASPNET_PLANNER_SPEED" \
+  --planner-max-acc "$GRASPNET_PLANNER_SPEED" \
   --planner-pregrasp-mode rrtstar \
   --planner-descend-mode lin \
   --arm-host 192.168.88.1 \
@@ -115,24 +132,28 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --femto-x-abs-max 1.20 --femto-y-abs-max 1.20 \
   --roi 0 0 512 336 \
   --femto-roi 175 281 488 228 \
-  --collision-thresh 0.7 \
+  --collision-thresh 0.5 \
   --collision-voxel-size 0.005 \
-  --collision-approach-dist -1 \
+  --collision-approach-dist 0.01 \
   --min-grasp-approach-angle-deg 60 \
   --min-grasp-edge-clearance-m 0.004 \
   --pregrasp-height-m 0.10 \
-  --grasp-downward-probe-m 0.003 \
+  --grasp-downward-probe-m -0.02 \
   --gripper-host "${PARM_GRIPPER_HOST:-127.0.0.1}" \
   --gripper-hand 1 \
-  --gripper-open-width-m 0.085 \
+  --gripper-open-width-m 0.065 \
   --gripper-width-margin-m 0.005 \
-  --gripper-force 60 \
+  --gripper-force 100 \
   --gripper-close-force 100 \
   --grasp-weight-check \
-  --weight-empty-max-g 35 \
-  --weight-single-min-g 35.000000001 \
-  --weight-single-max-g 129.999999999 \
-  --weight-multiple-min-g 130 \
+  --weight-empty-max-g "$WEIGHT_EMPTY_MAX_G" \
+  --weight-single-min-g "$WEIGHT_SINGLE_MIN_G" \
+  --weight-single-max-g "$WEIGHT_SINGLE_MAX_G" \
+  --weight-multiple-min-g "$WEIGHT_MULTIPLE_MIN_G" \
+  --weight-max-axis-mad-n "$WEIGHT_MAX_AXIS_MAD_N" \
+  --weight-check-samples "$WEIGHT_CHECK_SAMPLES" \
+  --weight-check-timeout-s "$WEIGHT_CHECK_TIMEOUT_S" \
+  --weight-check-settle-s "$WEIGHT_CHECK_SETTLE_S" \
   --weight-contiguous-single-band \
   --max-weight-retries 20 \
   --max-operator-declines 20 \

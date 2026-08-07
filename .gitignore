@@ -3,6 +3,7 @@
 *.log.*
 **/[Ll]og/
 **/[Ll]ogs/
+log-2/
 output/
 runtime/
 **/capture/

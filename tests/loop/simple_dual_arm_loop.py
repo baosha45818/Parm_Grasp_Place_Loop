@@ -110,7 +110,7 @@ BUFFER_EMPTY = 0
 BUFFER_TABLE_READY = 1
 BUFFER_HANDOFF_READY = 2
 NO_GRASP_EXIT_CODE = 20
-MAX_REVERSE_TABLE_GRASP_ATTEMPTS = 4
+MAX_REVERSE_TABLE_GRASP_ATTEMPTS = 5
 BUFFER_WORKPIECE_FILE = "active_buffer_workpiece.json"
 MODULE2_INSUFFICIENT_POINTS_DISCARDED = "INSUFFICIENT_POINT_CLOUD_DISCARDED"
 MODULE2_REGISTRATION_FAILED_RECOVERED = "PC1_PC2_REGISTRATION_FAILED_RECOVERED"
@@ -1017,7 +1017,7 @@ def left_worker(
                 complete_workpiece_timer(active_workpiece_id, outcome="INSUFFICIENT_POINT_CLOUD")
                 print(
                     "[left] 本轮因inspect有效点云不足已正常丢弃；"
-                    "buffer保持为空，直接开始下一轮。",
+                    "保持现有缓冲区状态，直接开始下一轮。",
                     flush=True,
                 )
                 continue
@@ -1026,19 +1026,18 @@ def left_worker(
                 complete_workpiece_timer(
                     active_workpiece_id, outcome="PC1_PC2_REGISTRATION_FAILED"
                 )
-                set_status(
-                    buffer_state, BUFFER_EMPTY,
-                    "PC1/PC2均未得到可信位姿，已回graspup并松开夹爪",
-                )
+                # 这是本轮左臂手中工件的局部恢复。若右臂正在处理上一件
+                # Buffer 工件，状态会是 TABLE_READY/HANDOFF_READY，绝不能
+                # 因本轮 Inspect 失败而将那一件错误标成 EMPTY。
                 report_module_status(
                     "module_2_left_inspect",
                     ResultStatus.RETRY,
-                    "PC1/PC2配准失败已完成安全恢复；从 Module 1 重新抓取",
+                    "PC1/PC2配准失败已完成左臂安全恢复；保持现有缓冲区状态并从 Module 1 重新抓取",
                     reason_code="PC1_PC2_REGISTRATION_FAILED_RECOVERED",
                 )
                 print(
                     "[left] 本轮PC1/PC2均未得到可信位姿；"
-                    "buffer已保持为空，直接从 Module 1 开始下一轮。",
+                    "保持现有缓冲区状态，直接从 Module 1 开始下一轮。",
                     flush=True,
                 )
                 continue
@@ -1046,18 +1045,16 @@ def left_worker(
             if branch == MODULE2_HELD_OBJECT_DROPPED:
                 complete_workpiece_timer(active_workpiece_id, outcome="HELD_OBJECT_DROPPED")
                 # Module 3 has already performed the physical recovery
-                # (return to graspup and open the left gripper).  Clear only
-                # the scheduler state here so the next cycle is a true fresh
-                # Module-1 grasp rather than a continuation of stale state.
-                set_status(buffer_state, BUFFER_EMPTY, "力传感器判定非单件/掉件，重置本轮状态")
+                # (return to graspup and open the left gripper). 此处仅重置
+                # 本轮左臂流程，不能清空右臂正在处理的旧 Buffer 项。
                 report_module_status(
                     "force_single_workpiece_check",
                     ResultStatus.RETRY,
-                    "力传感器未确认单件或检测到掉件；已清空状态，从 Module 1 重新开始",
+                    "力传感器未确认单件或检测到掉件；保持现有缓冲区状态，从 Module 1 重新开始",
                     reason_code="HELD_OBJECT_DROPPED",
                 )
                 print(
-                    "[left] 本轮工件途中掉落或不再是单件；状态已重置，"
+                    "[left] 本轮工件途中掉落或不再是单件；左臂状态已重置，"
                     "直接从 Module 1 开始下一轮 GraspNet。",
                     flush=True,
                 )
@@ -1067,7 +1064,7 @@ def left_worker(
                 complete_workpiece_timer(active_workpiece_id, outcome="PLANNING_TIMEOUT_RECOVERED")
                 print(
                     "[left] 本轮最终放置规划超时后已完成回graspup/松爪恢复；"
-                    "buffer保持为空，直接开始下一轮。",
+                    "保持现有缓冲区状态，直接开始下一轮。",
                     flush=True,
                 )
                 continue
@@ -1120,7 +1117,7 @@ def left_worker(
                 )
                 if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
                     raise RuntimeError(
-                        "左臂桌面反抓已连续 4 次未确认夹到工件；"
+                        "左臂桌面反抓已连续 5 次未确认夹到工件；"
                         "已停止重试并保持在反抓预备位。"
                     )
                 if stop_event.wait(0.2):
@@ -1200,8 +1197,8 @@ def left_worker(
 
 
 def run_right_idle(
-    args: argparse.Namespace, stop_event: mp.Event, buffer_state: mp.Value,
-    runtime_dir: Path, workpiece_id: str, *, close_first: bool = False,
+    args: argparse.Namespace, stop_event: mp.Event, runtime_dir: Path,
+    *, close_first: bool = False,
 ) -> None:
     report_module_status("module_10_right_idle", ResultStatus.WAIT, "开始右臂放置收尾并回 Idle")
     opened_file = runtime_dir / f"right_gripper_opened_{time.time_ns()}.json"
@@ -1235,22 +1232,6 @@ def run_right_idle(
                 payload = json.loads(opened_file.read_text(encoding="utf-8"))
                 if payload.get("event") != "right_gripper_opened_after_place":
                     raise RuntimeError(f"右夹爪打开同步标记无效: {payload}")
-                if get_status(buffer_state) not in {
-                    BUFFER_TABLE_READY, BUFFER_HANDOFF_READY,
-                }:
-                    raise RuntimeError(
-                        "右夹爪打开时缓冲区状态异常："
-                        f"{status_label(get_status(buffer_state))}"
-                    )
-                # Remove this item's marker before publishing EMPTY.  Once
-                # EMPTY is visible, the left worker may publish the next
-                # Buffer item while this right-arm idle motion continues.
-                clear_buffer_workpiece(runtime_dir, workpiece_id)
-                set_status(
-                    buffer_state,
-                    BUFFER_EMPTY,
-                    "右臂已将工件放入孔位并确认夹爪打开",
-                )
                 opened_published = True
     except KeyboardInterrupt:
         cancel_both_arms(args.arm_host, "Ctrl+C 停止右臂放置收尾")
@@ -1265,21 +1246,6 @@ def run_right_idle(
         payload = json.loads(opened_file.read_text(encoding="utf-8"))
         if payload.get("event") != "right_gripper_opened_after_place":
             raise RuntimeError(f"右夹爪打开同步标记无效: {payload}")
-        if get_status(buffer_state) not in {
-            BUFFER_TABLE_READY, BUFFER_HANDOFF_READY,
-        }:
-            raise RuntimeError(
-                "右夹爪打开时缓冲区状态异常："
-                f"{status_label(get_status(buffer_state))}"
-            )
-        # Same ordering as the live-process path above.  The child may have
-        # exited just after publishing the opened marker.
-        clear_buffer_workpiece(runtime_dir, workpiece_id)
-        set_status(
-            buffer_state,
-            BUFFER_EMPTY,
-            "右臂已将工件放入孔位并确认夹爪打开",
-        )
         opened_published = True
     if process.returncode != 0:
         report_module_status(
@@ -1291,6 +1257,20 @@ def run_right_idle(
     if not opened_published:
         raise RuntimeError("右臂放置收尾结束但没有确认右夹爪已打开")
     report_module_status("module_10_right_idle", ResultStatus.SUCCESS, "右臂已放置、开爪并回 Idle")
+
+
+def release_buffer_at_right_place_ready(
+    buffer_state: mp.Value, runtime_dir: Path, workpiece_id: str, reason: str,
+) -> None:
+    """右臂已抓走当前 Buffer 工件并到达 place_ready，释放单容量 Buffer。"""
+    current_state = get_status(buffer_state)
+    if current_state not in {BUFFER_TABLE_READY, BUFFER_HANDOFF_READY}:
+        raise RuntimeError(
+            "右臂到 place_ready 时缓冲区状态异常："
+            f"{status_label(current_state)}"
+        )
+    clear_buffer_workpiece(runtime_dir, workpiece_id)
+    set_status(buffer_state, BUFFER_EMPTY, reason)
 
 
 def move_right_to_place_ready_after_pusht(
@@ -1402,7 +1382,7 @@ def wait_for_left_grasp_observation(
 def validate_handoff_right_place_ready(
     marker_file: Path, buffer_state: mp.Value,
 ) -> None:
-    """确认右手到达 right_place_ready，但保持状态2直到孔位放置后开爪。"""
+    """确认右手到达 right_place_ready；调用方随后释放已被带走的 Buffer 项。"""
     payload = json.loads(marker_file.read_text(encoding="utf-8"))
     if payload.get("event") != "right_place_ready":
         raise RuntimeError(f"交接同步标记内容无效: {payload}")
@@ -1517,7 +1497,7 @@ def run_reverse_handoff_until_right_place_ready(
     args: argparse.Namespace, buffer_state: mp.Value, stop_event: mp.Event,
     handoff_result_file: Path, marker_file: Path,
 ) -> None:
-    """运行Module 8-2；buffer保持2直到孔位放置后开爪。"""
+    """运行Module 8-2，确认右臂实际到达对应工件的 place_ready。"""
     report_module_status("module_8_2_left_handoff", ResultStatus.WAIT, "开始右手接取反抓工件")
     result, expected_workpiece = validate_reverse_handoff_contract(
         handoff_result_file
@@ -1595,7 +1575,7 @@ def right_worker(
                 print(
                     "\n[right] 主分支1：启动右臂观察/摆正/抓取；完成后关节 RRTConnect(OMPL) "
                     "到 right_place_ready，随后立即执行 ServoPose 孔位摆动放置；"
-                    "确认开爪后释放缓冲区，随后上升并回 Idle。",
+                    "到 place_ready 后释放缓冲区，随后继续放置并回 Idle。",
                     flush=True,
                 )
                 environment = os.environ.copy()
@@ -1632,11 +1612,15 @@ def right_worker(
                     arm_host=args.arm_host, label="右臂观察/摆正/抓取", env=environment,
                 )
                 move_right_to_place_ready_after_pusht(args, stop_event)
+                release_buffer_at_right_place_ready(
+                    buffer_state,
+                    runtime_dir,
+                    active_workpiece_id,
+                    "右臂已抓走缓冲区工件并到达 place_ready",
+                )
                 run_right_place_wiggle(args, stop_event, right_servo_active)
                 with module_timer("module_10_right_idle"):
-                    run_right_idle(
-                        args, stop_event, buffer_state, runtime_dir, active_workpiece_id
-                    )
+                    run_right_idle(args, stop_event, runtime_dir)
                 complete_workpiece_timer(active_workpiece_id, outcome="SUCCESS")
                 active_workpiece_id = None
                 right_idle_event.set()
@@ -1665,8 +1649,14 @@ def right_worker(
                         handoff_result_file,
                         marker_file,
                     )
-                # 到这里交接脚本已让左臂回到当前工件的安全回程位；buffer仍保持状态2，
-                # 直到右臂完成孔位放置并确认打开夹爪。
+                # 右臂已实际到达此工件对应的 place_ready 并抓走工件；此后右臂
+                # 的放置路径不再占用缓冲区，允许左臂向单容量缓冲区放入下一件。
+                release_buffer_at_right_place_ready(
+                    buffer_state,
+                    runtime_dir,
+                    active_workpiece_id,
+                    "右臂已完成交接并到达 place_ready",
+                )
                 left_needs_graspup.set()
                 handoff_left_clear.set()
                 print(
@@ -1676,9 +1666,7 @@ def right_worker(
                 )
                 run_right_place_wiggle(args, stop_event, right_servo_active)
                 with module_timer("module_10_right_idle"):
-                    run_right_idle(
-                        args, stop_event, buffer_state, runtime_dir, active_workpiece_id
-                    )
+                    run_right_idle(args, stop_event, runtime_dir)
                 complete_workpiece_timer(active_workpiece_id, outcome="SUCCESS")
                 active_workpiece_id = None
                 right_idle_event.set()

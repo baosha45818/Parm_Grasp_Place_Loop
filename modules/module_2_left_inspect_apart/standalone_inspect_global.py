@@ -57,13 +57,6 @@ from tool.inspection_support.stl_model import (
 )
 from tool.planner_runtime import PlannerRuntime
 from tool.runtime_log import RuntimeLogCapture
-from tests.grasp_weight_check import (
-    ForceWindow,
-    WeightThresholds,
-    classify_grasp_weight,
-    collect_force_window,
-)
-
 from tool.inspection_support.legacy_inspect.capture_selected_rgbd import capture_robot_state
 from tool.inspection_support.legacy_inspect.generate_pc2_sam2_depth_prompts import (
     far_depth_negative_points,
@@ -91,6 +84,9 @@ DEFAULT_URDF_DESCRIPTION_ROOT = Path(
 DEFAULT_LEFT_ARM_KINEMATICS = Path(
     "/home/dainanjun/Public/plucky_hjt_parm/arm_configs/arm_kinematics/left.yaml"
 )
+GRIPPER_HOLD_STABLE_S = 0.5
+GRIPPER_HOLD_POLL_S = 0.1
+GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
 def load_object_triangles(cfg: dict) -> np.ndarray:
@@ -312,7 +308,7 @@ def parse_args() -> argparse.Namespace:
         help="自动候选中剔除 URDF 投影内、实测比 URDF 更近至少 15mm 的像素（默认关闭）",
     )
     parser.add_argument("--pc2-axial-tail-recovery", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pc2-axial-tail-max-behind-m", type=float, default=0.050)
+    parser.add_argument("--pc2-axial-tail-max-behind-m", type=float, default=0.060)
     parser.add_argument(
         "--global-mask-max-deep-urdf-ratio", type=float, default=0.35,
         help="自动最终 mask 位于 URDF 投影深处的最大比例（默认 0.35）",
@@ -499,7 +495,7 @@ def _sam2_prompt(
     elif hypothesis == "colour_difference":
         # This is a fallback specifically intended to reject residual gripper
         # pixels, so require stronger robot exclusion than brown/silver.
-        minimum_support_coverage = 0.60
+        minimum_support_coverage = 0.55
         minimum_plausible_coverage = 0.40
         maximum_unexplained_robot_ratio = 0.20
     else:
@@ -1446,8 +1442,8 @@ def _auto_rgbd_prompt(
         seed_brightness_min, seed_brightness_max = 30, 130
         point_brightness_min, point_brightness_max = 35, 100
     elif hypothesis == "silver":
-        seed_brightness_min, seed_brightness_max = 90, 255
-        point_brightness_min, point_brightness_max = 105, 250
+        seed_brightness_min, seed_brightness_max = 90, 220
+        point_brightness_min, point_brightness_max = 105, 220
     elif hypothesis == "colour_difference":
         # Both workpieces are consistently brighter than the depth-confirmed
         # black gripper, but their chroma is not stable enough for one fixed
@@ -1571,7 +1567,9 @@ def _auto_rgbd_prompt(
             return None
     else:
         candidate_after_urdf_pixel_veto = candidate.copy()
-    negatives = _pc1_fixed_negative_points(rgb)
+    # The calibrated fixed negatives describe PC1 only.  Reusing them in PC2
+    # can put negative prompts directly on a rotated workpiece/tail.
+    negatives = _pc1_fixed_negative_points(rgb) if view == "pc1" else []
     forbidden = np.zeros_like(candidate, dtype=np.uint8)
     for x, y in negatives: cv2.circle(forbidden, (x, y), 42, 1, -1)
     eligible = (
@@ -1581,6 +1579,8 @@ def _auto_rgbd_prompt(
         & (brightness <= point_brightness_max)
         & ~(forbidden > 0)
     )
+    if view == "pc2":
+        eligible &= ~(self_pixels & (brightness <= 90))
     if hypothesis == "colour_difference":
         eligible &= relative_colour
     distance = cv2.distanceTransform(candidate.astype(np.uint8), cv2.DIST_L2, 5)
@@ -1669,9 +1669,44 @@ def _auto_rgbd_prompt(
         if float(signatures[label]["urdf_contact_distance_px"])
         <= float(args.global_anchor_contact_max_px)
     ]
-    anchor_pool = contact_ids or object_ids
-    anchor_label = max(anchor_pool, key=lambda label: int(areas[label]))
+    pc2_exposed_seed = np.zeros_like(candidate, dtype=bool)
+    pc2_gripper_center = None
+    pc2_side_axis = None
+    pc2_exposed_ids: list[int] = []
+    if view == "pc2" and str(args.workpiece) == "1" and projected.any():
+        guard = cv2.dilate(projected.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))).astype(bool)
+        pc2_exposed_seed = candidate & (~guard | object_in_front)
+        distance_to_candidate = cv2.distanceTransform((~candidate).astype(np.uint8), cv2.DIST_L2, 5)
+        local_gripper_projection = projected & (distance_to_candidate <= 80.0)
+        if np.count_nonzero(local_gripper_projection) < 200:
+            local_gripper_projection = projected
+        py, px = np.where(local_gripper_projection)
+        projected_xy = np.column_stack((px, py)).astype(np.float64)
+        pc2_gripper_center = np.mean(projected_xy, axis=0)
+        projected_centered = projected_xy - pc2_gripper_center
+        projected_covariance = projected_centered.T @ projected_centered / max(1, len(projected_xy) - 1)
+        projected_values, projected_vectors = np.linalg.eigh(projected_covariance)
+        gripper_axis = projected_vectors[:, int(np.argmax(projected_values))]
+        pc2_side_axis = np.array([-gripper_axis[1], gripper_axis[0]])
+        pc2_exposed_ids = [label for label in object_ids if np.count_nonzero((labels == label) & pc2_exposed_seed) >= 300]
+        anchor_pool = pc2_exposed_ids or contact_ids or object_ids
+    else:
+        anchor_pool = contact_ids or object_ids
+    anchor_label = max(anchor_pool, key=lambda label: int(np.count_nonzero((labels == label) & pc2_exposed_seed)) if label in pc2_exposed_ids else int(areas[label]))
     associated = {anchor_label}
+    if view == "pc2" and str(args.workpiece) == "1" and projected.any():
+        anchor_for_side = labels == anchor_label
+        distance_to_anchor_for_side = cv2.distanceTransform((~anchor_for_side).astype(np.uint8), cv2.DIST_L2, 5)
+        local_gripper = projected & (distance_to_anchor_for_side <= 80.0)
+        if np.count_nonzero(local_gripper) >= 100:
+            gy, gx = np.where(local_gripper)
+            pc2_gripper_center = np.array([float(np.median(gx)), float(np.median(gy))])
+            pc2_side_axis = np.array([1.0, 0.0])
+    pc2_anchor_side = None
+    if pc2_side_axis is not None and pc2_gripper_center is not None:
+        ay, ax = np.where((labels == anchor_label) & pc2_exposed_seed)
+        if ax.size:
+            pc2_anchor_side = float(np.dot(np.array([float(np.mean(ax)), float(np.mean(ay))]) - pc2_gripper_center, pc2_side_axis))
     component_decisions: list[dict[str, object]] = []
     # Compare every island directly with the main anchor.  Letting an accepted
     # speck become a new anchor creates a bridge from the workpiece, through a
@@ -1680,7 +1715,9 @@ def _auto_rgbd_prompt(
     to_anchor = cv2.distanceTransform((~anchor).astype(np.uint8), cv2.DIST_L2, 5)
     anchor_signature = signatures[anchor_label]
     anchor_scale_px = float(anchor_signature["bbox_diagonal_px"])
-    anchor_chroma = np.asarray(anchor_signature["lab_median"])[1:]
+    anchor_lab = np.asarray(anchor_signature["lab_median"])
+    anchor_lightness = float(anchor_lab[0])
+    anchor_chroma = anchor_lab[1:]
     anchor_depth_low_m = float(anchor_signature["depth_q25_m"])
     anchor_depth_high_m = float(anchor_signature["depth_q75_m"])
     anchor_y, anchor_x = np.where(anchor)
@@ -1739,7 +1776,11 @@ def _auto_rgbd_prompt(
             and chroma_delta <= 10.0
             and directional_corridor
         )
-        accepted = close_fragment or same_material_lobe
+        accepted = (close_fragment or same_material_lobe) and not (
+            view == "pc2"
+            and str(args.workpiece) == "1"
+            and pc2_side_axis is not None
+        )
         component_decisions.append({
             "label": int(label),
             "area_px": int(areas[label]),
@@ -1770,6 +1811,40 @@ def _auto_rgbd_prompt(
         })
         if accepted:
             associated.add(label)
+    if view == "pc2":
+        remote_tail_candidates = []
+        for label in ids:
+            if label in associated or bool(signatures[label]["robot_veto"]):
+                continue
+            component = labels == label
+            if view == "pc2" and str(args.workpiece) == "1":
+                visible_component = component & pc2_exposed_seed
+                if np.count_nonzero(visible_component) < 300:
+                    continue
+                component = visible_component
+            ys, xs = np.where(component)
+            centroid = np.array([float(np.mean(xs)), float(np.mean(ys))])
+            delta = centroid - anchor_centroid
+            axial = float(abs(np.dot(delta, major_axis)))
+            perpendicular = float(np.linalg.norm(delta - np.dot(delta, major_axis) * major_axis))
+            signature = signatures[label]
+            candidate_side = float(np.dot(centroid - pc2_gripper_center, pc2_side_axis)) if pc2_side_axis is not None and pc2_gripper_center is not None else 0.0
+            vertical_offset_px = float(abs(centroid[1] - anchor_centroid[1]))
+            # The PC2 camera can see the opposite lobe below-left rather than
+            # at exactly the same image row.  Permit that rotated layout, but
+            # only close to the projected gripper; colour/depth checks below
+            # still reject bright background and unrelated table parts.
+            same_height_corridor = bool(
+                vertical_offset_px <= max(190.0, 1.20 * anchor_scale_px)
+                and float(signature["urdf_contact_distance_px"]) <= 80.0
+            )
+            opposite_gripper_side = bool(pc2_anchor_side is not None and pc2_anchor_side * candidate_side < 0.0 and abs(candidate_side) >= 20.0)
+            candidate_lab = np.asarray(signature["lab_median"])
+            lightness_delta = abs(float(candidate_lab[0]) - anchor_lightness)
+            if (opposite_gripper_side and same_height_corridor and int(signature["area_px"]) >= 400 and abs(float(signature["depth_median_m"]) - float(anchor_signature["depth_median_m"])) <= 0.060 and lightness_delta <= 70.0 and float(np.linalg.norm(candidate_lab[1:] - anchor_chroma)) <= 10.0):
+                remote_tail_candidates.append(label)
+        if remote_tail_candidates:
+            associated.add(max(remote_tail_candidates, key=lambda label: int(areas[label])))
     pc1_excluded_lobes: list[int] = []
     if view == "pc1":
         # PC1 is a wide, clean-body view.  Do not let a second lobe inside the
@@ -1780,6 +1855,8 @@ def _auto_rgbd_prompt(
         ]
         associated.difference_update(pc1_excluded_lobes)
     prompt_support = np.isin(labels, list(associated))
+    if view == "pc2" and str(args.workpiece) == "1" and pc2_exposed_seed.any():
+        prompt_support &= pc2_exposed_seed
     # A prompt on every RGB-D speck lets one bad island force SAM2 to retain a
     # robot component.  Keep the anchor, then choose spatially diverse cues so
     # a small opposite-side tail is preferred over redundant nearby fragments.
@@ -1812,19 +1889,61 @@ def _auto_rgbd_prompt(
         if not positives:
             positives = [points[anchor_label]]
     else:
-        remaining = set(associated) - {anchor_label}
-        while remaining and len(positive_labels) < int(args.auto_positive_count):
-            selected_xy = np.asarray([points[label] for label in positive_labels], dtype=float)
-            next_label = max(
-                remaining,
-                key=lambda label: float(np.min(np.sum(
-                    (selected_xy - np.asarray(points[label], dtype=float)) ** 2,
-                    axis=1,
-                ))),
+        if view == "pc2" and str(args.workpiece) == "1" and pc2_exposed_seed.any():
+            # Once the component is accepted from its exposed RGB-D evidence,
+            # distribute prompts over the whole component.  Restricting point
+            # placement back to ``pc2_exposed_seed`` clusters every cue in the
+            # one portion lying outside the URDF guard.
+            trusted_anchor = (
+                anchor
+                & (measured > 0)
+                & ~(self_pixels & (brightness <= 90))
             )
-            positive_labels.append(next_label)
-            remaining.remove(next_label)
-        positives = [points[label] for label in positive_labels]
+            x_grid = np.arange(trusted_anchor.shape[1])[None, :]
+            split_x = float(pc2_gripper_center[0]) if pc2_gripper_center is not None else float(anchor_centroid[0])
+            left_region = trusted_anchor & (x_grid <= split_x - 12.0)
+            right_region = trusted_anchor & (x_grid >= split_x + 12.0)
+            left_valid = np.count_nonzero(left_region) >= 300
+            right_valid = np.count_nonzero(right_region) >= 300
+            positives = []
+            if left_valid and right_valid:
+                left_count = max(1, int(args.auto_positive_count) - 2)
+                positives.extend(_spatially_uniform_positive_points(_prompt_interior(left_region), left_count))
+                positives.extend(_spatially_uniform_positive_points(_prompt_interior(right_region), min(2, int(args.auto_positive_count))))
+            else:
+                # A perforated stamping can have a single thick patch that
+                # survives the generic 10px interior preference, concentrating
+                # every point in one corner.  A fixed 3px inset remains safely
+                # inside the component while covering its full extent.
+                anchor_point_distance = cv2.distanceTransform(
+                    trusted_anchor.astype(np.uint8), cv2.DIST_L2, 5
+                )
+                anchor_point_region = trusted_anchor & (
+                    anchor_point_distance >= 3.0
+                )
+                if not anchor_point_region.any():
+                    anchor_point_region = trusted_anchor
+                positives = _spatially_uniform_positive_points(
+                    anchor_point_region, int(args.auto_positive_count)
+                )
+            if not positives:
+                positives = [points[anchor_label]]
+            positive_labels = [anchor_label]
+            tail_labels = [label for label in associated if label != anchor_label]
+            if tail_labels and not (left_valid and right_valid):
+                tail_label = max(tail_labels, key=lambda label: int(np.count_nonzero((labels == label) & pc2_exposed_seed)))
+                tail_interior = _prompt_interior((labels == tail_label) & pc2_exposed_seed & (measured > 0))
+                positives.extend(_spatially_uniform_positive_points(tail_interior, min(2, int(args.auto_positive_count))))
+                positive_labels.append(tail_label)
+
+        else:
+            remaining = set(associated) - {anchor_label}
+            while remaining and len(positive_labels) < int(args.auto_positive_count):
+                selected_xy = np.asarray([points[label] for label in positive_labels], dtype=float)
+                next_label = max(remaining, key=lambda label: float(np.min(np.sum((selected_xy - np.asarray(points[label], dtype=float)) ** 2, axis=1))))
+                positive_labels.append(next_label)
+                remaining.remove(next_label)
+            positives = [points[label] for label in positive_labels]
     positive_to_urdf_depth_gaps_m: list[float] = []
     if projected.any():
         _, nearest_projected = ndimage.distance_transform_edt(
@@ -1840,13 +1959,35 @@ def _auto_rgbd_prompt(
                     measured_depth_m - rendered_depth_m
                 )
     ys, xs = np.where(prompt_support)
-    margin = int(args.pc1_roi_margin_px)
+    margin = 40 if view == "pc2" and str(args.workpiece) == "1" and pc2_exposed_seed.any() else int(args.pc1_roi_margin_px)
     box = [
         max(0, int(xs.min()) - margin),
         max(0, int(ys.min()) - margin),
         min(candidate.shape[1] - 1, int(xs.max()) + margin),
         min(candidate.shape[0] - 1, int(ys.max()) + margin),
     ]
+    if view == "pc2" and str(args.workpiece) == "1":
+        # Two valid lobes on opposite gripper sides can make SAM2 bridge
+        # through the intervening arm.  Add only depth-confirmed, near-black
+        # robot pixels as negatives; unlike the old PC1 fixed points these are
+        # frame-specific and cannot land on a bright workpiece/tail.
+        inside_box = np.zeros_like(candidate, dtype=bool)
+        inside_box[box[1]:box[3] + 1, box[0]:box[2] + 1] = True
+        protected_support = cv2.dilate(
+            prompt_support.astype(np.uint8),
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+        ).astype(bool)
+        confirmed_robot_negative_region = (
+            inside_box
+            & self_pixels
+            & (brightness <= 90)
+            & ~protected_support
+        )
+        negatives.extend(
+            _spatially_uniform_positive_points(
+                _prompt_interior(confirmed_robot_negative_region), 4
+            )
+        )
     # Rejected islands inside/near the final ROI are useful SAM2 negatives.
     # This is especially important for reflective robot holes that survived
     # measured-vs-rendered depth matching.  Keep the fixed negatives and add
@@ -1861,6 +2002,12 @@ def _auto_rgbd_prompt(
     )
     extra_negatives: list[list[int]] = []
     for label in rejected_labels:
+        if (
+            view == "pc2"
+            and str(args.workpiece) == "1"
+            and not bool(signatures[label]["robot_veto"])
+        ):
+            continue
         point = points[label]
         x, y = point
         if not (box[0] - margin <= x <= box[2] + margin and box[1] - margin <= y <= box[3] + margin):
@@ -1879,6 +2026,7 @@ def _auto_rgbd_prompt(
     return {
         "box": box,
         "positives": positives, "negatives": negatives,
+        "view": view,
         "strategy": f"global_dual_{hypothesis}_urdf_depth_order_contact_roi",
         "hypothesis": hypothesis,
         "extended_depth": extended_depth,
@@ -1949,6 +2097,88 @@ def _expand_workpiece2_main_mask(
         if not accepted.any(): break
         grown |= accepted
     return grown, {"added_pixels": int((grown & ~original).sum()), "trusted_main_depth_pixels": int(values.size), "main_depth_low_m": low, "main_depth_high_m": high, "passes": 16, "colour_difference": 30}
+
+
+def _postprocess_pc2_workpiece1_candidate(
+    raw_mask: np.ndarray,
+    auto: dict,
+    measured: np.ndarray,
+    depth: np.ndarray,
+    depth_scale: float,
+    rgb: np.ndarray,
+    self_pixels: np.ndarray,
+    args: argparse.Namespace,
+    min_depth_m: float,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Apply the complete PC2/workpiece-1 mask cleanup to one hypothesis.
+
+    Hypotheses are compared only after this identical constrained cleanup.  In
+    particular, a useful silver head is allowed to grow through compatible
+    RGB-D pixels before its quality is compared with brown/colour-difference.
+    """
+    mask = raw_mask.copy()
+    initial_pixels = int(np.count_nonzero(mask))
+    mask, hole_fill = _fill_small_enclosed_holes(mask)
+    prompt_support = auto["debug_masks"].get(
+        "prompt_support", auto["debug_masks"]["processed_near"]
+    )
+    mask, expansion = _expand_workpiece2_main_mask(
+        mask, measured, rgb, self_pixels, prompt_support,
+    )
+    before_depth = mask.copy()
+    tolerance_m = max(float(args.mask_positive_depth_tolerance_m), 0.060)
+    mask, depth_filter = _filter_mask_by_positive_depth(
+        mask,
+        depth,
+        depth_scale,
+        auto["positives"],
+        tolerance_m,
+        float(min_depth_m),
+        preserve_invalid_depth=True,
+    )
+    mask, component_cleanup = _main_mask_with_filled_holes(
+        mask, auto["positives"],
+    )
+    axial_tail = {"accepted_pixels": 0, "reason": "disabled"}
+    if bool(args.pc2_axial_tail_recovery):
+        mask, axial_tail = _recover_pc2_axial_tail(
+            mask,
+            raw_mask,
+            depth,
+            depth_scale,
+            auto["positives"],
+            self_pixels,
+            float(args.pc2_axial_tail_max_behind_m),
+        )
+    before_depth_pixels = int(np.count_nonzero(before_depth))
+    depth_filter["operation"] = (
+        "remove_farther_than_positive_median_then_keep_positive_components"
+    )
+    depth_filter["component_cleanup"] = component_cleanup
+    depth_filter["hypothesis"] = str(auto.get("hypothesis", "brown"))
+    depth_filter["effective_tolerance_m"] = tolerance_m
+    depth_filter["postprocess_retention_ratio"] = float(
+        np.count_nonzero(mask) / max(1, before_depth_pixels)
+    )
+    depth_filter["adaptive_wide_depth_retry"] = None
+    depth_filter["largest_component_collapse_recovery"] = None
+    depth_filter["axial_tail_recovery"] = axial_tail
+    return mask, {
+        "mask_postprocess": {
+            "operation": "pc2_workpiece1_defer_component_selection_until_after_rgbd_expansion",
+            "initial_mask_pixels": initial_pixels,
+            "initial_positive_component_retention_ratio": 1.0,
+            "initial_component_collapse_recovery": None,
+        },
+        "mask_urdf_hole_fill": hole_fill,
+        "mask_rgb_cleanup": {
+            "operation": "pc2_workpiece1_defer_dark_component_cleanup_until_after_rgbd"
+        },
+        "mask_rgbd_expansion": expansion,
+        "mask_depth_filter": depth_filter,
+        "mask_urdf_filter": {"operation": "disabled_global_urdf_used_only_before_sam2"},
+        "mask_opening_cleanup": {"operation": "disabled_global"},
+    }
 
 
 def _expand_pc1_workpiece2_mask_conservatively(
@@ -2138,7 +2368,7 @@ def _automatic_hypothesis_quality(
     else:
         # A bright-metal hypothesis is more likely to absorb the white table,
         # so require stronger RGB-D agreement than for dark/underexposed metal.
-        minimum_support_coverage = 0.60
+        minimum_support_coverage = 0.55
         minimum_plausible_coverage = 0.40
         maximum_unexplained_robot_ratio = 0.35
     oversized_border_background = bool(
@@ -2154,8 +2384,20 @@ def _automatic_hypothesis_quality(
         and raw_image_fraction >= 0.08
         and raw_bbox_fraction >= 0.30
     )
+    # In PC2 the held workpiece is observed around the gripper contact area,
+    # away from the image boundary.  A component entering continuously from
+    # the top edge is the robot arm itself; without this veto a dark-metal
+    # branch can narrowly pass its coverage threshold and beat the genuinely
+    # useful (but incomplete) silver workpiece mask.
+    pc2_top_border_robot_veto = bool(
+        auto.get("view") == "pc2"
+        and touched_edges["top"]
+        and raw_bbox[1] <= edge_margin
+    )
     scene_background_veto = bool(
-        oversized_border_background or far_behind_urdf_background
+        oversized_border_background
+        or far_behind_urdf_background
+        or pc2_top_border_robot_veto
     )
     valid = bool(
         foreground_pixels >= 500
@@ -2193,6 +2435,7 @@ def _automatic_hypothesis_quality(
         "minimum_positive_to_urdf_depth_gap_m": minimum_positive_depth_gap_m,
         "oversized_border_background": oversized_border_background,
         "far_behind_urdf_background": far_behind_urdf_background,
+        "pc2_top_border_robot_veto": pc2_top_border_robot_veto,
         "scene_background_veto": scene_background_veto,
     }
 
@@ -2647,6 +2890,15 @@ def _capture_and_register(
     measured, rendered, depth_matched_pixels, near_black_relaxed_pixels, self_pixels = _projected_self(
         depth, frame.color, frame.depth_intrinsics, frame.depth_scale, view, args, cfg
     )
+    # Persist raw RGB-D evidence before any automatic prompt/SAM2 operation.
+    # A later candidate or service failure must never erase PC2 offline data.
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(run_dir / f"{view}_rgb.png"), frame.color)
+    np.save(run_dir / f"{view}_depth.npy", depth)
+    np.save(run_dir / f"{view}_urdf_rendered_depth_m.npy", rendered)
+    cv2.imwrite(str(run_dir / f"{view}_urdf_self_removed.png"), self_pixels.astype(np.uint8) * 255)
+    cv2.imwrite(str(run_dir / f"{view}_urdf_projected_mask.png"), np.isfinite(rendered).astype(np.uint8) * 255)
+
     # 不区分 PC1/PC2。只有调用方明确选择
     # manual，或 auto-then-manual 的自动阶段失败，才进入人工提示。
     using_manual_prompt = args.prompt_mode == "manual"
@@ -2654,6 +2906,7 @@ def _capture_and_register(
         "operation": "skipped_manual_prompt"
     }
     automatic_raw_masks: dict[str, np.ndarray] = {}
+    automatic_postprocessed_masks: dict[str, np.ndarray] = {}
 
     def persist_automatic_prompt_failure() -> None:
         """Keep offline evidence even when no automatic prompt is selectable."""
@@ -2706,6 +2959,7 @@ def _capture_and_register(
                 args,
                 rendered,
                 hypothesis=hypothesis,
+                extended_depth_override=(False if str(args.workpiece) == "2" and hypothesis == "silver" else None),
                 view=view,
             )
             if candidate_auto is None:
@@ -2798,7 +3052,12 @@ def _capture_and_register(
                     selected_hypothesis = "silver"
                     selection_reason = "near_depth_silver_fallback_after_extended_failure"
         colour_difference_fallback: dict[str, object] = {"attempted": False}
-        if selected_hypothesis is None and bool(args.colour_difference_fallback):
+        compare_pc2_after_postprocess = bool(
+            view == "pc2" and str(args.workpiece) == "1"
+        )
+        if (
+            selected_hypothesis is None or compare_pc2_after_postprocess
+        ) and bool(args.colour_difference_fallback):
             colour_difference_fallback["attempted"] = True
             contrast_auto = _auto_rgbd_prompt(
                 measured,
@@ -2830,6 +3089,75 @@ def _capture_and_register(
                     selection_reason = "relative_lab_colour_difference_fallback"
             else:
                 colour_difference_fallback["reason"] = "no_reliable_relative_colour_candidate"
+
+        # PC2/workpiece-1 can be split by the gripper into several lobes.  A
+        # raw SAM2 mask (especially silver) may cover only the large head but
+        # become the best hypothesis after RGB-D continuation.  Therefore all
+        # available hypotheses must receive the same constrained postprocess
+        # before branch selection.
+        postprocess_hypotheses: dict[str, dict[str, object]] = {}
+        if compare_pc2_after_postprocess:
+            selected_hypothesis = None
+            selection_reason = "no_valid_postprocessed_hypothesis"
+            for name, (candidate_auto, candidate_raw, raw_quality) in automatic_candidates.items():
+                candidate_mask, candidate_reports = _postprocess_pc2_workpiece1_candidate(
+                    candidate_raw,
+                    candidate_auto,
+                    measured,
+                    depth,
+                    frame.depth_scale,
+                    frame.color,
+                    self_pixels,
+                    args,
+                    float(cfg["min_depth_m"]),
+                )
+                post_quality = _automatic_hypothesis_quality(
+                    candidate_auto, candidate_mask, self_pixels
+                )
+                candidate_auto["pc2_postprocessed_candidate_mask"] = candidate_mask
+                candidate_auto["pc2_postprocessed_candidate_reports"] = candidate_reports
+                candidate_auto["pc2_postprocessed_candidate_quality"] = post_quality
+                automatic_postprocessed_masks[name] = candidate_mask
+                postprocess_hypotheses[name] = {
+                    "raw_quality": raw_quality,
+                    "postprocess_quality": post_quality,
+                    "postprocess": candidate_reports,
+                }
+            valid_postprocessed = [
+                (name, item)
+                for name, item in automatic_candidates.items()
+                if bool(item[0]["pc2_postprocessed_candidate_quality"]["valid"])
+            ]
+            if valid_postprocessed:
+                selected_hypothesis, _ = max(
+                    valid_postprocessed,
+                    key=lambda item: float(
+                        item[1][0]["pc2_postprocessed_candidate_quality"]["score"]
+                    ),
+                )
+                selection_reason = "best_valid_after_pc2_postprocess"
+        if selected_hypothesis is None and automatic_candidates:
+            deferred_candidates = [
+                (name, item)
+                for name, item in automatic_candidates.items()
+                if int(item[2]["raw_mask_pixels"]) >= 500
+                and not bool(item[2]["scene_background_veto"])
+            ]
+            if deferred_candidates:
+                selected_hypothesis, selected_item = max(
+                    deferred_candidates,
+                    key=lambda item: float(
+                        item[1][0].get(
+                            "pc2_postprocessed_candidate_quality", item[1][2]
+                        )["score"]
+                    ),
+                )
+                selected_item[0]["defer_quality_until_postprocess"] = True
+                selection_reason = (
+                    "defer_best_pc2_postprocessed_quality"
+                    if compare_pc2_after_postprocess
+                    else "defer_automatic_quality_until_postprocess"
+                )
         dual_hypothesis_report = {
             "operation": "run_brown_and_silver_then_relative_colour_fallback",
             "workpiece": str(args.workpiece),
@@ -2838,6 +3166,7 @@ def _capture_and_register(
             "selection_reason": selection_reason,
             "near_silver_fallback": near_silver_fallback,
             "colour_difference_fallback": colour_difference_fallback,
+            "postprocess_hypotheses": postprocess_hypotheses,
             "hypotheses": {
                 name: item[2] for name, item in automatic_candidates.items()
             },
@@ -2920,9 +3249,23 @@ def _capture_and_register(
         }
     else:
         pc1_workpiece2_semantic_mask = view == "pc1" and str(args.workpiece) == "2"
-        mask, mask_postprocess = _main_mask_with_filled_holes(
-            raw_sam2_mask, positives, fill_holes=not pc1_workpiece2_semantic_mask,
+        pc2_workpiece1_expand_before_components = bool(
+            view == "pc2" and str(args.workpiece) == "1"
         )
+        if pc2_workpiece1_expand_before_components:
+            # PC2/W1 can show the long part as separated lobes around the
+            # gripper. Keep raw SAM2 lobes until RGB-D continuation and depth
+            # filtering validate their colour/depth continuity; component
+            # selection remains mandatory, but occurs afterwards.
+            mask = raw_sam2_mask.copy()
+            mask_postprocess = {
+                "operation": "pc2_workpiece1_defer_component_selection_until_after_rgbd_expansion",
+                "initial_mask_pixels": int(np.count_nonzero(mask)),
+            }
+        else:
+            mask, mask_postprocess = _main_mask_with_filled_holes(
+                raw_sam2_mask, positives, fill_holes=not pc1_workpiece2_semantic_mask,
+            )
         initial_component_recovery = None
         initial_retention_ratio = float(
             np.count_nonzero(mask) / max(1, np.count_nonzero(raw_sam2_mask))
@@ -2962,10 +3305,12 @@ def _capture_and_register(
                 "operation": "skipped_extended_depth_semantic_components",
                 "final_mask_pixels": int(np.count_nonzero(mask)),
             }
-        else:
+        elif not pc2_workpiece1_expand_before_components:
             mask, mask_rgb_cleanup = _outer_dark_cleanup(
                 mask, frame.color, prompt_support, positives,
             )
+        else:
+            mask_rgb_cleanup = {"operation": "pc2_workpiece1_defer_dark_component_cleanup_until_after_rgbd"}
         if not using_manual_prompt:
             if view == "pc1" and str(args.workpiece) == "2":
                 mask, mask_rgbd_expansion = _expand_pc1_workpiece2_mask_conservatively(
@@ -2975,7 +3320,7 @@ def _capture_and_register(
                 mask, mask_rgbd_expansion = _expand_workpiece2_main_mask(
                     mask, measured, frame.color, self_pixels, prompt_support,
                 )
-            if not extended_semantic_mask:
+            if not extended_semantic_mask and not pc2_workpiece1_expand_before_components:
                 mask, _ = _outer_dark_cleanup(
                     mask, frame.color, prompt_support, positives,
                 )
@@ -2991,7 +3336,11 @@ def _capture_and_register(
                 depth_tolerance_m = float(
                     args.workpiece2_extended_mask_depth_tolerance_m
                 )
-            elif str(args.workpiece) == "2" or selected_hypothesis == "silver":
+            elif (
+                str(args.workpiece) == "2"
+                or selected_hypothesis == "silver"
+                or (view == "pc2" and str(args.workpiece) == "1")
+            ):
                 # The silver stamping has a much larger visible depth span in
                 # side views than the flatter brown part.  Component retention
                 # still prevents this wider band from reviving disconnected
@@ -3125,6 +3474,21 @@ def _capture_and_register(
             enabled=bool(args.pc1_left_gripper_colour_gate),
         )
 
+    deferred_postprocess_quality: dict[str, object] = {"operation": "not_deferred"}
+    if (
+        not using_global_manual_mask
+        and bool(auto.get("defer_quality_until_postprocess", False))
+    ):
+        final_quality = _automatic_hypothesis_quality(auto, mask, self_pixels)
+        deferred_postprocess_quality = {
+            "operation": "automatic_quality_after_constrained_postprocess",
+            "quality": final_quality,
+        }
+        if not bool(final_quality["valid"]):
+            raise RuntimeError(
+                f"{view}: automatic mask did not pass quality after constrained postprocess"
+            )
+
     automatic_mask_validation: dict[str, object] = {
         "operation": "skipped_manual_mask"
     }
@@ -3257,6 +3621,21 @@ def _capture_and_register(
         cv2.imwrite(
             str(run_dir / f"{view}_sam2_{hypothesis}_raw_mask.png"),
             hypothesis_mask,
+        )
+    for hypothesis, hypothesis_mask in automatic_postprocessed_masks.items():
+        cv2.imwrite(
+            str(run_dir / f"{view}_{hypothesis}_postprocessed_mask.png"),
+            hypothesis_mask,
+        )
+        hypothesis_overlay = frame.color.copy()
+        hypothesis_foreground = hypothesis_mask > 0
+        hypothesis_overlay[hypothesis_foreground] = (
+            0.45 * hypothesis_overlay[hypothesis_foreground]
+            + 0.55 * np.array([0, 0, 255])
+        ).astype(np.uint8)
+        cv2.imwrite(
+            str(run_dir / f"{view}_{hypothesis}_postprocessed_overlay.png"),
+            hypothesis_overlay,
         )
     cv2.imwrite(str(run_dir / f"{view}_mask.png"), mask)
     if not using_manual_prompt:
@@ -3736,109 +4115,70 @@ def main() -> int:
         planner.open(required_frames={"body_base", "left_hand_transfer_end"})
         from parm_sdk import Gripper
 
-        # GraspNet's handoff only proves that the object was held when it
-        # reached graspup.  It may fall before Module 2 starts, so recheck
-        # before moving toward PC1/PC2.  The scheduler already treats this
-        # outcome as a normal reset back to Module 1.
-        holding_recheck = None
-        if weight_handoff is not None and not args.skip_motion:
+        # Module 1 已在同姿态 pregrasp 完成单件/多件重量判断。之后不同
+        # 手腕姿态下不再用跨姿态力差估重；只读新夹爪驱动的 gripping 状态。
+        def check_left_gripper_holding(checkpoint: str) -> dict[str, object]:
             try:
-                from parm_sdk import ForceSensor
-
-                sensor = ForceSensor(
-                    host=str(weight_check["force_sensor_host"]),
-                    hand=int(weight_check["force_sensor_hand"]),
-                )
-                try:
-                    sensor.wait_first(timeout=float(weight_check["timeout_s"]))
-                    time.sleep(float(weight_check["settle_s"]))
-                    loaded = collect_force_window(
-                        sensor,
-                        sample_count=int(weight_check["sample_count"]),
-                        timeout_s=float(weight_check["timeout_s"]),
-                    )
-                finally:
-                    sensor.close()
-                signature = weight_check.get("graspup_load_signature")
-                if isinstance(signature, dict):
-                    reference = ForceWindow(
-                        median_force_n=tuple(
-                            float(value)
-                            for value in signature["median_force_n"]
-                        ),
-                        axis_mad_n=tuple(
-                            float(value) for value in signature["axis_mad_n"]
-                        ),
-                        sample_count=int(signature["sample_count"]),
-                    )
-                    force_delta_n = float(np.linalg.norm(
-                        np.asarray(loaded.median_force_n)
-                        - np.asarray(reference.median_force_n)
-                    ))
-                    max_delta_n = float(signature["max_force_delta_n"])
-                    stable = loaded.max_axis_mad_n <= max(
-                        reference.max_axis_mad_n,
-                        float(signature["max_axis_mad_n"]),
-                    )
-                    holding_recheck = {
-                        "classification": "GRASPUP_SIGNATURE",
-                        "mass_g": None,
-                        "force_delta_n": force_delta_n,
-                        "max_force_delta_n": max_delta_n,
-                        "loaded_max_axis_mad_n": float(loaded.max_axis_mad_n),
-                        "passed": bool(stable and force_delta_n <= max_delta_n),
-                        "reason": (
-                            "与 Module 1 graspup 持件力签名比较；"
-                            f"delta={force_delta_n:.3f}N"
-                        ),
-                    }
-                else:
-                    # Compatibility fallback for old handoff files created
-                    # before graspup force signatures were added.
-                    baseline_payload = weight_check["baseline"]
-                    thresholds_payload = weight_check["thresholds"]
-                    baseline = ForceWindow(
-                        median_force_n=tuple(
-                            float(value)
-                            for value in baseline_payload["median_force_n"]
-                        ),
-                        axis_mad_n=tuple(
-                            float(value)
-                            for value in baseline_payload["axis_mad_n"]
-                        ),
-                        sample_count=int(baseline_payload["sample_count"]),
-                    )
-                    thresholds = WeightThresholds(
-                        empty_max_g=float(thresholds_payload["empty_max_g"]),
-                        single_min_g=float(thresholds_payload["single_min_g"]),
-                        single_max_g=float(thresholds_payload["single_max_g"]),
-                        multiple_min_g=float(thresholds_payload["multiple_min_g"]),
-                        max_axis_mad_n=float(thresholds_payload["max_axis_mad_n"]),
-                        gravity_m_s2=float(thresholds_payload["gravity_m_s2"]),
-                    )
-                    result = classify_grasp_weight(baseline, loaded, thresholds)
-                    stable = loaded.max_axis_mad_n <= thresholds.max_axis_mad_n
-                    holding_recheck = {
-                        "classification": result.grasp_class.value,
-                        "mass_g": float(result.mass_g),
-                        "reason": result.reason,
-                        "loaded_max_axis_mad_n": float(loaded.max_axis_mad_n),
-                        "passed": bool(result.mass_g >= thresholds.single_min_g and stable),
-                        "legacy_cross_pose_fallback": True,
-                    }
-            except Exception as exc:
-                holding_recheck = {
-                    "classification": "UNKNOWN",
-                    "mass_g": None,
-                    "reason": f"{type(exc).__name__}: {exc}",
+                with Gripper(host=args.gripper_host, status_port=7702) as gripper:
+                    deadline = time.monotonic() + GRIPPER_HOLD_TIMEOUT_S
+                    stable_since: float | None = None
+                    stable_samples = 0
+                    state = None
+                    while time.monotonic() < deadline:
+                        candidate = gripper.get_state().get(args.gripper_hand)
+                        if not isinstance(candidate, dict):
+                            stable_since = None
+                            stable_samples = 0
+                        else:
+                            state = candidate
+                            motion_state = str(candidate.get("motion_state", "")).lower()
+                            if motion_state == "gripping":
+                                stable_since = stable_since or time.monotonic()
+                                stable_samples += 1
+                                if time.monotonic() - stable_since >= GRIPPER_HOLD_STABLE_S:
+                                    return {
+                                        "checkpoint": checkpoint,
+                                        "source": "gripper_state",
+                                        "motion_state": motion_state,
+                                        "position_percent": candidate.get("position"),
+                                        "initialized": candidate.get("initialized"),
+                                        "stable_duration_s": GRIPPER_HOLD_STABLE_S,
+                                        "stable_samples": stable_samples,
+                                        "passed": True,
+                                    }
+                            else:
+                                stable_since = None
+                                stable_samples = 0
+                        time.sleep(GRIPPER_HOLD_POLL_S)
+                if not isinstance(state, dict):
+                    raise RuntimeError(f"未收到 hand={args.gripper_hand} 夹爪状态: {state}")
+                motion_state = state.get("motion_state")
+                return {
+                    "checkpoint": checkpoint,
+                    "source": "gripper_state",
+                    "motion_state": motion_state,
+                    "position_percent": state.get("position"),
+                    "initialized": state.get("initialized"),
+                    "stable_duration_s": 0.0,
+                    "stable_samples": stable_samples,
                     "passed": False,
                 }
+            except Exception as exc:
+                return {
+                    "checkpoint": checkpoint,
+                    "source": "gripper_state",
+                    "motion_state": None,
+                    "passed": False,
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+
+        holding_recheck = None
+        if not args.skip_motion:
+            holding_recheck = check_left_gripper_holding("Module 2开始（graspup）")
             print(
-                "[inspect运动前重量复检] "
-                f"class={holding_recheck['classification']} "
-                f"mass={'N/A(力签名模式)' if holding_recheck['mass_g'] is None else str(holding_recheck['mass_g']) + 'g'} "
-                f"passed={holding_recheck['passed']} "
-                f"reason={holding_recheck.get('reason', '-')}",
+                "[inspect运动前持件复检] "
+                f"motion_state={holding_recheck.get('motion_state')} "
+                f"passed={holding_recheck['passed']}",
                 flush=True,
             )
             if not holding_recheck["passed"]:
@@ -4087,6 +4427,40 @@ def main() -> int:
                 f"left_{view}_observation_pose", "left_graspup"
             )
             planner.move_left_joints([float(v) for v in cfg["graspup_joints_deg"]])
+            # 回到 graspup 后仅检查夹爪是否仍报告 gripping；重量分类只在
+            # Module 1 的同姿态 pregrasp 检查执行。
+            final_holding_recheck = check_left_gripper_holding(
+                "Module 2结束（graspup）"
+            )
+            print(
+                "[inspect结束持件复检] "
+                f"motion_state={final_holding_recheck.get('motion_state')} "
+                f"passed={final_holding_recheck['passed']} "
+                f"reason={final_holding_recheck.get('reason', '-')}",
+                flush=True,
+            )
+            if not final_holding_recheck["passed"]:
+                with Gripper(host=args.gripper_host, status_port=7702) as gripper:
+                    gripper.move(
+                        args.gripper_hand, 100.0, force=100.0,
+                        mode="sync", preempt=False, timeout=60.0,
+                    )
+                write_stage_result(
+                    args.result_file,
+                    {
+                        "stage": "left_inspect",
+                        "outcome": "held_object_dropped",
+                        "holding_recheck": final_holding_recheck,
+                        "returned_to_graspup": True,
+                        "gripper_final_position_percent": 100.0,
+                    },
+                )
+                print(
+                    "[inspect结束掉件恢复] 已回 graspup 并打开左夹爪；"
+                    "返回总控从 Module 1 重新开始。",
+                    flush=True,
+                )
+                return 0
         result = {
             "stage": "left_inspect",
             "outcome": "success",

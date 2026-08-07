@@ -13,7 +13,6 @@ PROJECT_ROOT=MODULE_ROOT.parents[2]
 if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0,str(PROJECT_ROOT))
 # Use the caller's environment, rather than a workstation-specific venv path.
 PYTHON=Path(sys.executable)
-READY_JOINTS=MODULE_ROOT/'config/left_reverse_regrasp_ready_joints.json'
 def run(script,*args): subprocess.run([str(PYTHON),str(ROOT/script),*map(str,args)],check=True)
 def ensure_sam2():
  from modules.module_0_prepare.ensure_sam2_service import require_sam2_service
@@ -52,13 +51,13 @@ def move_left_ready_after_capture(d,planner_host,arm_host,speed):
  from planner_runtime import PlannerRuntime
  from loop_config import LoopConfig
  from parm_sdk import Arm
- cfg=json.loads(READY_JOINTS.read_text()); target=[float(x) for x in cfg['joint_angles_deg']]
- if cfg.get('arm')!='left' or len(target)!=7: raise RuntimeError(f'invalid ready-joint config: {READY_JOINTS}')
+ from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
+ ready=load_workpiece_handoff_profile('1')['left_reverse_grasp']; target=list(ready['ready_joints_deg'])
  runtime=PlannerRuntime(LoopConfig(planner_host=planner_host,execute_url='http://127.0.0.1:5667/middle/waypoint/execute',base_frame='body_base',left_group='left_arm',right_group='right_arm',left_tool_frame='left_eef',right_tool_frame='right_hand_transfer_end',max_velocity=speed,max_acceleration=speed,idle_poll_seconds=.2,live=True,poses={}))
- event={'motion':cfg['motion'],'target_joint_angles_deg':target,'started_at':time.time(),'planner_host':planner_host}
+ event={'motion':'planner_rrtstar','target_joint_angles_deg':target,'started_at':time.time(),'planner_host':planner_host}
  try:
   runtime.open(required_frames={'body_base','left_eef'}); print('Post-capture Planner RRTStar target (left deg):',target); runtime.move_left_joints(target,planner='rrtstar')
-  deadline=time.monotonic()+float(cfg['arrival_timeout_s']); tolerance=float(cfg['arrival_tolerance_deg']); last=None
+  deadline=time.monotonic()+float(ready['arrival_timeout_s']); tolerance=float(ready['arrival_tolerance_deg']); last=None
   with Arm(host=arm_host) as arm:
    while time.monotonic()<deadline:
     state=arm.get_state() or {}; actual=((state.get('state') or {}).get('left') or {}).get('position') or []
@@ -66,7 +65,7 @@ def move_left_ready_after_capture(d,planner_host,arm_host,speed):
      delta=(np.asarray(actual,float)-target+180.)%360.-180.; last=float(np.max(np.abs(delta)))
      if last<=tolerance: event.update({'status':'reached','max_joint_error_deg':last}); print(f'Post-capture move_j reached; max joint error={last:.3f}deg'); return event
     time.sleep(.05)
-  raise RuntimeError(f'post-capture move_j did not arrive within {cfg["arrival_timeout_s"]}s; max joint error={last}')
+  raise RuntimeError(f'post-capture move_j did not arrive within {ready["arrival_timeout_s"]}s; max joint error={last}')
  except Exception as exc:
   event.update({'status':'failed','error':str(exc)}); raise
  finally:

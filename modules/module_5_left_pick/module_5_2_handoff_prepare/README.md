@@ -83,7 +83,7 @@ MODULE_5_2_RESULT=/.../output/reversed_head_pose_d435/<timestamp>/result.json
 ```
 
 准备位、观察位、云台角、外参和交接中心统一由
-`modules/workpiece_2_handoff_profile.json` 提供。Module 5-2 的握手 JSON 会写入
+`modules/reverse_grasp_handoff_positions.toml` 提供。Module 5-2 的握手 JSON 会写入
 `workpiece`、`profile_id` 和 `handoff_center_body_m`，供总控和 Module 8-2
 拒绝跨工件或跨版本结果。
 

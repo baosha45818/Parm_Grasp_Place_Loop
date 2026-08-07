@@ -1,11 +1,11 @@
 # Module 7：右臂工件姿态调整
 
-本目录是从原调整链路重构出的独立模块。入口 `right_align.py` 接收相机/视觉模块产生的 `mask_pose.json`，根据对应工件的 JSON 配置，使用右臂抓取、抬升、转向和放置，把 Q2--Q4 朝向的工件调整到 Q1 的可抓取朝向后释放。
+本目录是从原调整链路重构出的独立模块。入口 `right_align.py` 接收相机/视觉模块产生的 `mask_pose.json`，根据对应工件的单一 TOML 配置，使用右臂抓取、抬升、转向和放置，把 Q2--Q4 朝向的工件调整到 Q1 的可抓取朝向后释放。
 
 目录内已包含完整的本地依赖：
 
 - `right_align.py`：调整姿态入口；
-- `configs/workpiece_1_reorient.json`、`configs/workpiece_2_reorient.json`：两种工件的调整几何、规划和安全边界参数；
+- `configs/workpiece_1_turn_candidates.toml`、`configs/workpiece_2_turn_candidates.toml`：两种工件唯一的调整参数源；按预抓取、下探/闭抓、抬起、摆正、安全下放顺序编排并附中文注释；
 - 右臂目标直接使用规划器原生 `right_eef`；
 - `move_by_joints.py`、`move_by_eef_pose.py`、`grasp_motion_support.py`、`planning_log.py`：调整执行所需的本地运动与规划公共代码。
 

@@ -86,7 +86,9 @@ def main() -> int:
     parser.add_argument("--masks-dir", type=Path, default=None,
                         help="可选：明确指定送入 ICP 的 masks 目录；默认优先本次运行的 01_sam2_mask")
     parser.add_argument("--auto-convex-tab", action="store_true",
-                        help="调试用：按点云 +X 外端/高度自动猜测凸起；默认使用已标定的 CAD 抓取点")
+                        help="调试用：按 SAM2 点云的 +X 外端/高度自动猜测凸起；默认使用固定 CAD 点")
+    parser.add_argument("--fixed-cad-landmark", action="store_true",
+                        help="排障用：禁用在线凸耳中心选择，强制使用配置中的固定 CAD 点")
     parser.add_argument("--refine-pixel", type=int, nargs=2, metavar=("U", "V"), default=None,
                         help="可选：凸起在 RGB 中的人工确认像素；以局部深度反投影校正抓取点")
     parser.add_argument("--auto-search-radius-px", type=int, default=50,
@@ -95,8 +97,8 @@ def main() -> int:
                         help="候选限定为工件 +X 最外端的百分位阈值")
     parser.add_argument("--tab-height-percentile", type=float, default=70.0,
                         help="在 +X 端候选中保留离桌面最高的百分位阈值")
-    parser.add_argument("--grasp-down-offset-m", type=float, default=.010,
-                        help="实际夹爪 TCP 沿桌面法向朝桌面下移量，默认 10 mm")
+    parser.add_argument("--grasp-down-offset-m", type=float, default=-.005,
+                        help="实际夹爪 TCP 沿桌面法向偏移量；正值向下、负值向上，默认向上 5 mm")
     args = parser.parse_args()
 
     pose_path = args.pose.expanduser().resolve()
@@ -145,7 +147,7 @@ def main() -> int:
             "pixel": list(pixel), "median_depth_m": depth_m, "window": "7x7",
             "note": "This corrects the grasp-contact XY from the locally observed convex tab; the fixed ICP pose remains the orientation source.",
         }
-    elif args.auto_convex_tab:
+    elif args.auto_convex_tab and not args.fixed_cad_landmark:
         # The red-circle tab is the workpiece's +X extreme.  Select it from
         # the same geometry mask that fed ICP, rather than
         # merely choosing a close-depth point around the CAD projection (which
@@ -218,8 +220,8 @@ def main() -> int:
             "point_selection": "3d_component_medoid",
             "note": "Automatic grasp selection: largest raised coherent SAM point-cloud structure within the ICP workpiece +X outer end; its 3-D medoid supplies the contact point.",
         }
-    if args.grasp_down_offset_m < 0 or args.grasp_down_offset_m > .030:
-        raise ValueError("grasp-down-offset-m 必须在 [0, 0.030] m")
+    if not -.030 <= args.grasp_down_offset_m <= .030:
+        raise ValueError("grasp-down-offset-m 必须在 [-0.030, 0.030] m")
     surface_point_camera = point_camera.copy()
     surface_point_object = point_object.copy()
     # Use the fitted tabletop normal for physical down, exactly as Module 5-1

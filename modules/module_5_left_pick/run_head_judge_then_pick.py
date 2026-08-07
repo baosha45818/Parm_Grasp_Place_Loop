@@ -35,11 +35,6 @@ WORKPIECE_2_PIPELINE = (
     "workpiece_2_pipeline/run_full_reverse_grasp.sh"
 )
 NO_GRASP_EXIT_CODE = 20
-LEFT_GRIPPER_HOLDING_POSITION_MAX = 85.0
-REVERSE_READY_CONFIGS = {
-    "1": ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/config/left_reverse_regrasp_ready_joints.json",
-    "2": ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/config/left_reverse_regrasp_ready_joints.json",
-}
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -50,6 +45,7 @@ from modules.module_status import (
     report_exception as report_module_exception,
 )
 from tool.workpiece_timer import module_timer
+from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
 
 
 def run_stage(
@@ -127,6 +123,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="反抓预测最大次数；0表示持续重试直到得到唯一BACK候选",
     )
+    parser.add_argument(
+        "--max-reverse-grasp-attempts",
+        type=int,
+        default=None,
+        help="闭夹爪后的反抓尝试上限；默认读取工件位置配置，当前为5次",
+    )
     return parser.parse_args()
 
 
@@ -136,11 +138,8 @@ def reopen_and_return_to_reverse_ready(args: argparse.Namespace, workpiece: str)
     from parm_sdk import Arm, Gripper
     from planner_runtime import PlannerRuntime
 
-    ready_file = REVERSE_READY_CONFIGS[workpiece]
-    config = json.loads(ready_file.read_text(encoding="utf-8"))
-    target = [float(value) for value in config["joint_angles_deg"]]
-    if config.get("arm") != "left" or len(target) != 7:
-        raise RuntimeError(f"无效左臂反抓预备位配置: {ready_file}")
+    ready = load_workpiece_handoff_profile(workpiece)["left_reverse_grasp"]
+    target = list(ready["ready_joints_deg"])
     print("[reverse-flow] 本次未夹到工件：同步张开新左夹爪。", flush=True)
     with Gripper(host=args.gripper_host, status_port=7702) as gripper:
         response = gripper.move(1, 100.0, force=100.0, mode="sync", preempt=False, timeout=60.0)
@@ -162,8 +161,8 @@ def reopen_and_return_to_reverse_ready(args: argparse.Namespace, workpiece: str)
         runtime.open(required_frames={"body_base", "left_eef"})
         print(f"[reverse-flow] Planner RRTStar 回左臂反抓预备位: {target}", flush=True)
         runtime.move_left_joints(target, planner="rrtstar")
-        deadline = time.monotonic() + float(config.get("arrival_timeout_s", 90.0))
-        tolerance = float(config.get("arrival_tolerance_deg", 0.5))
+        deadline = time.monotonic() + float(ready["arrival_timeout_s"])
+        tolerance = float(ready["arrival_tolerance_deg"])
         with Arm(host=args.arm_host) as arm:
             while time.monotonic() < deadline:
                 state = arm.get_state() or {}
@@ -191,52 +190,69 @@ def main() -> int:
     # 工件2的反抓预测和执行已经是独立的 Module 4-1 -> Module 5-1
     # 流水线。只在总控显式选择工件2时切换；工件1继续执行下方原逻辑。
     workpiece = os.environ.get("PARM_LOOP_WORKPIECE", "1")
+    reverse_config = load_workpiece_handoff_profile(workpiece)["left_reverse_grasp"]
+    max_grasp_attempts = (
+        int(reverse_config["max_grasp_attempts"])
+        if args.max_reverse_grasp_attempts is None
+        else int(args.max_reverse_grasp_attempts)
+    )
+    if max_grasp_attempts < 1:
+        raise ValueError("--max-reverse-grasp-attempts 必须不小于 1")
     if workpiece == "2":
         if not WORKPIECE_2_PIPELINE.is_file():
             raise FileNotFoundError(
                 f"工件2反抓流水线入口不存在: {WORKPIECE_2_PIPELINE}"
             )
-        run_name = f"loop_workpiece2_reverse_{time.strftime('%Y%m%d_%H%M%S')}"
-        command = ["bash", str(WORKPIECE_2_PIPELINE), "--run-name", run_name, "--execute"]
         print(
             "[reverse-flow] workpiece=2：执行 Module 4-1 固定反面预测与 "
-            "Module 5-1 凸耳反抓流水线。",
+            f"Module 5-1 凸耳反抓流水线；最多尝试{max_grasp_attempts}次。",
             flush=True,
         )
-        with module_timer("module_4_1_reverse_grasp_prediction"):
-            report_module_status(
-                "module_4_1_reverse_grasp_prediction",
-                ResultStatus.WAIT,
-                "工件2头部观察、SAM2、固定反面ICP与凸耳抓取点预测",
+        for grasp_attempt in range(1, max_grasp_attempts + 1):
+            run_name = (
+                f"loop_workpiece2_reverse_{time.strftime('%Y%m%d_%H%M%S')}_"
+                f"{time.time_ns() % 1_000_000_000:09d}"
             )
-            try:
-                subprocess.run(command, cwd=ROOT, check=True)
-            except subprocess.CalledProcessError as exc:
-                if exc.returncode == NO_GRASP_EXIT_CODE:
+            command = ["bash", str(WORKPIECE_2_PIPELINE), "--run-name", run_name, "--execute"]
+            print(f"[reverse-flow] 工件2反抓尝试 {grasp_attempt}/{max_grasp_attempts}", flush=True)
+            with module_timer("module_4_1_reverse_grasp_prediction"):
+                report_module_status(
+                    "module_4_1_reverse_grasp_prediction",
+                    ResultStatus.WAIT,
+                    "工件2头部观察、SAM2、固定反面ICP与凸耳抓取点预测",
+                )
+                try:
+                    subprocess.run(command, cwd=ROOT, check=True)
+                except subprocess.CalledProcessError as exc:
+                    if exc.returncode != NO_GRASP_EXIT_CODE:
+                        report_module_exception(
+                            "module_4_1_reverse_grasp_prediction",
+                            exc,
+                            action="工件2反抓流水线失败，保持现场并交由总控重试或安全停机",
+                            target_module="module_5_1_reverse_grasp",
+                            recovery_level="PARENT_DECISION",
+                            reason_code=f"WORKPIECE_2_PIPELINE_EXIT_{exc.returncode}",
+                        )
+                        raise
                     report_module_status(
                         "module_4_1_reverse_grasp_prediction",
                         ResultStatus.RETRY,
-                        "左夹爪开度不小于 85%，未夹到工件；回预备位后重新观察",
-                        reason_code="LEFT_GRIPPER_NO_GRASP",
+                        "左夹爪未夹到单件或抬升后重量未确认SINGLE；回预备位重新观察",
+                        reason_code="LEFT_REVERSE_GRASP_RETRY",
                     )
                     reopen_and_return_to_reverse_ready(args, workpiece)
-                    return NO_GRASP_EXIT_CODE
-                report_module_exception(
-                    "module_4_1_reverse_grasp_prediction",
-                    exc,
-                    action="工件2反抓流水线失败，保持现场并交由总控重试或安全停机",
-                    target_module="module_5_1_reverse_grasp",
-                    recovery_level="PARENT_DECISION",
-                    reason_code=f"WORKPIECE_2_PIPELINE_EXIT_{exc.returncode}",
-                )
-                raise
-            else:
-                report_module_status(
-                    "module_4_1_reverse_grasp_prediction",
-                    ResultStatus.SUCCESS,
-                    "工件2预测与 Module 5-1 抓取抬升均完成",
-                )
-        return 0
+                    if grasp_attempt == max_grasp_attempts:
+                        raise RuntimeError(
+                            f"工件2反抓已尝试{max_grasp_attempts}次，仍未确认夹到单件"
+                        ) from exc
+                    continue
+                else:
+                    report_module_status(
+                        "module_4_1_reverse_grasp_prediction",
+                        ResultStatus.SUCCESS,
+                        "工件2预测与 Module 5-1 抓取抬升、重量确认均完成",
+                    )
+                    return 0
     if workpiece != "1":
         raise ValueError(f"PARM_LOOP_WORKPIECE 只能是 1 或 2，当前为 {workpiece!r}")
 
@@ -393,11 +409,23 @@ def main() -> int:
         report_module_status(
             "module_5_1_reverse_grasp",
             ResultStatus.RETRY,
-            "左夹爪开度不小于 85%，未夹到工件；回预备位后重新观察",
-            reason_code="LEFT_GRIPPER_NO_GRASP",
+            "左夹爪未夹到单件或抬升后重量未确认SINGLE；回预备位后重新观察",
+            reason_code="LEFT_REVERSE_GRASP_RETRY",
         )
         reopen_and_return_to_reverse_ready(args, workpiece)
-        return NO_GRASP_EXIT_CODE
+        current_attempt = int(os.environ.get("PARM_REVERSE_GRASP_ATTEMPT", "1"))
+        if current_attempt >= max_grasp_attempts:
+            raise RuntimeError(
+                f"工件1反抓已尝试{max_grasp_attempts}次，仍未确认夹到单件"
+            ) from exc
+        next_attempt = current_attempt + 1
+        print(
+            f"[reverse-flow] 工件1反抓尝试 {current_attempt}/{max_grasp_attempts}失败；"
+            f"开始第{next_attempt}次重新观察、预测和抓取。",
+            flush=True,
+        )
+        os.environ["PARM_REVERSE_GRASP_ATTEMPT"] = str(next_attempt)
+        return main()
     return 0
 
 

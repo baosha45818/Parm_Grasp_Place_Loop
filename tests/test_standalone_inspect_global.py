@@ -250,7 +250,9 @@ class StandaloneInspectGlobalTest(unittest.TestCase):
         support = np.zeros((100, 100), dtype=bool)
         support[10:50, 10:60] = True
         raw = np.zeros((100, 100), dtype=np.uint8)
-        raw[10:50, 10:39] = 255
+        # 0.54 support coverage: accepted by brown (0.53), rejected by
+        # bright/colour-difference hypotheses (0.55).
+        raw[10:50, 10:37] = 255
         self_pixels = np.zeros_like(support)
         brown = global_inspect._automatic_hypothesis_quality(
             {

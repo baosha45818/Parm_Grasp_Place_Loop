@@ -56,3 +56,11 @@ python3 modules/module_9_right_place/place_hole_a_wiggle_new_config.py \
 /home/dainanjun/Public/data_collector/.venv/bin/python \
   modules/module_9_right_place/plot_place_hole_a_log.py \
   --all --workpiece 1
+
+13. 备份
+cp /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_2_left_inspect_apart/standalone_inspect_global.py \
+   /home/dainanjun/shurenbin/standalone_inspect_global_$(date +%Y%m%d_%H%M%S).py
+
+14.
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop && \
+PARM_LOOP_WORKPIECE=1 .venv/bin/python modules/module_5_left_pick/run_head_judge_then_pick.py --execute

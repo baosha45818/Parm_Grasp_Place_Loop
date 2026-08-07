@@ -215,15 +215,16 @@ def main():
         head_towards_camera = bool(np.dot(rotation @ head_outward_stl, object_to_camera) > 0.0)
         inward_offset_m = float(orientation['wide_head_inward_grasp_offset_m'])
         outward_offset_m = float(orientation['wide_head_outward_grasp_offset_m'])
-        camera_left_shift_m = float(orientation.get('camera_left_grasp_shift_m', 0.0))
+        lateral_offset_m = float(orientation.get('grasp_lateral_offset_m', 0.0))
         head = wide_head_grasp_point(raw_head, head_outward_stl, outward_offset_m, inward_offset_m, head_towards_camera)
-        # Camera +X projects to image-right, so negative camera X is a stable
-        # image-left shift regardless of the workpiece's yaw or head direction.
-        center = rotation @ head + translation + np.array([-camera_left_shift_m, 0.0, 0.0])
         R = make_grasp_frame(rotation@width, scene_normal)
+        # Apply the tuned side bias in the grasp/workpiece frame, never in the
+        # camera frame.  Grasp +Y is the jaw-opening (workpiece-width) axis, so
+        # the chosen physical side follows the part when its yaw changes.
+        center = rotation @ head + translation + R[:, 1] * lateral_offset_m
         # Version7/GraspNet convention: +X is the approach axis.  Retreating
         # by -X is therefore a vertical, above-table pregrasp for this frame.
-        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'camera_left_grasp_shift_m':camera_left_shift_m, 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
+        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'grasp_lateral_offset_m':lateral_offset_m, 'grasp_lateral_offset_axis':'grasp_frame_+Y', 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
     # One workpiece can receive overlapping SAM2 prompts.  Associate duplicate
     # reverse masks by their CAD/TCP centres and retain the stronger face score.
     unique = []

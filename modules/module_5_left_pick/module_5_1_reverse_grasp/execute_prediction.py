@@ -21,7 +21,6 @@ MODULE_DIR = Path(__file__).resolve().parent
 LOOP_ROOT = MODULE_DIR.parents[2]
 IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
 CONFIG_DIR = MODULE_DIR / "config"
-READY_JOINTS = CONFIG_DIR / "left_reverse_regrasp_ready_joints.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +36,8 @@ def parse_args() -> argparse.Namespace:
         default=0.1 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0")),
     )
     parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=[90.0, 15.0, -15.0])
-    parser.add_argument("--body-z-down-m", type=float, default=0.020)
+    # 工件 1 反面抓取：将名义抓取点上调 1.5 cm，实际仅下探 0.5 cm。
+    parser.add_argument("--body-z-down-m", type=float, default=0.005)
     return parser.parse_args()
 
 
@@ -64,10 +64,10 @@ def move_left_to_ready(capture_dir: Path, planner_host: str, arm_host: str, spee
     from parm_sdk import Arm
     from planner_runtime import PlannerRuntime
 
-    config = json.loads(READY_JOINTS.read_text(encoding="utf-8"))
-    target = [float(value) for value in config["joint_angles_deg"]]
-    if config.get("arm") != "left" or len(target) != 7:
-        raise RuntimeError(f"无效左臂反抓预备位配置: {READY_JOINTS}")
+    from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
+
+    ready = load_workpiece_handoff_profile("1")["left_reverse_grasp"]
+    target = list(ready["ready_joints_deg"])
     runtime = PlannerRuntime(
         LoopConfig(
             planner_host=planner_host,
@@ -84,13 +84,13 @@ def move_left_to_ready(capture_dir: Path, planner_host: str, arm_host: str, spee
             poses={},
         )
     )
-    event = {"motion": config["motion"], "target_joint_angles_deg": target, "started_at": time.time()}
+    event = {"motion": "planner_rrtstar", "target_joint_angles_deg": target, "started_at": time.time()}
     try:
         runtime.open(required_frames={"body_base", "left_eef"})
         print(f"[module-5-1] Planner RRTStar 到反抓预备位 (left deg): {target}")
         runtime.move_left_joints(target, planner="rrtstar")
-        deadline = time.monotonic() + float(config["arrival_timeout_s"])
-        tolerance = float(config["arrival_tolerance_deg"])
+        deadline = time.monotonic() + float(ready["arrival_timeout_s"])
+        tolerance = float(ready["arrival_tolerance_deg"])
         last_error = None
         with Arm(host=arm_host) as arm:
             while time.monotonic() < deadline:

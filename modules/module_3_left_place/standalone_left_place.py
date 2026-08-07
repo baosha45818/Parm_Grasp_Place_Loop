@@ -45,12 +45,6 @@ from modules.stage_result import (
     validate_inspection_success,
     write_stage_result,
 )
-from tests.grasp_weight_check import (
-    ForceWindow,
-    WeightThresholds,
-    classify_grasp_weight,
-    collect_force_window,
-)
 from tool.planner_runtime import PlannerRuntime
 
 
@@ -64,6 +58,9 @@ PLACE_PROFILES = {
     FRONT_PROFILE.classification: FRONT_PROFILE,
     REVERSED_PROFILE.classification: REVERSED_PROFILE,
 }
+GRIPPER_HOLD_STABLE_S = 0.5
+GRIPPER_HOLD_POLL_S = 0.1
+GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -517,12 +514,8 @@ def main() -> int:
         poses={},
     )
     planner = PlannerRuntime(planner_cfg)
-    weight_sensor = None
     weight_handoff = None
-    weight_baseline = None
-    weight_thresholds = None
-    weight_checks: list[dict] = []
-    weight_lock = threading.Lock()
+    holding_checks: list[dict] = []
     object_dropped = threading.Event()
     drop_details: list[dict] = []
 
@@ -545,83 +538,89 @@ def main() -> int:
                 "首次重量判断不在允许集合 "
                 f"{sorted(allowed_handoff_classes)}，禁止执行 Left Place"
             )
-        baseline = weight_handoff.get("baseline") or {}
-        thresholds = weight_handoff.get("thresholds") or {}
-        weight_baseline = ForceWindow(
-            median_force_n=tuple(float(value) for value in baseline["median_force_n"]),
-            axis_mad_n=tuple(float(value) for value in baseline["axis_mad_n"]),
-            sample_count=int(baseline["sample_count"]),
-        )
-        weight_thresholds = WeightThresholds(
-            empty_max_g=float(thresholds["empty_max_g"]),
-            single_min_g=float(thresholds["single_min_g"]),
-            single_max_g=float(thresholds["single_max_g"]),
-            multiple_min_g=float(thresholds["multiple_min_g"]),
-            max_axis_mad_n=float(thresholds["max_axis_mad_n"]),
-            gravity_m_s2=float(thresholds["gravity_m_s2"]),
-        )
+    def gripper_holds_object(label: str) -> bool:
+        if args.skip_motion:
+            return True
+        if object_dropped.is_set():
+            return False
+        try:
+            from parm_sdk import Gripper
 
-    def weight_allows_motion(label: str) -> bool:
-        if weight_handoff is None:
-            return True
-        with weight_lock:
-            if object_dropped.is_set():
-                return False
-            try:
-                time.sleep(float(weight_handoff["settle_s"]))
-                loaded = collect_force_window(
-                    weight_sensor,
-                    sample_count=int(weight_handoff["sample_count"]),
-                    timeout_s=float(weight_handoff["timeout_s"]),
+            with Gripper(host=args.gripper_host, status_port=7702) as gripper:
+                deadline = time.monotonic() + GRIPPER_HOLD_TIMEOUT_S
+                stable_since: float | None = None
+                stable_samples = 0
+                state = None
+                while time.monotonic() < deadline:
+                    candidate = gripper.get_state().get(args.gripper_hand)
+                    if not isinstance(candidate, dict):
+                        stable_since = None
+                        stable_samples = 0
+                    else:
+                        state = candidate
+                        motion_state = str(candidate.get("motion_state", "")).lower()
+                        if motion_state == "gripping":
+                            stable_since = stable_since or time.monotonic()
+                            stable_samples += 1
+                            if time.monotonic() - stable_since >= GRIPPER_HOLD_STABLE_S:
+                                record = {
+                                    "before_motion": label,
+                                    "source": "gripper_state",
+                                    "motion_state": motion_state,
+                                    "position_percent": candidate.get("position"),
+                                    "initialized": candidate.get("initialized"),
+                                    "stable_duration_s": GRIPPER_HOLD_STABLE_S,
+                                    "stable_samples": stable_samples,
+                                    "passed": True,
+                                }
+                                break
+                        else:
+                            stable_since = None
+                            stable_samples = 0
+                    time.sleep(GRIPPER_HOLD_POLL_S)
+                else:
+                    record = None
+            if record is not None:
+                holding_checks.append(record)
+                print(
+                    f"[运动前持件复检] {label}: "
+                    f"motion_state={record.get('motion_state')} passed=True",
+                    flush=True,
                 )
-                result = classify_grasp_weight(
-                    weight_baseline,
-                    loaded,
-                    weight_thresholds,
-                )
-                holding_min = float(
-                    weight_thresholds.multiple_min_g
-                    if (
-                        workpiece_parameters.USE_MULTIPLE_HOLDING_MIN_G
-                        and weight_handoff.get("classification") == "MULTIPLE"
-                    )
-                    else weight_thresholds.single_min_g
-                )
-                stable = (
-                    loaded.max_axis_mad_n
-                    <= float(weight_thresholds.max_axis_mad_n)
-                )
-                passed = float(result.mass_g) >= holding_min and stable
-                record = {
-                    "before_motion": label,
-                    "classification": result.grasp_class.value,
-                    "mass_g": float(result.mass_g),
-                    "reason": str(result.reason),
-                    "holding_mass_min_g": holding_min,
-                    "loaded_max_axis_mad_n": float(loaded.max_axis_mad_n),
-                    "sampling_stable": stable,
-                    "passed": passed,
-                }
-            except Exception as exc:
-                record = {
-                    "before_motion": label,
-                    "classification": "UNKNOWN",
-                    "mass_g": None,
-                    "reason": f"{type(exc).__name__}: {exc}",
-                    "passed": False,
-                }
-            weight_checks.append(record)
-            print(
-                f"[运动前重量复检] {label}: class={record['classification']} "
-                f"mass={record['mass_g']}g passed={record['passed']}",
-                flush=True,
-            )
-            if not record["passed"]:
-                drop_details.append(record)
-                object_dropped.set()
-                print("[工件掉落] 禁止当前及后续持件运动", flush=True)
-                return False
-            return True
+                return True
+            if not isinstance(state, dict):
+                raise RuntimeError(f"未收到 hand={args.gripper_hand} 夹爪状态: {state}")
+            motion_state = state.get("motion_state")
+            record = {
+                "before_motion": label,
+                "source": "gripper_state",
+                "motion_state": motion_state,
+                "position_percent": state.get("position"),
+                "initialized": state.get("initialized"),
+                "stable_duration_s": 0.0,
+                "stable_samples": stable_samples,
+                "passed": False,
+            }
+        except Exception as exc:
+            record = {
+                "before_motion": label,
+                "source": "gripper_state",
+                "motion_state": None,
+                "reason": f"{type(exc).__name__}: {exc}",
+                "passed": False,
+            }
+        holding_checks.append(record)
+        print(
+            f"[运动前持件复检] {label}: "
+            f"motion_state={record.get('motion_state')} passed={record['passed']}",
+            flush=True,
+        )
+        if not record["passed"]:
+            drop_details.append(record)
+            object_dropped.set()
+            print("[工件掉落] 左夹爪未报告 gripping，禁止当前及后续持件运动", flush=True)
+            return False
+        return True
 
     def write_terminal_outcome(outcome: str, **extra) -> None:
         payload = {
@@ -630,7 +629,7 @@ def main() -> int:
             "place_module": profile.module_id,
             "classification": classification,
             "placement_branch": branch,
-            "weight_checks": weight_checks,
+            "holding_checks": holding_checks,
             "planning_scheduler": planning_scheduler_log,
             **extra,
         }
@@ -672,14 +671,12 @@ def main() -> int:
 
     try:
         planner.open(required_frames={"body_base", "left_hand_transfer_end"})
-        if weight_handoff is not None and not args.skip_motion:
-            from parm_sdk import ForceSensor
-
-            weight_sensor = ForceSensor(
-                host=str(weight_handoff["force_sensor_host"]),
-                hand=int(weight_handoff["force_sensor_hand"]),
-            )
-            weight_sensor.wait_first(timeout=float(weight_handoff["timeout_s"]))
+        if not args.skip_motion:
+            # Module 1 已完成同姿态重量分类。Module 3 的任意姿态只判断
+            # 新夹爪驱动是否仍报告 gripping，不做跨姿态力传感器估重。
+            if not gripper_holds_object("Module 3开始（graspup）"):
+                finish_dropped_cycle()
+                return 0
 
         workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
         T_body_object = np.asarray(inspection["T_body_base_object"], dtype=float)
@@ -764,7 +761,7 @@ def main() -> int:
                         max_velocity=float(args.preset_speed),
                         max_acceleration=float(args.preset_speed),
                     )
-                    if not weight_allows_motion("从观察位回graspup"):
+                    if not gripper_holds_object("从观察位回graspup"):
                         return
                     motion_planner.set_next_plan_context(
                         "left_inspection_pose", "left_graspup"
@@ -784,7 +781,7 @@ def main() -> int:
                         max_velocity=float(args.motion_speed),
                         max_acceleration=float(args.motion_speed),
                     )
-                    if not weight_allows_motion("从graspup移动到graspup_above"):
+                    if not gripper_holds_object("从graspup移动到graspup_above"):
                         return
                     motion_planner.set_next_plan_context(
                         "left_graspup", "left_graspup_top"
@@ -1327,7 +1324,7 @@ def main() -> int:
                 f"确认最终 {args.post_graspup_planner.upper()} 轨迹安全，"
                 "按回车执行...",
             )
-            if not weight_allows_motion("移动到最终目标工件位姿"):
+            if not gripper_holds_object("移动到最终目标工件位姿"):
                 finish_dropped_cycle()
                 return 0
             planner.execute_planned_result(selected_plan)
@@ -1500,7 +1497,7 @@ def main() -> int:
                 if selected_release_tool is not None else None
             ),
             "gripper_final_position_percent": final_position,
-            "weight_checks": weight_checks,
+            "holding_checks": holding_checks,
             "released": not args.skip_motion,
             "returned_to_graspup": not args.skip_motion,
         })
@@ -1514,8 +1511,6 @@ def main() -> int:
             approach_thread.join()
         if timeout_thread is not None and timeout_thread.is_alive():
             timeout_thread.join()
-        if weight_sensor is not None:
-            weight_sensor.close()
         planner.close()
 
 

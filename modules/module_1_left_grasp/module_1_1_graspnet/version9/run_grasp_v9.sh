@@ -4,6 +4,8 @@ set -euo pipefail
 
 MODULE_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOOP_ROOT="$(cd "$MODULE_DIR/../../../.." && pwd)"
+# Version9 仅为备用入口；执行时与 Version7 共用同一份重量判定配置。
+source "$LOOP_ROOT/config/grasp_weight_thresholds.conf"
 V9_GRASPNET_SOURCE_ROOT="${V9_GRASPNET_SOURCE_ROOT:-$LOOP_ROOT/third_party/graspnet}"
 test -x "$V9_GRASPNET_SOURCE_ROOT/.venv/bin/python"
 cd "$V9_GRASPNET_SOURCE_ROOT"
@@ -21,10 +23,14 @@ if [ "${V9_ALLOW_EXECUTE:-0}" = "1" ]; then
     --max-no-grasp-retries 99
     --planner-candidate-top-k 3 --max-planner-unreachable-retries 3
     --grasp-weight-check
-    --weight-empty-max-g 30
-    --weight-single-min-g 30.000000001
-    --weight-single-max-g 129.999999999
-    --weight-multiple-min-g 130
+    --weight-empty-max-g "$WEIGHT_EMPTY_MAX_G"
+    --weight-single-min-g "$WEIGHT_SINGLE_MIN_G"
+    --weight-single-max-g "$WEIGHT_SINGLE_MAX_G"
+    --weight-multiple-min-g "$WEIGHT_MULTIPLE_MIN_G"
+    --weight-max-axis-mad-n "$WEIGHT_MAX_AXIS_MAD_N"
+    --weight-check-samples "$WEIGHT_CHECK_SAMPLES"
+    --weight-check-timeout-s "$WEIGHT_CHECK_TIMEOUT_S"
+    --weight-check-settle-s "$WEIGHT_CHECK_SETTLE_S"
     --weight-contiguous-single-band
     --max-weight-retries 20
     --max-operator-declines 20

@@ -1,0 +1,55 @@
+# 两类工件左臂反抓与右臂交接的全部预设关节位。
+# 坐标单位为 deg；交接中心相对 body_base，单位为 m。
+# 修改后需重新启动对应模块/总控，运行中的进程不会自动重新读取本文件。
+
+[workpiece_1.left_reverse_grasp]
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+arrival_tolerance_deg = 0.5
+arrival_timeout_s = 90.0
+# 反抓闭爪后只上提 3 cm，随后立即进行力传感器持件判断。
+post_close_lift_m = 0.03
+max_grasp_attempts = 5
+
+[workpiece_1.left_handoff]
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+head_pitch_deg = 2.0
+head_yaw_deg = 26.5
+alignment = "calibration/sdk_base_alignment/sdk_base_to_planner_alignment_pitch2_yaw26p5_kinematic.json"
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+axis_tolerance_deg = 2.0
+center_tolerance_mm = 25.0
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[workpiece_1.right_handoff]
+grasp_joints_deg = [164.5464, 56.8637, -68.9227, 78.2515, -24.3923, 3.9098, 78.3202]
+place_ready_joints_deg = [30.4353, 23.8637, 0.5905, 66.3409, -62.0439, -64.3304, 25.7149]
+place_ready_tolerance_deg = 0.5
+
+[workpiece_2.left_reverse_grasp]
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+arrival_tolerance_deg = 0.5
+arrival_timeout_s = 90.0
+# 反抓闭爪后只上提 3 cm，随后立即进行力传感器持件判断。
+post_close_lift_m = 0.03
+max_grasp_attempts = 5
+
+[workpiece_2.left_handoff]
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+head_pitch_deg = 2.0
+head_yaw_deg = 26.5
+alignment = "calibration/sdk_base_alignment/sdk_base_to_planner_alignment_pitch2_yaw26p5_kinematic.json"
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+axis_tolerance_deg = 2.0
+center_tolerance_mm = 25.0
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[workpiece_2.right_handoff]
+prepare_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+pregrasp_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+# grasp_joints_deg = [163.136, 59.4977, -71.1186, 80.2579, -21.8408, -0.7594, 79.0549]
+grasp_joints_deg = [163.1305, 59.7847, -70.9730, 79.0452, -21.6032, 0.3420, 79.2925]
+place_ready_joints_deg = [102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196]
+post_release_clearance_minus_x_m = 0.03
+post_release_clearance_plus_z_m = 0.03

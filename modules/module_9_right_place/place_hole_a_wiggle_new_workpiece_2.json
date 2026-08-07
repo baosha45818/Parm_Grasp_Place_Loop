@@ -1,15 +1,7 @@
 {
   "schema_version": 1,
   "workpiece_serial_number": 2,
-  "initial_right_joints_deg": [
-    67.8322,
-    27.982200000000002,
-    -59.3427,
-    56.064600000000006,
-    -142.4625,
-    -49.802400000000006,
-    -58.500800000000005
-  ],
+  "initial_right_joints_deg": [69.7989, 26.9577, -60.3108, 61.5069, -145.5688, -46.2057, -61.6470],
   "search_axis": "x",
   "search_direction": "negative",
   "stop_conditions": {

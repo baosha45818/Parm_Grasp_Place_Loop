@@ -154,7 +154,7 @@ def main() -> int:
         subprocess.run([str(Path(sys.executable)), str(HERE / "predict_convex_tab_grasp.py"),
                         "--pose", str(icp_dir / "fixed_reverse_pose.json"),
                         "--capture-dir", str(capture_dir), "--masks-dir", str(mask_dir),
-                        "--output-dir", str(grasp_dir)], check=True)
+                       "--output-dir", str(grasp_dir)], check=True)
         event.update({"status": "complete", "raw_capture_dir": str(raw), "capture_dir": str(capture_dir),
                       "multiframe_pointcloud_fusion": fusion,
                       "sam2_masks": str(mask_dir / "sam2_masks_overlay.png"),

@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from modules.workpiece_2_handoff_profile import (
-    load_workpiece_2_handoff_profile,
+from modules.reverse_grasp_handoff_positions import (
+    load_workpiece_handoff_profile,
 )
 PYTHON = ROOT / ".venv/bin/python"
 if not PYTHON.is_file():
@@ -51,8 +51,6 @@ WORKPIECE_2_AUTO_MASK_CONFIG = (
 WORKPIECE_2_HANDOFF_CONFIG = WORKPIECE_2_CONFIG_DIR / "handoff_config.json"
 WORKPIECE_2_OUTPUT_DIR = ROOT / "output/module_5_2_workpiece_2_head_d435"
 HEAD_MOTION = ROOT / "tool/move_head_gimbal.py"
-HANDOFF_HEAD_PITCH_DEG = 2.0
-HANDOFF_HEAD_YAW_DEG = 26.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -191,9 +189,7 @@ def main() -> int:
         return main_workpiece_2(args)
     if args.mask_mode is None:
         args.mask_mode = "auto"
-    # 两类工件共用已经验证的较高观察/交接运动区域；工件模型、SAM2
-    # 提示和ICP参数仍保持工件1自己的配置。
-    profile = load_workpiece_2_handoff_profile()
+    profile = load_workpiece_handoff_profile("1")
     observation = profile["left_observation"]
     handoff_center = list(profile["handoff"]["center_body_m"])
     from modules.module_0_prepare.ensure_sam2_service import require_sam2_service
@@ -237,8 +233,8 @@ def main() -> int:
     previous = set(output_dir.glob("*/result.json"))
     run([
         str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.driver_host,
-        "--pitch", str(HANDOFF_HEAD_PITCH_DEG),
-        "--yaw", str(HANDOFF_HEAD_YAW_DEG),
+        "--pitch", str(observation["head_pose_deg"]["pitch"]),
+        "--yaw", str(observation["head_pose_deg"]["yaw"]),
     ])
     run([
         sys.executable,
@@ -262,9 +258,9 @@ def main() -> int:
         "--driver-host",
         args.driver_host,
         "--expected-head-pitch",
-        str(HANDOFF_HEAD_PITCH_DEG),
+        str(observation["head_pose_deg"]["pitch"]),
         "--expected-head-yaw",
-        str(HANDOFF_HEAD_YAW_DEG),
+        str(observation["head_pose_deg"]["yaw"]),
     ])
     result = newest_result(output_dir, previous)
     print(
@@ -313,7 +309,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     """工件2左手交接准备：只观察和送交接位，绝不驱动右臂。"""
     from modules.module_0_prepare.ensure_sam2_service import require_sam2_service
 
-    profile = load_workpiece_2_handoff_profile()
+    profile = load_workpiece_handoff_profile("2")
     observation = profile["left_observation"]
     handoff = profile["handoff"]
     handoff_center = list(handoff["center_body_m"])

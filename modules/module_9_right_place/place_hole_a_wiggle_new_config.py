@@ -315,14 +315,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.post_entry_relief_mm < 0.0 or args.post_entry_relief_mm > 2.0:
         parser.error("--post-entry-relief-mm 必须在 0 到 2 mm 之间")
     if args.post_entry_relief_mm > 0.0 and not (
-        math.isfinite(args.post_entry_relief_opposing_force_n)
-        and args.post_entry_relief_opposing_force_n > 0.0
-        and args.post_entry_relief_confirm_frames >= 1
-        and args.post_entry_relief_observation_frames >= args.post_entry_relief_confirm_frames
-        and math.isfinite(args.post_entry_relief_speed_mm_s)
+        math.isfinite(args.post_entry_relief_speed_mm_s)
         and args.post_entry_relief_speed_mm_s > 0.0
     ):
-        parser.error("启用进洞后卸力时：反力阈值和速度必须为正，且观察帧数不得少于所需反力帧数")
+        parser.error("启用进洞后固定后拉时：速度必须为正")
     fx_reversal_enabled = args.entry_fx_reversal_confirm_frames > 0
     if fx_reversal_enabled and not (
         math.isfinite(args.entry_fx_reversal_pre_n)
@@ -844,56 +840,16 @@ def placement_main(argv: list[str] | None = None) -> int:
         log_event("search_centre_ready", pose_xyz_rpy=centre)
 
         def post_entry_relief_if_needed() -> None:
-            """After a confirmed insertion, remove a small persistent X load.
-
-            For the reviewed right-hand mounting, a positive sensor dFz is
-            the observed world-X-positive reaction.  During the normal world
-            X-negative search, dFz >= threshold is therefore an
-            opposing/rearward load.  This routine never runs before insertion
-            has already been confirmed by the main search logic.
-            """
+            """After a confirmed insertion, always make the fixed back-off move."""
             nonlocal continuous_servo_stopped
             if args.post_entry_relief_mm <= 0.0:
                 return
-            opposing_hits = 0
-            latest_dforce: list[float] | None = None
-            latest_dtorque: list[float] | None = None
             # The original search stream has already been stopped on the
             # continuous-monitor success paths.  If a non-continuous success
-            # reached this handler, stop it before observing residual load.
+            # reached this handler, stop it before making the fixed back-off.
             if servo_started and not continuous_servo_stopped:
                 arm.stop_servo_pose(2)  # type: ignore[attr-defined]
                 continuous_servo_stopped = True
-            for frame_index in range(1, args.post_entry_relief_observation_frames + 1):
-                force, torque = read_wrench(sensor, args.sample_timeout)
-                latest_dforce = [value - base for value, base in zip(force, force_base)]
-                latest_dtorque = [value - base for value, base in zip(torque, torque_base)]
-                is_opposing = latest_dforce[2] >= args.post_entry_relief_opposing_force_n
-                opposing_hits += int(is_opposing)
-                log_event(
-                    "post_entry_relief_check",
-                    frame=frame_index,
-                    observation_frames=args.post_entry_relief_observation_frames,
-                    required_opposing_frames=args.post_entry_relief_confirm_frames,
-                    delta_force_n=latest_dforce,
-                    delta_torque_nm=latest_dtorque,
-                    opposing_force_detected=is_opposing,
-                    opposing_frames_seen=opposing_hits,
-                )
-                if frame_index < args.post_entry_relief_observation_frames:
-                    time.sleep(0.02)
-            if opposing_hits < args.post_entry_relief_confirm_frames:
-                log_event(
-                    "post_entry_relief_skipped",
-                    reason="insufficient_opposing_force_frames",
-                    observation_frames=args.post_entry_relief_observation_frames,
-                    required_opposing_frames=args.post_entry_relief_confirm_frames,
-                    opposing_frames_seen=opposing_hits,
-                    delta_force_n=latest_dforce,
-                    delta_torque_nm=latest_dtorque,
-                )
-                return
-
             actual = current_pose(arm, 2)
             relief_start = actual[:3] + rotvec_to_rpy(actual[3:])
             relief_target = list(relief_start)
@@ -909,12 +865,12 @@ def placement_main(argv: list[str] | None = None) -> int:
                 direction=("negative" if search_direction_sign > 0.0 else "positive"),
                 start_xyz_rpy=relief_start,
                 target_xyz_rpy=relief_target,
-                trigger_delta_force_n=latest_dforce,
+                trigger="unconditional_after_confirmed_insertion",
             )
             print(
-                "进洞后检测到持续前后向反力；"
+                "进洞确认后，不检查力传感器；"
                 f"沿世界 {args.search_axis.upper()}"
-                f"{'−' if search_direction_sign > 0.0 else '+'} 反向卸力 "
+                f"{'−' if search_direction_sign > 0.0 else '+'} 固定后拉 "
                 f"{args.post_entry_relief_mm:.3f}mm。"
             )
             arm.start_servo_pose(  # type: ignore[attr-defined]
@@ -1909,7 +1865,7 @@ def placement_main(argv: list[str] | None = None) -> int:
 # translates the minimal JSON profile directly into this module's arguments;
 # no subprocess and no call to place_hole_a_wiggle.py is involved.
 SINGLE_SEARCH_SPEED_MM_S = 10.0
-POST_ENTRY_RELIEF_MM = 1.5
+POST_ENTRY_RELIEF_MM = 1.8
 POST_ENTRY_RELIEF_OPPOSING_FORCE_N = 1.5
 POST_ENTRY_RELIEF_CONFIRM_FRAMES = 2
 POST_ENTRY_RELIEF_OBSERVATION_FRAMES = 3

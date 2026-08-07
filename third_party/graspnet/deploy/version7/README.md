@@ -116,7 +116,7 @@ bash deploy/version7/run_grasp_v7.sh \
   --force-sensor-hand 1
 ```
 
-流程在预抓取位采集空载基线，抓取后短距离抬升并采集载荷。只有 `SINGLE` 才允许继续完整抬升到 graspup，并保持夹持交给模块 2；`EMPTY`、`MULTIPLE` 或 `UNKNOWN` 会在低预抓取位释放，然后回 `go_graspnet` 开始新一轮 Version7 观察、Version5 筛选与抓取。每次重量判定保存到：
+流程在预抓取位采集空载基线；闭爪后不做成功判定，始终先执行完整 `post-grasp lift` 到 `graspup`。到达 graspup 后才检查夹爪保持状态并采集载荷、判定 `SINGLE`。`EMPTY`、`MULTIPLE` 或 `UNKNOWN` 会在 graspup 释放，再回 `go_graspnet` 开始新一轮 Version7 观察、Version5 筛选与抓取。每次重量判定保存到：
 
 ```text
 deploy/version7/output/<run>/weight_cycle_XX/weight_check_result.json
@@ -132,8 +132,8 @@ UNKNOWN:  仅采样不稳定或力数据不可用
 ```
 
 边界按安全侧处理：正好 `30 g` 算 `EMPTY`，正好 `130 g` 算
-`MULTIPLE`。`EMPTY`、`MULTIPLE` 和 `UNKNOWN` 都会在低预抓取位立即打开
-夹爪，然后重新采集点云并推理；只有 `SINGLE` 保持夹持并继续到 graspup。
+`MULTIPLE`。`EMPTY`、`MULTIPLE` 和 `UNKNOWN` 都会在 graspup 打开夹爪，
+然后重新采集点云并推理；只有 `SINGLE` 保持夹持并交给模块 2。
 
 这些阈值须以最终检查位姿、当前夹具和本工件进行实机标定后再用于生产。
 

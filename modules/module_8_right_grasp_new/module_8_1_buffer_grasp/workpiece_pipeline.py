@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Observe, grasp, or reorient workpiece 1/2 in a closed loop.
 
-Observations made while already at saved pose 3 happen directly at pose 3.
-After a reorientation, vision starts at pose 10 during the 6 -> 10 -> 3
-return, so the decision is ready when pose 3 is reached.  A directly
-graspable workpiece is grasped immediately.  Three consecutive direct-grasp
+Observations made while already at saved pose 4 happen directly at pose 4.
+After a reorientation, vision starts at pose 10 during the 6 -> 10 -> 4
+return, so the decision is ready when pose 4 is reached.  A directly
+graspable workpiece is planned from pose 4.  Three consecutive direct-grasp
 failures force one reorientation using the latest observation.
 """
 
@@ -24,6 +24,7 @@ import threading
 import time
 
 from planning_log import PLAN_LOG_ENV, append_event
+from move_by_joints import ensure_ready, load_pose_file
 
 
 MODULE_ROOT = Path(__file__).resolve().parent
@@ -40,7 +41,6 @@ VISION_MODULE_DIR = PROJECT_ROOT / "modules/module_4_head_judge_new/module_4_2_p
 ALIGN_MODULE_DIR = PROJECT_ROOT / "modules/module_7_right_align_new"
 POSE_SCRIPT = VISION_MODULE_DIR / "tabletop_pointcloud_workpiece_pose.py"
 CAPTURE_ROOT = PROJECT_ROOT / "output/module_4_2"
-MOVE_SCRIPT = MODULE_ROOT / "move_by_joints.py"
 POSE_DIR = MODULE_ROOT / "saved_poses"
 GRASP_SCRIPT = MODULE_ROOT / "buffer_grasp.py"
 REORIENT_SCRIPT = ALIGN_MODULE_DIR / "right_align.py"
@@ -48,15 +48,17 @@ DEFAULT_LOG_DIR = PROJECT_ROOT / "output/module_8_1"
 Q1_MIN_DEG = 15.0
 Q1_MAX_DEG = 75.0
 CAPTURE_READY_TIMEOUT_S = 30.0
+RIGHT_ARM_JOINT_NAMES = [f"right_arm_joint{index}" for index in range(1, 8)]
+SAVED_POSE_PLAN_RETRIES = 3
 
 WORKPIECE_CONFIGS = {
     1: {
         "grasp": MODULE_ROOT / "configs/workpiece_1_grasp.json",
-        "reorient": ALIGN_MODULE_DIR / "configs/workpiece_1_reorient.json",
+        "reorient": ALIGN_MODULE_DIR / "configs/workpiece_1_turn_candidates.toml",
     },
     2: {
         "grasp": MODULE_ROOT / "configs/workpiece_2_grasp.json",
-        "reorient": ALIGN_MODULE_DIR / "configs/workpiece_2_reorient.json",
+        "reorient": ALIGN_MODULE_DIR / "configs/workpiece_2_turn_candidates.toml",
     },
 }
 
@@ -80,7 +82,12 @@ def parse_args() -> argparse.Namespace:
                         help="在 10.json 拍照时未识别到工件的重拍次数（默认 3）")
     parser.add_argument("--roi", nargs=4, type=float,
                         default=(0.08, 0.20, 0.98, 0.97))
-    parser.add_argument("--joint-speed", type=float, default=0.2)
+    parser.add_argument("--joint-speed", type=float, default=0.2,
+                        help="保存位姿 RRTstar 的速度/加速度比例基数")
+    parser.add_argument("--joint-speed-scale", type=float, default=2.5,
+                        help="保存位姿 RRTstar 的速度/加速度倍率")
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"),
+                        help="轨迹规划器地址")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR,
                         help=f"运行日志目录（默认 {DEFAULT_LOG_DIR}）")
     parser.add_argument("--execute", action="store_true",
@@ -260,17 +267,67 @@ def release_gripper(args: argparse.Namespace, reason: str) -> None:
 
 
 def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
-    command = [
-        sys.executable, str(MOVE_SCRIPT),
-        "--arm-id", str(args.arm_id),
-        "--pose-file", str(POSE_DIR / f"{number}.json"),
-        "--joint-speed", str(args.joint_speed),
-    ]
-    if args.execute:
-        command.append("--execute")
-        run_checked(command, cwd=MODULE_ROOT)
-    else:
-        print(f"[dry-run] {format_command(command + ['--execute'])}")
+    """Plan and execute a saved joint target; never issue controller move_j."""
+    pose_path = POSE_DIR / f"{number}.json"
+    target = load_pose_file(pose_path, args.arm_id, "joint")
+    speed_scale = args.joint_speed * args.joint_speed_scale
+    if not args.execute:
+        print(
+            f"[dry-run] 规划器将使用关节 RRTstar 移动至 {pose_path.name} "
+            f"(速度/加速度比例={speed_scale:g})。"
+        )
+        return
+
+    arm = planner = None
+    try:
+        sdk = import_sdk()
+        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+        ensure_ready(arm, args.arm_id)
+        planner = sdk.Planner(host=args.planner_host)
+        for attempt in range(1, SAVED_POSE_PLAN_RETRIES + 1):
+            print(
+                f"[planner] 关节 RRTstar 规划至 {pose_path.name} "
+                f"({attempt}/{SAVED_POSE_PLAN_RETRIES})。"
+            )
+            result = planner._trajectory.send_payload({
+                "waypoints": [{
+                    "name": f"module_8_1_saved_pose_{number}",
+                    "type": "joint",
+                    "group": "right_arm",
+                    "planner": "rrtstar",
+                    "max_velocity_scaling_factor": speed_scale,
+                    "max_acceleration_scaling_factor": speed_scale,
+                    "joint_names": RIGHT_ARM_JOINT_NAMES,
+                    "joint_values": target,
+                }],
+                "topp": {
+                    "max_vel_factor": speed_scale,
+                    "max_acc_factor": speed_scale,
+                },
+            }, timeout=30.0)
+            data = result.get("data") or {}
+            trajectory = data.get("trajectory")
+            planned_arm_id = data.get("arm_id")
+            frequency = data.get("sample_frequency", 10.0)
+            if planned_arm_id != args.arm_id or not isinstance(trajectory, list) or not trajectory:
+                raise RuntimeError(f"规划至 {pose_path.name} 未返回 arm_id={args.arm_id} 的有效轨迹")
+            try:
+                arm.follow_trajectory(
+                    arm_id=args.arm_id, trajectory=trajectory,
+                    sample_frequency=float(frequency),
+                )
+                return
+            except Exception as exc:
+                stale_start = "DiscreteTask::validate: first point mismatch" in str(exc)
+                if not stale_start or attempt == SAVED_POSE_PLAN_RETRIES:
+                    raise RuntimeError(f"规划轨迹执行至 {pose_path.name} 失败: {exc}") from exc
+                print("[planner] 轨迹起点已过期，读取当前状态后重新规划。")
+                time.sleep(0.2)
+    finally:
+        if planner is not None:
+            planner.close()
+        if arm is not None:
+            arm.close()
 
 
 def observe_once(args: argparse.Namespace) -> tuple[Path, int, float]:
@@ -316,23 +373,23 @@ def observe_once(args: argparse.Namespace) -> tuple[Path, int, float]:
     return pose_file, int(quadrant), yaw_deg
 
 
-def observe_at_10_while_returning_to_3(
+def observe_at_10_while_returning_to_4(
     args: argparse.Namespace, *, already_at_10: bool = False,
 ) -> tuple[Path, int, float]:
-    """Capture only after pose 10 is reached, then calculate during 10 -> 3.
+    """Capture only after pose 10 is reached, then calculate during 10 -> 4.
 
     ``move_to_saved_pose`` waits for the motion command to finish.  In addition
     to starting the vision job after pose 10, wait until that job has saved its
-    RGB frame before beginning 10 -> 3.  Thus the camera exposure is complete
+    RGB frame before beginning 10 -> 4.  Thus the camera exposure is complete
     at pose 10; only the remaining pose calculation overlaps the return move.
-    Any retry likewise makes a fresh 3 -> 10 trip before capturing.
+    Any retry likewise makes a fresh 4 -> 10 trip before capturing.
     """
     for attempt in range(1, args.observation_attempts + 1):
         if not already_at_10:
-            print("[motion] 到达 10.json 后开始拍照；视觉计算将与 10 -> 3 回程并行。")
+            print("[motion] 到达 10.json 后开始拍照；视觉计算将与 10 -> 4 回程并行。")
             move_to_saved_pose(10, args)
         else:
-            print("[motion] 已到达 10.json，开始拍照；视觉计算将与 10 -> 3 回程并行。")
+            print("[motion] 已到达 10.json，开始拍照；视觉计算将与 10 -> 4 回程并行。")
         already_at_10 = False
 
         capture_root = CAPTURE_ROOT / f"workpiece_{args.workpiece}"
@@ -343,7 +400,7 @@ def observe_at_10_while_returning_to_3(
             while True:
                 current_rgb = {path.resolve() for path in capture_root.glob("*/rgb.png")}
                 if current_rgb - previous_rgb:
-                    print("[observe] 10.json 位姿下的 RGB-D 已采集，开始返回 3.json 并继续计算。")
+                    print("[observe] 10.json 位姿下的 RGB-D 已采集，开始返回 4.json 并继续计算。")
                     break
                 if observation.done():
                     # Propagate a camera/vision startup failure instead of
@@ -355,7 +412,7 @@ def observe_at_10_while_returning_to_3(
                         f"到达 10.json 后 {CAPTURE_READY_TIMEOUT_S:.0f} 秒内未完成 RGB-D 采集。"
                     )
                 time.sleep(0.05)
-            move_to_saved_pose(3, args)
+            move_to_saved_pose(4, args)
             try:
                 return observation.result()
             except NoWorkpieceDetectedError as exc:
@@ -365,24 +422,24 @@ def observe_at_10_while_returning_to_3(
                     ) from exc
                 print(
                     f"[observe] 第 {attempt}/{args.observation_attempts} 次未识别到工件："
-                    f"{exc}；将从 3.json 返回 10.json 后重拍。"
+                    f"{exc}；将从 4.json 返回 10.json 后重拍。"
                 )
     raise AssertionError("unreachable")
 
 
-def observe_at_pose_3(args: argparse.Namespace) -> tuple[Path, int, float]:
-    """Observe directly at pose 3; retries remain at pose 3 as well."""
+def observe_at_pose_4(args: argparse.Namespace) -> tuple[Path, int, float]:
+    """Observe directly at pose 4; retries remain at pose 4 as well."""
     for attempt in range(1, args.observation_attempts + 1):
         try:
             return observe_once(args)
         except NoWorkpieceDetectedError as exc:
             if attempt == args.observation_attempts:
                 raise RuntimeError(
-                    f"连续 {args.observation_attempts} 次在 3.json 拍照均未识别到目标工件。"
+                    f"连续 {args.observation_attempts} 次在 4.json 拍照均未识别到目标工件。"
                 ) from exc
             print(
                 f"[observe] 第 {attempt}/{args.observation_attempts} 次未识别到工件："
-                f"{exc}；保持在 3.json 重拍。"
+                f"{exc}；保持在 4.json 重拍。"
             )
     raise AssertionError("unreachable")
 
@@ -422,13 +479,14 @@ def validate(args: argparse.Namespace) -> None:
         raise ValueError("--max-cycles 必须至少为 1")
     if args.observation_attempts < 1:
         raise ValueError("--observation-attempts 必须至少为 1")
-    if not 0.0 < args.joint_speed <= 1.0:
-        raise ValueError("--joint-speed 必须位于 (0, 1]")
+    if (args.joint_speed <= 0.0 or args.joint_speed_scale <= 0.0
+            or args.joint_speed * args.joint_speed_scale > 1.0):
+        raise ValueError("--joint-speed × --joint-speed-scale 必须位于 (0, 1]")
     required = [
-        POSE_SCRIPT, MOVE_SCRIPT, GRASP_SCRIPT, REORIENT_SCRIPT,
+        POSE_SCRIPT, GRASP_SCRIPT, REORIENT_SCRIPT,
         WORKPIECE_CONFIGS[args.workpiece]["grasp"],
         WORKPIECE_CONFIGS[args.workpiece]["reorient"],
-        *(POSE_DIR / f"{number}.json" for number in (3, 6, 10)),
+        *(POSE_DIR / f"{number}.json" for number in (4, 6, 10)),
     ]
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -444,9 +502,9 @@ def print_dry_run(args: argparse.Namespace) -> None:
     print(f"调整配置: {configs['reorient']}")
     print(f"直接抓取条件: Q1 且 yaw 位于 [{Q1_MIN_DEG:.0f}, {Q1_MAX_DEG:.0f}]°")
     print(f"连续抓取失败 {args.max_grasp_failures} 次后强制调整。")
-    print("观察时序: 正常在 3.json 拍照；仅调整后的 6 -> 10 -> 3 回程在 10.json 拍照，并行计算。")
-    move_to_saved_pose(3, args)
-    print("[dry-run] 在 3.json 拍照并计算位姿。")
+    print("观察时序: 正常在 4.json 拍照并规划抓取；仅调整后的 6 -> 10 -> 4 回程在 10.json 拍照，并行计算。")
+    move_to_saved_pose(4, args)
+    print("[dry-run] 在 4.json 拍照并计算位姿。")
 
 
 def main() -> int:
@@ -467,16 +525,16 @@ def main() -> int:
 
             consecutive_grasp_failures = 0
             force_reorient = False
-            move_to_saved_pose(3, args)
+            move_to_saved_pose(4, args)
             observation_at_pose_10 = False
 
             for cycle in range(1, args.max_cycles + 1):
                 if observation_at_pose_10:
-                    pose_file, quadrant, yaw_deg = observe_at_10_while_returning_to_3(
+                    pose_file, quadrant, yaw_deg = observe_at_10_while_returning_to_4(
                         args, already_at_10=True,
                     )
                 else:
-                    pose_file, quadrant, yaw_deg = observe_at_pose_3(args)
+                    pose_file, quadrant, yaw_deg = observe_at_pose_4(args)
                 observation_at_pose_10 = False
                 append_event({
                     "event": "observation", "cycle": cycle,
@@ -492,7 +550,7 @@ def main() -> int:
                 # wins over any previous adjustment state.  ``force_reorient``
                 # only affects a non-directly-graspable observation.
                 if directly_graspable(quadrant, yaw_deg):
-                    print("[decision] 位于可直接抓取的 Q1 15°--75° 区间，执行直接抓取。")
+                    print("[decision] 位于可直接抓取的 Q1 15°--75° 区间，在 4.json 执行直接抓取规划。")
                     grasp_status = grasp(pose_file, args)
                     if grasp_status == 0:
                         print("[done] 直接抓取成功，总控结束。")
@@ -504,7 +562,7 @@ def main() -> int:
                         f"{consecutive_grasp_failures}/{args.max_grasp_failures}。"
                     )
                     release_gripper(args, "直接抓取失败")
-                    move_to_saved_pose(3, args)
+                    move_to_saved_pose(4, args)
                     if consecutive_grasp_failures >= args.max_grasp_failures:
                         force_reorient = True
                         print("[decision] 已连续抓取失败达到上限；下一次观察后强制执行调整。")
@@ -515,7 +573,7 @@ def main() -> int:
                     if not force_reorient
                     else f"已连续直接抓取失败 {consecutive_grasp_failures} 次"
                 )
-                print(f"[decision] {reason}；按 3 -> 10 -> 6 执行调整准备。")
+                print(f"[decision] {reason}；按 4 -> 10 -> 6 执行调整准备。")
                 move_to_saved_pose(10, args)
                 move_to_saved_pose(6, args)
                 reorient_status = reorient(pose_file, args)
@@ -530,10 +588,10 @@ def main() -> int:
                 # a Q1 workpiece must go straight to direct grasp.
                 force_reorient = False
 
-                print("[motion] 按 6 -> 10 返回；到达 10.json 后拍照，并在 10 -> 3 回程中完成计算。")
+                print("[motion] 按 6 -> 10 返回；到达 10.json 后拍照，并在 10 -> 4 回程中完成计算。")
                 move_to_saved_pose(10, args)
                 # Start the next observation only after 10 is actually reached;
-                # its calculation overlaps the remaining return to pose 3.
+                # its calculation overlaps the remaining return to pose 4.
                 observation_at_pose_10 = True
 
             raise RuntimeError(
