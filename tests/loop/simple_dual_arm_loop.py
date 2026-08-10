@@ -67,7 +67,7 @@ WORKPIECE_2_RIGHT_PUSH_TO_Q1 = Path(
 )
 MODULAR_RIGHT_BUFFER_PIPELINE = (
     LOOP_ROOT
-    / "modules/module_8_right_grasp_new/module_8_1_buffer_grasp/"
+    / "modules/module_8_right_grasp/module_8_1_buffer_grasp/"
     "workpiece_pipeline.py"
 )
 RIGHT_PLACE_WIGGLE = (
@@ -198,8 +198,8 @@ def parse_args() -> argparse.Namespace:
         default="apart",
         help="左臂 GraspNet 后处理流程：apart=拆分后的 Inspect + Left Place",
     )
-    parser.add_argument("--right-speed", type=float, default=0.1)
-    parser.add_argument("--prepare-speed", type=float, default=0.1,
+    parser.add_argument("--right-speed", type=float, default=0.3)
+    parser.add_argument("--prepare-speed", type=float, default=0.3,
                         help="启动前左 graspup、右 Idle 的规划速度比例")
     parser.add_argument(
         "--front-regrasp-pregrasp-height-m", type=float, default=0.05,
@@ -412,6 +412,7 @@ def open_both_grippers_for_prepare(args: argparse.Namespace) -> None:
                 hand,
                 100.0,
                 force=100.0,
+                speed=80.0 if hand == 1 else None,
                 mode="sync",
                 preempt=False,
                 timeout=60.0,

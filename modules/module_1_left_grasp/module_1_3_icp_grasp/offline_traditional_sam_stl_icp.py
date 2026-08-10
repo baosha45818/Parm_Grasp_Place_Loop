@@ -45,12 +45,12 @@ def sam_masks(
         request, image_bgr=np.ascontiguousarray(bgr), depth_image=np.ascontiguousarray(depth),
         intrinsics=np.asarray(K, dtype=np.float64), depth_scale=float(scale),
     )
-    # `/v1/first-frame/candicates-max` uses normalized ROI coordinates.  This is
-    # the requested pixel workspace (0, 0, 640, 391) for the fixed 640x480
-    # D405 stream, keeping the grippers/table-bottom out of SAM prompts.
-    roi_norm = [0.0, 0.0, 1.0, 391.0 / float(bgr.shape[0])]
-    options = {"refine_selected": False, "roi": roi_norm}
-    params = urlencode({"num_candidates": 12, "options": json.dumps(options, separators=(",", ":"))})
+    # Keep this caller aligned with the current candicates-max endpoint.  In
+    # particular, do not disable the endpoint's boundary-mask refinement or
+    # impose the former 640x391 ROI: both would make the live result differ
+    # from the validated max-service visualizations.
+    options: dict[str, object] = {}
+    params = urlencode({"num_candidates": 20, "options": json.dumps(options, separators=(",", ":"))})
     conn = UnixConnection("sam2-service", timeout=90.0)
     try:
         conn.request("POST", f"/v1/first-frame/candicates-max?{params}", body=request.getvalue(),
@@ -835,7 +835,7 @@ def main() -> None:
             if len(xs0) == 0:
                 continue
             area0 = int(mask.sum()); x0, x1, y0, y1 = int(xs0.min()), int(xs0.max()), int(ys0.min()), int(ys0.max())
-            area_ok = (1200 <= area0 <= 30000) if relaxed else (2000 <= area0 <= 20000)
+            area_ok = (1200 <= area0 <= 30000) if relaxed else (2000 <= area0 <= 24000)
             if (area_ok and x0 > 10 and y0 > 10 and x1 < image.shape[1] - 11 and y1 < image.shape[0] - 11
                     and float(saturation_image[mask].mean()) <= 130.0):
                 selected.append(index)

@@ -145,7 +145,7 @@ def main() -> int:
                 state = gripper.get_state().get(1)
                 if not is_gripper_usable(state):
                     raise RuntimeError("左夹爪不可用或未初始化")
-                gripper.move(1, 100., force=args.close_force, mode="sync", preempt=False, timeout=60.)
+                gripper.move(1, 100., force=args.close_force, speed=80.0, mode="sync", preempt=False, timeout=60.)
             target, above = build_targets(T_camera_tcp, body_head, args.pregrasp_m)
             pre = runtime.plan_cartesian_pose("left", pose(above), planner="rrtstar", start_joints_deg=ready)
             pre_end = ((pre or {}).get("data") or {}).get("trajectory") or []
@@ -218,7 +218,7 @@ def main() -> int:
                     report["adjustments"].append(event)
             weight_baseline = capture_open_gripper_baseline()
             with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-                response = gripper.move(1, 0., force=args.close_force, mode="sync", preempt=False, timeout=60.)
+                response = gripper.move(1, 0., force=args.close_force, speed=80.0, mode="sync", preempt=False, timeout=60.)
             check_lift = current_target.copy()
             check_lift[2, 3] += POST_CLOSE_CHECK_LIFT_M
             lift_plan = runtime.plan_cartesian_pose("left", pose(check_lift), planner="lin", start_joints_deg=current_joints)
@@ -232,7 +232,7 @@ def main() -> int:
             report["post_lift_force_check"] = post_lift_force
             if not post_lift_force["accepted"]:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-                    gripper.move(1, 100.0, force=100.0, mode="sync", preempt=False, timeout=60.0)
+                    gripper.move(1, 100.0, force=100.0, speed=80.0, mode="sync", preempt=False, timeout=60.0)
                 raise RuntimeError("手动反抓上提3cm后力传感器未确认抓到工件；已重新张开左夹爪")
             report.update({"status": "manual_adjust_grasp_and_lift_complete", "gripper_close_response": response,
                            "final_grasp_body_base": debug_pose(current_target), "final_lift_body_base": debug_pose(check_lift)})

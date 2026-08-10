@@ -409,6 +409,7 @@ def open_left_gripper(args: argparse.Namespace) -> float | None:
             args.gripper_hand,
             100.0,
             force=100.0,
+            speed=80.0,
             mode="sync",
             preempt=False,
             timeout=60.0,

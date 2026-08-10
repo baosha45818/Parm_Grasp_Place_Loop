@@ -4243,6 +4243,7 @@ def main() -> int:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     gripper.move(
                         args.gripper_hand, 100.0, force=100.0,
+                        speed=80.0,
                         mode="sync", preempt=False, timeout=60.0,
                     )
                 write_stage_result(
@@ -4361,6 +4362,7 @@ def main() -> int:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     response = gripper.move(
                         args.gripper_hand, 100.0, force=100.0,
+                        speed=80.0,
                         mode="sync", preempt=False, timeout=60.0,
                     )
                     final_state = gripper.get_state().get(args.gripper_hand)
@@ -4398,6 +4400,7 @@ def main() -> int:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     gripper.move(
                         args.gripper_hand, 100.0, force=100.0,
+                        speed=80.0,
                         mode="sync", preempt=False, timeout=60.0,
                     )
             write_stage_result(
@@ -4505,6 +4508,7 @@ def main() -> int:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     gripper.move(
                         args.gripper_hand, 100.0, force=100.0,
+                        speed=80.0,
                         mode="sync", preempt=False, timeout=60.0,
                     )
                 write_stage_result(

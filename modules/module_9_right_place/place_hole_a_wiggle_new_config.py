@@ -66,6 +66,9 @@ class PlacementContactReached(RuntimeError):
     """A validated insertion-release signature stopped the search successfully."""
 
 
+SEARCH_DISTANCE_EXHAUSTED_EXIT_CODE = 42
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="右臂回固定关节起点后，沿配置的世界坐标轴逐毫米搜索，并以力特征确认孔已进入。"
@@ -98,12 +101,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="规划回起点前调用 cancel_task(2) 清理右臂残留任务；总控串联时使用",
     )
     parser.add_argument(
-        "--retry-lift-mm", type=float, default=0.1,
-        help="已废弃，保留该参数仅为兼容旧启动命令；后拉未到位不再执行抬高恢复",
+        "--pre-search-press-mm", type=float, default=1.0,
+        help="第 1 轮搜索前沿世界 Z− 的 LIN 下压距离，默认 1 mm",
     )
     parser.add_argument(
-        "--max-retry-lifts", type=int, default=10,
-        help="已废弃，保留该参数仅为兼容旧启动命令",
+        "--retry-search-press-increment-mm", type=float, default=1.5,
+        help="每次重试相对前一轮额外下压距离，默认 1.5 mm",
+    )
+    parser.add_argument(
+        "--pre-search-press-speed-mm-s", type=float, default=1.0,
+        help="每轮搜索前 LIN 下压速度，默认 1 mm/s",
+    )
+    parser.add_argument(
+        "--search-attempt", type=int, default=1,
+        help="当前搜索轮次；第 N 轮从初始点累计下压 N×pre-search-press-mm，默认第 1 轮",
+    )
+    parser.add_argument(
+        "--return-search-exhausted", action="store_true",
+        help="达到最大搜索距离时返回内部重试状态码，而非直接报错；仅供工件配置入口使用",
     )
     parser.add_argument(
         "--max-consecutive-back-target-timeouts", type=int, default=2,
@@ -265,7 +280,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.live != args.confirm_live:
         parser.error("真实运动必须同时指定 --live --confirm-live")
-    for name in ("retry_lift_mm", "back_step_mm", "wiggle_half_amplitude_mm", "fast_linear_speed_mm_s", "fast_linear_accel_mm_s2", "slow_after_back_mm", "slow_linear_speed_mm_s", "slow_linear_accel_mm_s2", "quick_endpoint_tolerance_mm", "quick_endpoint_wait_s", "max_back_mm", "sample_timeout", "max_force_delta_n", "max_torque_delta_nm", "min_entry_back_mm", "entry_pre_fx_n", "entry_pre_ty_nm", "entry_fx_drop_n", "entry_ty_drop_nm", "entry_ty_abs_nm", "entry_relaxed_pre_fx_n", "entry_relaxed_pre_ty_nm", "entry_relaxed_fx_drop_n", "entry_relaxed_ty_drop_nm", "entry_release_pre_force_n", "entry_release_pre_torque_nm", "entry_release_force_n", "entry_release_torque_nm", "entry_release_force_drop_n", "entry_release_torque_drop_nm", "entry_release_confirm_interval_s", "wiggle_entry_pre_fx_n", "wiggle_entry_pre_ty_nm", "wiggle_entry_fx_drop_n", "wiggle_entry_ty_drop_nm"):
+    for name in ("pre_search_press_mm", "retry_search_press_increment_mm", "pre_search_press_speed_mm_s", "back_step_mm", "wiggle_half_amplitude_mm", "fast_linear_speed_mm_s", "fast_linear_accel_mm_s2", "slow_after_back_mm", "slow_linear_speed_mm_s", "slow_linear_accel_mm_s2", "quick_endpoint_tolerance_mm", "quick_endpoint_wait_s", "max_back_mm", "sample_timeout", "max_force_delta_n", "max_torque_delta_nm", "min_entry_back_mm", "entry_pre_fx_n", "entry_pre_ty_nm", "entry_fx_drop_n", "entry_ty_drop_nm", "entry_ty_abs_nm", "entry_relaxed_pre_fx_n", "entry_relaxed_pre_ty_nm", "entry_relaxed_fx_drop_n", "entry_relaxed_ty_drop_nm", "entry_release_pre_force_n", "entry_release_pre_torque_nm", "entry_release_force_n", "entry_release_torque_nm", "entry_release_force_drop_n", "entry_release_torque_drop_nm", "entry_release_confirm_interval_s", "wiggle_entry_pre_fx_n", "wiggle_entry_pre_ty_nm", "wiggle_entry_fx_drop_n", "wiggle_entry_ty_drop_nm"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             parser.error(f"--{name.replace('_', '-')} 必须为正数")
@@ -293,8 +308,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} 必须为非负数")
     if args.baseline_samples < 1:
         parser.error("--baseline-samples 必须至少为 1")
-    if args.max_retry_lifts < 1:
-        parser.error("--max-retry-lifts 必须至少为 1")
+    if args.search_attempt < 1:
+        parser.error("--search-attempt 必须至少为 1")
     if args.max_consecutive_back_target_timeouts < 1:
         parser.error("--max-consecutive-back-target-timeouts 必须至少为 1")
     if args.same_target_retries < 0:
@@ -412,21 +427,58 @@ def write_control_snapshot(arm: object, output_file: object, event: str) -> None
 
 
 def wait_for_right_task_stopped(
-    arm: object, output_file: object, *, timeout_s: float = 3.0,
+    arm: object,
+    output_file: object | None,
+    *,
+    timeout_s: float = 3.0,
+    confirmed_event: str = "right_task_stopped_confirmed",
+    timeout_event: str = "right_task_stop_wait_timeout",
+    cancel_if_still_running_after_s: float | None = None,
+    event_logger: object | None = None,
 ) -> None:
-    """Confirm cancel_task(2) has removed the old right-arm task before servo starts."""
+    """Wait until the controller has actually retired the active right-arm task.
+
+    ServoPose stop is asynchronous on the controller.  A short grace period
+    is allowed first; callers starting a new ServoPose may request a
+    cancel_task fallback so the old stream cannot overlap the new one.
+    """
     deadline = time.monotonic() + timeout_s
+    cancel_deadline = (
+        time.monotonic() + cancel_if_still_running_after_s
+        if cancel_if_still_running_after_s is not None else None
+    )
+    cancel_sent = False
+    last_task_state = "unavailable"
+
+    def record(event: str, task_state: str) -> None:
+        if output_file is not None:
+            write_control_snapshot(arm, output_file, event)
+        if event_logger is not None:
+            event_logger(event, task_state=task_state)  # type: ignore[operator]
+
     while time.monotonic() < deadline:
         state = arm.get_state() or {}  # type: ignore[attr-defined]
         task_state = str(
             (((state.get("state") or {}).get("right") or {}).get("task_state") or "")
         ).strip().lower()
-        if task_state != "running":
-            write_control_snapshot(arm, output_file, "right_cancel_confirmed")
+        last_task_state = task_state or "unavailable"
+        if task_state in {"completed", "cancelled", "idle", "stopped"}:
+            record(confirmed_event, task_state)
             return
+        if (
+            cancel_deadline is not None
+            and not cancel_sent
+            and time.monotonic() >= cancel_deadline
+        ):
+            arm.cancel_task(2)  # type: ignore[attr-defined]
+            cancel_sent = True
+            record(confirmed_event + "_cancel_sent", task_state)
         time.sleep(0.05)
-    write_control_snapshot(arm, output_file, "right_cancel_wait_timeout")
-    raise RuntimeError("cancel_task(2) 后右臂 task_state 仍为 running")
+    record(timeout_event, last_task_state)
+    raise RuntimeError(
+        f"右臂任务未在 {timeout_s:.1f}s 内进入已停止状态；"
+        f"最后 task_state={last_task_state!r}"
+    )
 
 
 def local_z_in_world(rpy: list[float]) -> list[float]:
@@ -800,7 +852,11 @@ def placement_main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
             arm.cancel_task(2)  # type: ignore[attr-defined]
-            wait_for_right_task_stopped(arm, log_file)
+            wait_for_right_task_stopped(
+                arm, log_file,
+                confirmed_event="right_cancel_confirmed",
+                timeout_event="right_cancel_wait_timeout",
+            )
         print("正在移动到保存的起始位姿……")
         if args.initial_motion == "planner-movej":
             move_to_saved_joints_planned(
@@ -809,9 +865,73 @@ def placement_main(argv: list[str] | None = None) -> int:
             )
         else:
             move_to_saved_joints_servo(arm, saved_joints_deg)
+        # The taught pose is the recovery landmark, not the force-baseline
+        # pose.  Every retry returns here, then presses the configured extra
+        # distance deeper than the preceding attempt before rebuilding the
+        # baseline at that new search start.
+        initial_pose = current_pose(arm, 2)
+        press_start = initial_pose[:3] + rotvec_to_rpy(initial_pose[3:])
+        press_depth_mm = (
+            args.pre_search_press_mm
+            + (args.search_attempt - 1) * args.retry_search_press_increment_mm
+        )
+        press_increment_mm = (
+            args.pre_search_press_mm
+            if args.search_attempt == 1 else args.retry_search_press_increment_mm
+        )
+        press_target = list(press_start)
+        press_target[2] -= press_depth_mm / 1000.0
+        print(
+            "已到放置初始位姿；沿世界 Z− LIN 下压 "
+            f"{press_depth_mm:.3f}mm（第 {args.search_attempt} 轮累计深度）后再采集力基线。"
+        )
+        log_event(
+            "pre_search_press_start",
+            attempt=args.search_attempt,
+            distance_mm=press_depth_mm,
+            incremental_depth_mm=press_increment_mm,
+            axis="z",
+            direction="negative",
+            start_xyz_rpy=press_start,
+            target_xyz_rpy=press_target,
+        )
+        servo_guard = right_servo_guard()
+        servo_guard.__enter__()
+        try:
+            arm.start_servo_pose(  # type: ignore[attr-defined]
+                2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+                input_frequency_hz=50.0,
+            )
+            servo_started = True
+            continuous_servo_stopped = False
+            move_in_active_session(
+                arm,
+                press_target,
+                linear_speed_mps=args.pre_search_press_speed_mm_s / 1000.0,
+                linear_accel_mps2=0.01,
+            )
+        finally:
+            if servo_started and not continuous_servo_stopped:
+                arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_pre_search_press_stop_confirmed",
+                    timeout_event="right_pre_search_press_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                )
+                continuous_servo_stopped = True
+            servo_started = False
+            servo_guard.__exit__(None, None, None)
+            servo_guard = None
+        log_event(
+            "pre_search_press_completed",
+            attempt=args.search_attempt,
+            distance_mm=press_depth_mm,
+            incremental_depth_mm=press_increment_mm,
+        )
         # Contact limits must be relative to the actual red-dot start state,
         # not the state before this script moved the arm to that point.
-        print("已到起始位姿；请勿接触工件，正在稳定并采集右腕力基线……")
+        print("下压完成；请勿接触工件，正在稳定并采集右腕力基线……")
         time.sleep(0.5)
         baseline_samples = []
         for _ in range(args.baseline_samples):
@@ -847,9 +967,19 @@ def placement_main(argv: list[str] | None = None) -> int:
             # The original search stream has already been stopped on the
             # continuous-monitor success paths.  If a non-continuous success
             # reached this handler, stop it before making the fixed back-off.
-            if servo_started and not continuous_servo_stopped:
-                arm.stop_servo_pose(2)  # type: ignore[attr-defined]
-                continuous_servo_stopped = True
+            if servo_started:
+                if not continuous_servo_stopped:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    continuous_servo_stopped = True
+                # A high-rate force detector may already have issued stop;
+                # in either case do not start the relief stream until the
+                # controller has retired that old ServoPose task.
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_pre_relief_stop_confirmed",
+                    timeout_event="right_pre_relief_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                )
             actual = current_pose(arm, 2)
             relief_start = actual[:3] + rotvec_to_rpy(actual[3:])
             relief_target = list(relief_start)
@@ -888,6 +1018,12 @@ def placement_main(argv: list[str] | None = None) -> int:
                 )
             finally:
                 arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_post_entry_relief_stop_confirmed",
+                    timeout_event="right_post_entry_relief_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                )
                 continuous_servo_stopped = True
             log_event("post_entry_relief_completed", distance_mm=args.post_entry_relief_mm)
 
@@ -1373,6 +1509,10 @@ def placement_main(argv: list[str] | None = None) -> int:
                 2, pose_type="absolute", frame="world", tcp=[0.0] * 6, input_frequency_hz=50.0
             )
             servo_started = True
+            # The preparatory Z-down LIN used its own ServoPose session and
+            # stopped it before baseline collection.  This is a new search
+            # session, so final cleanup must stop and confirm *this* task.
+            continuous_servo_stopped = False
             # The pure-search clock excludes joint return, force-baseline
             # collection, task-reset handling, and any inter-arm lock wait.
             search_started_at = time.monotonic()
@@ -1428,6 +1568,11 @@ def placement_main(argv: list[str] | None = None) -> int:
                     result="not_entered_max_search_distance_reached",
                     back_mm=round(args.max_back_mm, 3),
                 )
+                if args.return_search_exhausted:
+                    print(
+                        "本轮搜索达到最大距离，交由工件配置入口执行抬升、回初始点并重试。"
+                    )
+                    return SEARCH_DISTANCE_EXHAUSTED_EXIT_CODE
                 raise RuntimeError(
                     f"在最大搜索距离 {args.max_back_mm:.1f}mm 内未检测到进洞特征。"
                 )
@@ -1834,6 +1979,12 @@ def placement_main(argv: list[str] | None = None) -> int:
                 except Exception as exc:
                     print(f"警告：停止前控制状态记录失败：{exc}", file=sys.stderr)
                 arm.stop_servo_pose(2)
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_servo_stop_confirmed",
+                    timeout_event="right_servo_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                )
                 try:
                     write_control_snapshot(arm, log_file, "after_stop_servo_pose")
                 except Exception as exc:
@@ -1865,6 +2016,12 @@ def placement_main(argv: list[str] | None = None) -> int:
 # translates the minimal JSON profile directly into this module's arguments;
 # no subprocess and no call to place_hole_a_wiggle.py is involved.
 SINGLE_SEARCH_SPEED_MM_S = 10.0
+MAX_SEARCH_ATTEMPTS = 6
+PRE_SEARCH_PRESS_MM = 1.0
+RETRY_SEARCH_PRESS_INCREMENT_MM = 1.5
+PRE_SEARCH_PRESS_SPEED_MM_S = 1.0
+RETRY_LIFT_MM = 30.0
+RETRY_LIFT_SPEED_MM_S = 10.0
 POST_ENTRY_RELIEF_MM = 1.8
 POST_ENTRY_RELIEF_OPPOSING_FORCE_N = 1.5
 POST_ENTRY_RELIEF_CONFIRM_FRAMES = 2
@@ -1924,9 +2081,81 @@ def append_scalar(argv: list[str], key: str, value: Any, *, label: str) -> None:
     argv.extend(["--" + key.replace("_", "-"), str(value)])
 
 
+def lift_after_exhausted_search(
+    *, arm_host: str | None, session_log_event: object | None = None,
+) -> None:
+    """Safely clear the fixture before the next attempt re-plans to the taught pose."""
+    if session_log_event is not None:
+        session_log_event(  # type: ignore[operator]
+            "retry_lift_recovery_connecting",
+            distance_mm=RETRY_LIFT_MM,
+            speed_mm_s=RETRY_LIFT_SPEED_MM_S,
+            axis="z",
+            direction="positive",
+        )
+    sdk = import_sdk()
+    arm = None
+    servo_guard = None
+    servo_started = False
+    try:
+        arm = sdk.Arm(host=arm_host or "192.168.88.1")
+        ensure_ready(arm, 2)
+        start = current_pose(arm, 2)
+        start_rpy = start[:3] + rotvec_to_rpy(start[3:])
+        target_rpy = list(start_rpy)
+        target_rpy[2] += RETRY_LIFT_MM / 1000.0
+        if session_log_event is not None:
+            session_log_event(  # type: ignore[operator]
+                "retry_lift_motion_start",
+                distance_mm=RETRY_LIFT_MM,
+                speed_mm_s=RETRY_LIFT_SPEED_MM_S,
+                start_xyz_rpy=start_rpy,
+                target_xyz_rpy=target_rpy,
+            )
+        print(
+            "本轮未进洞：沿世界 Z+ LIN 抬升 "
+            f"{RETRY_LIFT_MM:.1f}mm，随后重新规划回放置初始点。"
+        )
+        servo_guard = right_servo_guard()
+        servo_guard.__enter__()
+        arm.start_servo_pose(  # type: ignore[attr-defined]
+            2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+            input_frequency_hz=50.0,
+        )
+        servo_started = True
+        move_in_active_session(
+            arm,
+            target_rpy,
+            linear_speed_mps=RETRY_LIFT_SPEED_MM_S / 1000.0,
+            linear_accel_mps2=0.02,
+        )
+        print("30mm 抬升完成。")
+        if session_log_event is not None:
+            session_log_event(  # type: ignore[operator]
+                "retry_lift_motion_completed", distance_mm=RETRY_LIFT_MM,
+            )
+    finally:
+        try:
+            if servo_started and arm is not None:
+                arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                wait_for_right_task_stopped(
+                    arm,
+                    None,
+                    confirmed_event="retry_lift_stop_confirmed",
+                    timeout_event="retry_lift_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                    event_logger=session_log_event,
+                )
+        finally:
+            if servo_guard is not None:
+                servo_guard.__exit__(None, None, None)
+            if arm is not None:
+                arm.close()
+
+
 def profile_argv(
     profile: dict[str, Any], workpiece: int, *, live: bool,
-    arm_host: str | None, reset_right_task_before_servo: bool,
+    arm_host: str | None, reset_right_task_before_servo: bool, attempt: int,
 ) -> list[str]:
     joints = profile.get("initial_right_joints_deg")
     if (
@@ -1938,6 +2167,11 @@ def profile_argv(
         "--initial-joint-planner", "ompl", "--straight-line",
         "--continuous-straight-search", "--single-continuous-search",
         "--fast-linear-speed-mm-s", str(SINGLE_SEARCH_SPEED_MM_S),
+        "--pre-search-press-mm", str(PRE_SEARCH_PRESS_MM),
+        "--retry-search-press-increment-mm", str(RETRY_SEARCH_PRESS_INCREMENT_MM),
+        "--pre-search-press-speed-mm-s", str(PRE_SEARCH_PRESS_SPEED_MM_S),
+        "--search-attempt", str(attempt),
+        "--return-search-exhausted",
         "--post-entry-relief-mm", str(POST_ENTRY_RELIEF_MM),
         "--post-entry-relief-opposing-force-n", str(POST_ENTRY_RELIEF_OPPOSING_FORCE_N),
         "--post-entry-relief-confirm-frames", str(POST_ENTRY_RELIEF_CONFIRM_FRAMES),
@@ -1950,7 +2184,7 @@ def profile_argv(
     for key in sorted(profile.get("stop_conditions", {})):
         append_scalar(argv, key, profile["stop_conditions"][key], label="stop_conditions")
     log_path = Path(__file__).resolve().parent / "logs" / (
-        f"hole_a_workpiece_{workpiece}_{datetime.now():%Y%m%d_%H%M%S_%f}.log"
+        f"hole_a_workpiece_{workpiece}_attempt_{attempt}_{datetime.now():%Y%m%d_%H%M%S_%f}.log"
     )
     argv.extend(["--output", str(log_path)])
     if arm_host is not None:
@@ -1984,20 +2218,84 @@ def main() -> int:
         workpiece, profile = read_profile(config_path)
         if workpiece != wrapper_args.workpiece:
             raise ValueError(f"工件号与配置不一致：{config_path}")
-        argv = profile_argv(
-            profile,
-            workpiece,
-            live=wrapper_args.live,
-            arm_host=wrapper_args.arm_host,
-            reset_right_task_before_servo=wrapper_args.reset_right_task_before_servo,
-        )
     except ValueError as exc:
         parser.error(str(exc))
-    print(f"执行工件 {workpiece} 配置：{config_path}")
-    print("内置执行参数：", shlex.join(argv))
     if wrapper_args.print_command:
+        argv = profile_argv(
+            profile, workpiece, live=wrapper_args.live,
+            arm_host=wrapper_args.arm_host,
+            reset_right_task_before_servo=wrapper_args.reset_right_task_before_servo,
+            attempt=1,
+        )
+        print(f"执行工件 {workpiece} 配置：{config_path}")
+        print("第 1 轮内置执行参数：", shlex.join(argv))
         return 0
-    return placement_main(argv)
+    session_log_path = Path(__file__).resolve().parent / "logs" / (
+        f"hole_a_workpiece_{workpiece}_retry_session_{datetime.now():%Y%m%d_%H%M%S_%f}.log"
+    )
+    session_log_path.parent.mkdir(parents=True, exist_ok=True)
+    with session_log_path.open("w", encoding="utf-8") as session_log:
+        def session_log_event(event: str, **fields: object) -> None:
+            session_log.write(json.dumps({
+                "wall_time": datetime.now().isoformat(timespec="milliseconds"),
+                "event": event,
+                **fields,
+            }, ensure_ascii=False) + "\n")
+            session_log.flush()
+
+        session_log_event(
+            "retry_session_started",
+            workpiece=workpiece,
+            max_attempts=MAX_SEARCH_ATTEMPTS,
+            first_search_press_mm=PRE_SEARCH_PRESS_MM,
+            retry_search_press_increment_mm=RETRY_SEARCH_PRESS_INCREMENT_MM,
+            retry_lift_mm=RETRY_LIFT_MM,
+        )
+        print(f"重试会话日志将实时写入：{session_log_path}")
+        try:
+            for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
+                argv = profile_argv(
+                    profile, workpiece, live=wrapper_args.live,
+                    arm_host=wrapper_args.arm_host,
+                    reset_right_task_before_servo=wrapper_args.reset_right_task_before_servo,
+                    attempt=attempt,
+                )
+                session_log_event(
+                    "attempt_started", attempt=attempt,
+                    press_depth_mm=(
+                        PRE_SEARCH_PRESS_MM
+                        + (attempt - 1) * RETRY_SEARCH_PRESS_INCREMENT_MM
+                    ),
+                    command=argv,
+                )
+                print(f"执行工件 {workpiece} 配置：{config_path}（第 {attempt}/{MAX_SEARCH_ATTEMPTS} 轮）")
+                print("内置执行参数：", shlex.join(argv))
+                result = placement_main(argv)
+                session_log_event("attempt_finished", attempt=attempt, exit_code=result)
+                if result == 0:
+                    session_log_event("retry_session_succeeded", attempt=attempt)
+                    return 0
+                if result != SEARCH_DISTANCE_EXHAUSTED_EXIT_CODE:
+                    return result
+                if attempt == MAX_SEARCH_ATTEMPTS:
+                    raise RuntimeError(
+                        f"已完成 {MAX_SEARCH_ATTEMPTS} 轮搜索，每轮最大距离 40mm，仍未检测到进洞特征。"
+                    )
+                session_log_event("retry_lift_recovery_requested", attempt=attempt)
+                lift_after_exhausted_search(
+                    arm_host=wrapper_args.arm_host,
+                    session_log_event=session_log_event,
+                )
+        except Exception as exc:
+            session_log_event(
+                "retry_session_error",
+                error_type=type(exc).__name__,
+                message=str(exc),
+            )
+            raise
+        finally:
+            session_log_event("retry_session_finished")
+    raise AssertionError("搜索重试循环意外结束")
 
 
 if __name__ == "__main__":

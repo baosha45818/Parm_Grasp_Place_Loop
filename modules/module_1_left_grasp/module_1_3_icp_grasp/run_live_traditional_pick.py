@@ -11,11 +11,14 @@ is a 10 cm vertical pregrasp followed by a LIN descent.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
@@ -34,14 +37,13 @@ from weight_verification import (
     verify_single_after_lift,
     WeightQualityRejected,
 )
+import offline_traditional_sam_stl_icp_multi_process as traditional_offline
 
 
 LOOP = Path(__file__).resolve().parents[3]
 TOOL = LOOP / "tool"
 GRASPNET_ROOT = LOOP / "third_party/graspnet"
 HERE = Path(__file__).resolve().parent
-OFFLINE = HERE / "offline_traditional_sam_stl_icp.py"
-PYTHON = LOOP / ".venv/bin/python"
 WEIGHT_CONFIG_PATH = LOOP / "config/grasp_weight_thresholds.conf"
 
 
@@ -195,27 +197,48 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
 
 
 def traditional_perception(run: Path, args: argparse.Namespace) -> dict:
-    """Run the non-actuating SAM/depth/ICP stage for one saved D405 view."""
-    subprocess.run([str(PYTHON), str(OFFLINE), "--log", str(run), "--output-dir", str(run / "traditional"),
-                    "--sam-socket", args.sam_socket,
-                    "--min-single-stl-observed-coverage", str(args.min_single_stl_observed_coverage),
-                    "--max-observed-to-stl-extent-ratio", str(args.max_observed_to_stl_extent_ratio),
-                    "--min-grasp-angle-to-table-deg", str(args.min_grasp_angle_to_table_deg),
-                    "--front-axis-center-min-icp-fitness", str(args.front_axis_center_min_icp_fitness),
-                    "--min-jaw-side-support-m", str(args.min_jaw_side_support_m),
-                    "--jaw-contact-half-span-m", str(args.jaw_contact_half_span_m),
-                    "--min-other-instance-gripper-clearance-m", str(args.min_other_instance_gripper_clearance_m),
-                    "--allow-other-instance-below-grasp-m", str(args.allow_other_instance_below_grasp_m),
-                    "--max-auto-grasp-up-m", str(args.max_auto_grasp_up_m),
-                    "--front-grasp-upward-offset-m", str(args.front_grasp_upward_offset_m),
-                    "--back-grasp-upward-offset-m", str(args.back_grasp_upward_offset_m),
-                    *([] if args.grasp_downward_probe_m is None else [
-                        "--grasp-downward-probe-m", str(args.grasp_downward_probe_m)
-                    ])], check=True)
+    """Run one view in-process so ICP workers survive later retry cycles."""
+    offline_args = [
+        "--log", str(run), "--output-dir", str(run / "traditional"),
+        "--sam-socket", args.sam_socket,
+        "--icp-workers", str(args.icp_workers),
+        "--icp-daemon-timeout-s", str(args.icp_daemon_timeout_s),
+        "--min-single-stl-observed-coverage", str(args.min_single_stl_observed_coverage),
+        "--max-observed-to-stl-extent-ratio", str(args.max_observed_to_stl_extent_ratio),
+        "--min-grasp-angle-to-table-deg", str(args.min_grasp_angle_to_table_deg),
+        "--front-axis-center-min-icp-fitness", str(args.front_axis_center_min_icp_fitness),
+        "--min-jaw-side-support-m", str(args.min_jaw_side_support_m),
+        "--jaw-contact-half-span-m", str(args.jaw_contact_half_span_m),
+        "--min-other-instance-gripper-clearance-m", str(args.min_other_instance_gripper_clearance_m),
+        "--allow-other-instance-below-grasp-m", str(args.allow_other_instance_below_grasp_m),
+        "--max-auto-grasp-up-m", str(args.max_auto_grasp_up_m),
+        "--front-grasp-upward-offset-m", str(args.front_grasp_upward_offset_m),
+        "--back-grasp-upward-offset-m", str(args.back_grasp_upward_offset_m),
+        *([] if args.grasp_downward_probe_m is None else [
+            "--grasp-downward-probe-m", str(args.grasp_downward_probe_m)
+        ]),
+    ]
+    runtime_log = os.environ.get("PARM_LOOP_RUNTIME_LOG_FILE")
+    if runtime_log:
+        # The modular loop already owns this append-only run log.  Keep the
+        # verbose ICP diagnostics there rather than flooding its terminal.
+        with Path(runtime_log).open("a", encoding="utf-8") as log_file:
+            with contextlib.redirect_stdout(log_file), contextlib.redirect_stderr(log_file):
+                traditional_offline.run(offline_args, keep_icp_workers_alive=True)
+    else:
+        traditional_offline.run(offline_args, keep_icp_workers_alive=True)
     report_path = run / "traditional/traditional_pose_report.json"
     if not report_path.is_file():
         raise RuntimeError("traditional perception did not produce a pose report")
-    return json.loads(report_path.read_text())
+    report = json.loads(report_path.read_text())
+    if runtime_log:
+        timing_s = report.get("timing_s", {})
+        print(
+            "-> ICP匹配耗时: "
+            f"{float(timing_s.get('icp_parallel_wall', float('nan'))):.3f}s",
+            flush=True,
+        )
+    return report
 
 
 def ranked_planner_records(report: dict) -> list[dict]:
@@ -319,36 +342,85 @@ def paired_pregrasp_and_descent(pa: argparse.Namespace, candidate: dict, *, atte
     )
 
 
-def paired_preflight(pa: argparse.Namespace, candidates: list[dict]) -> tuple[list[dict], list[dict]]:
-    """Retain candidates only when a single IK branch supports both phases."""
-    reachable, records = [], []
-    for start in range(0, len(candidates), 2):
-        pair = candidates[start:start + 2]
-        pair_reachable = []
-        for candidate in pair:
+def paired_preflight(
+    pa: argparse.Namespace, candidates: list[dict], *, max_inflight: int,
+) -> tuple[list[dict], list[dict]]:
+    """Preflight independent candidates concurrently, retaining rank order.
+
+    This follows Module 3's client pattern: every task opens its own Planner
+    connection because sharing one SDK client serializes requests internally.
+    Each task keeps its RRTStar hover and LIN descent on the same IK branch.
+    """
+    if not candidates:
+        return [], []
+    records_by_rank: dict[int, dict] = {}
+    reachable_by_semantic_rank: dict[int, list[tuple[dict, dict]]] = {}
+    worker_count = min(max_inflight, len(candidates))
+    print(
+        f"-> traditional Planner preflight: {len(candidates)} candidates, "
+        f"up to {worker_count} concurrent requests (Module 3 default=8)",
+        flush=True,
+    )
+    with ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix="traditional-grasp-preflight",
+    ) as executor:
+        futures = {
+            executor.submit(paired_pregrasp_and_descent, pa, candidate): candidate
+            for candidate in candidates
+        }
+        for future in as_completed(futures):
+            candidate = futures[future]
             try:
-                pregrasp, descent, attempt, failures = paired_pregrasp_and_descent(pa, candidate)
+                pregrasp, descent, attempt, failures = future.result()
             except Exception as exc:
-                records.append({"rank": candidate["rank"], "source_grasp_index": candidate["source_grasp_index"],
-                                "grasp_source": candidate["grasp_source"], "score": candidate["score"],
-                                "parallel_jaw_symmetry_rotation_deg": candidate["parallel_jaw_symmetry_rotation_deg"],
-                                "reachable": False, "reason": str(exc)})
-                continue
-            item = {"rank": candidate["rank"], "source_grasp_index": candidate["source_grasp_index"],
+                records_by_rank[int(candidate["rank"])] = {
+                    "rank": candidate["rank"], "source_grasp_index": candidate["source_grasp_index"],
                     "grasp_source": candidate["grasp_source"], "score": candidate["score"],
                     "parallel_jaw_symmetry_rotation_deg": candidate["parallel_jaw_symmetry_rotation_deg"],
-                    "reachable": True, "paired_planning_attempt": attempt,
-                    "pregrasp_waypoints": len(pregrasp["trajectory"]), "lin_descent_waypoints": len(descent["trajectory"]),
-                    "failed_branch_attempts": len(failures)}
-            records.append(item); pair_reachable.append((candidate, item))
-        if pair_reachable:
-            # Equivalent jaws: the shorter path is the nearer, less
-            # roundabout choice from the arm's current state.
-            chosen, chosen_record = min(pair_reachable, key=lambda item: (item[1]["pregrasp_waypoints"], item[1]["lin_descent_waypoints"]))
-            chosen_record["selected_nearer_parallel_jaw_symmetry"] = True
-            reachable.append(chosen)
-            break
-    return reachable, records
+                    "reachable": False, "reason": str(exc),
+                }
+                continue
+            item = {
+                "rank": candidate["rank"], "source_grasp_index": candidate["source_grasp_index"],
+                "grasp_source": candidate["grasp_source"], "score": candidate["score"],
+                "parallel_jaw_symmetry_rotation_deg": candidate["parallel_jaw_symmetry_rotation_deg"],
+                "reachable": True, "paired_planning_attempt": attempt,
+                "pregrasp_waypoints": len(pregrasp["trajectory"]),
+                "lin_descent_waypoints": len(descent["trajectory"]),
+                "failed_branch_attempts": len(failures),
+            }
+            records_by_rank[int(candidate["rank"])] = item
+            reachable_by_semantic_rank.setdefault(
+                int(candidate["semantic_candidate_rank"]), []
+            ).append((candidate, item))
+
+    reachable: list[dict] = []
+    for semantic_rank in sorted(reachable_by_semantic_rank):
+        pair_reachable = reachable_by_semantic_rank[semantic_rank]
+        # Equivalent jaws: the shorter path is the nearer, less roundabout
+        # choice from the arm's current state.
+        chosen, chosen_record = min(
+            pair_reachable,
+            key=lambda item: (item[1]["pregrasp_waypoints"], item[1]["lin_descent_waypoints"]),
+        )
+        chosen_record["selected_nearer_parallel_jaw_symmetry"] = True
+        reachable.append(chosen)
+    return reachable, [records_by_rank[rank] for rank in sorted(records_by_rank)]
+
+
+def select_reachable_candidate(
+    reachable: list[dict], *, failed_grasp_retry_index: int,
+) -> tuple[dict, str]:
+    """Keep the best first attempt; diversify only after a physical failure.
+
+    ``reachable`` is in ICP-score order.  Random selection is limited to
+    candidates that passed the complete Planner pregrasp+LIN check.
+    """
+    if not reachable:
+        raise RuntimeError("cannot select from an empty reachable candidate set")
+    if failed_grasp_retry_index == 0:
+        return reachable[0], "highest_score_first_attempt"
+    return secrets.choice(reachable), "random_legal_after_grasp_failure"
 
 
 def reverse_lin_trajectory(trajectory: dict) -> dict:
@@ -514,16 +586,38 @@ def prepare_traditional_candidate(
                 "parallel_jaw_symmetry_rotation_deg": symmetry_deg,
                 "plan": variant,
             })
-    reachable, records = paired_preflight(pa, candidates)
+    reachable, records = paired_preflight(
+        pa, candidates, max_inflight=int(args.planner_preflight_inflight),
+    )
     (run / "planner_preflight.json").write_text(json.dumps(records, indent=2))
     if not reachable:
         raise TraditionalPlannerUnreachable(
             f"Planner rejected the traditional grasp; see {run / 'planner_preflight.json'}"
         )
-    selected = reachable[0]
+    selected, selection_policy = select_reachable_candidate(
+        reachable, failed_grasp_retry_index=attempt_index
+    )
     (run / "selected_planner_plan.json").write_text(json.dumps(selected["plan"], indent=2))
+    (run / "candidate_selection.json").write_text(
+        json.dumps(
+            {
+                "policy": selection_policy,
+                "failed_grasp_retry_index": attempt_index,
+                "legal_candidate_count": len(reachable),
+                "selected_planner_candidate_rank": selected["rank"],
+                "selected_semantic_candidate_rank": selected["semantic_candidate_rank"],
+                "selected_icp_score": selected["score"],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     mark_planner_selected_grasp(run, selected)
-    print(f"-> traditional plan rank {selected['rank']} and Planner preflight succeeded: {run}")
+    print(
+        f"-> traditional plan rank {selected['rank']} selected by {selection_policy}; "
+        f"Planner preflight succeeded: {run}"
+    )
     return run, next(item for item in candidates if item["rank"] == selected["rank"])
 
 
@@ -616,6 +710,14 @@ def main() -> None:
     p.add_argument("--d405-serial", default="260322270242")
     p.add_argument("--arm-host", default="192.168.88.1")
     p.add_argument("--frames", type=int, default=5)
+    p.add_argument("--icp-workers", type=int, default=min(4, os.cpu_count() or 1),
+                   help="parallel STL-ICP worker processes per D405 observation (default: min(4, CPU count))")
+    p.add_argument("--icp-daemon-timeout-s", type=float, default=30.0,
+                   help="restart/retry the persistent ICP daemon after this request timeout (default: 30)")
+    p.add_argument(
+        "--planner-preflight-inflight", type=int, default=8,
+        help="maximum concurrent Planner preflight requests; matches Module 3 default (default: 8)",
+    )
     p.add_argument(
         "--camera-broker-socket",
         default=os.environ.get("CAMERA_BROKER_SOCKET", "/tmp/graspnet-v7-camera.sock"),
@@ -642,10 +744,10 @@ def main() -> None:
                    help="only another instance higher than the grasp surface by this guard enters sweep checking (default: 0.003)")
     p.add_argument("--max-auto-grasp-up-m", type=float, default=.03,
                    help="maximum automatic +Z lift to clear lower stacked points (default: 0.03; 0 disables)")
-    p.add_argument("--front-grasp-upward-offset-m", type=float, default=0.015,
-                   help="final front-side closure offset in +Z meters (default: 诉讼0; closes at grasp surface)")
-    p.add_argument("--back-grasp-upward-offset-m", type=float, default=0.0,
-                   help="final back-side closure offset in +Z meters (default: 0; closes at grasp surface)")
+    p.add_argument("--front-grasp-upward-offset-m", type=float, default=0.021,
+                   help="final front-side closure offset in +Z meters (default: 0.021; closes at grasp surface)")
+    p.add_argument("--back-grasp-upward-offset-m", type=float, default=0.027,
+                   help="final back-side closure offset in +Z meters (default: 0.027; closes at grasp surface)")
     p.add_argument("--grasp-downward-probe-m", type=float, default=None,
                    help="optional V7 signed global override: positive=down, negative=up")
     p.add_argument("--skip-observation-move", action="store_true")
@@ -662,7 +764,7 @@ def main() -> None:
     p.add_argument("--weight-multiple-min-g", type=float, default=weight_defaults["weight_multiple_min_g"])
     p.add_argument("--weight-max-axis-mad-n", type=float, default=weight_defaults["weight_max_axis_mad_n"])
     p.add_argument(
-        "--max-weight-retries", type=int, default=3,
+        "--max-weight-retries", type=int, default=30,
         help="fresh traditional observation/ICP cycles after EMPTY/MULTIPLE/UNKNOWN/gripper-hold failure",
     )
     p.add_argument(
@@ -675,6 +777,11 @@ def main() -> None:
     )
     args = p.parse_args()
     if args.frames < 1: p.error("--frames must be positive")
+    if args.icp_workers < 1: p.error("--icp-workers must be positive")
+    if not np.isfinite(args.icp_daemon_timeout_s) or args.icp_daemon_timeout_s <= 0:
+        p.error("--icp-daemon-timeout-s must be finite and positive")
+    if not 1 <= args.planner_preflight_inflight <= 16:
+        p.error("--planner-preflight-inflight must be in [1, 16]")
     if not np.isfinite(args.min_single_stl_observed_coverage) or not 0.0 <= args.min_single_stl_observed_coverage <= 1.0:
         p.error("--min-single-stl-observed-coverage must be finite and in [0, 1]")
     if (not np.isfinite(args.max_observed_to_stl_extent_ratio)
@@ -758,7 +865,12 @@ def main() -> None:
             "traditional ICP loop mode cannot use --skip-observation-move: "
             "the scheduler needs a verified observation-ready marker"
         )
-    run_traditional_cycles(args, pa, pe)
+    try:
+        run_traditional_cycles(args, pa, pe)
+    finally:
+        # This is only relevant to the explicit in-process fallback; the
+        # default Unix-socket daemon intentionally survives separate CLI runs.
+        traditional_offline.shutdown_persistent_icp_workers()
     return
 
 if __name__ == "__main__":

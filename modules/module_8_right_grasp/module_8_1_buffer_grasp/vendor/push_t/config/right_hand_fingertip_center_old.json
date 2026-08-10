@@ -1,8 +1,0 @@
-{
-  "name": "right_hand_fingertip_center",
-  "parent_frame": "right_hand_transfer_base",
-  "translation_m": [0.2770000, -0.0002439, 0.0005695],
-  "rpy_rad": [0.0, 0.0, 0.0],
-  "source": "URDF estimate at closed gripper: midpoint(right_hand_link1, right_hand_link2) plus 0.118600 m along the common finger +X axis. Validate against the physical closed-gripper contact centre before precision use.",
-  "transform_convention": "T_parent_virtual_tcp; p_parent = T_parent_virtual_tcp @ p_virtual_tcp"
-}

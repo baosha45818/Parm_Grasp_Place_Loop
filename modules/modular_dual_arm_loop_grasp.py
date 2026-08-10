@@ -41,7 +41,7 @@ MODULE_5_2 = (
 )
 MODULE_7_8_1 = (
     ROOT
-    / "modules/module_8_right_grasp_new/module_8_1_buffer_grasp/"
+    / "modules/module_8_right_grasp/module_8_1_buffer_grasp/"
     "workpiece_pipeline.py"
 )
 MODULE_8_2 = (

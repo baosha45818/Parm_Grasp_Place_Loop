@@ -16,6 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
+from execution_timing import ExecutionTiming
+
 
 MODULE_DIR = Path(__file__).resolve().parent
 LOOP_ROOT = MODULE_DIR.parents[2]
@@ -149,9 +151,25 @@ def main() -> int:
     if not args.execute:
         raise RuntimeError("Module 5-1 真实反抓必须显式传入 --execute")
     _, capture_dir, grasp_json, body_head = load_prediction(args.prediction_file)
-    move_left_to_ready(capture_dir, args.planner_host, args.arm_host, args.speed)
-    execute_grasp(args, grasp_json, body_head)
-    return 0
+    timing = ExecutionTiming()
+    timing_path = capture_dir / "reverse_grasp_timing.json"
+    outcome = "FAILURE"
+    try:
+        timing.start("move_to_reverse_ready")
+        move_left_to_ready(capture_dir, args.planner_host, args.arm_host, args.speed)
+        timing.finish("move_to_reverse_ready")
+
+        # The child process owns Planner preflight, pregrasp, descent, gripper
+        # close and lift validation.  This parent-level stage intentionally
+        # covers the complete real grasp transaction.
+        timing.start("grasp_plan_execute_and_hold_check")
+        execute_grasp(args, grasp_json, body_head)
+        timing.finish("grasp_plan_execute_and_hold_check")
+        outcome = "SUCCESS"
+        return 0
+    finally:
+        timing.write(timing_path, outcome)
+        print(f"REVERSE_GRASP_TIMING={timing_path}", flush=True)
 
 
 if __name__ == "__main__":

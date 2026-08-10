@@ -25,6 +25,8 @@ VISION_ROOT = (
 CONFIG_DIR = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/config"
 PYTHON = Path(sys.executable)
 BODY_HEAD = CONFIG_DIR / "body_head_calibration.json"
+sys.path.insert(0, str(LOOP_ROOT))
+from modules.module_5_left_pick.module_5_1_reverse_grasp.execution_timing import ExecutionTiming
 DEFAULT_SAM2_URL = (
     "unix:///home/dainanjun/Public/Parm_Grasp_Place_Loop/"
     "tool/sam2-service/runtime/sam2-service.sock"
@@ -58,24 +60,33 @@ def require_paths(body_head: Path) -> None:
         raise RuntimeError("Module 4-1 依赖不存在: " + ", ".join(missing))
 
 
-def run_visual(script: str, *args: object) -> None:
-    subprocess.run(
-        [str(PYTHON), str(VISION_ROOT / script), *(str(arg) for arg in args)],
-        cwd=VISION_ROOT,
-        check=True,
-    )
+def run_visual(timing: ExecutionTiming, stage: str, script: str, *args: object) -> None:
+    timing.start(stage)
+    try:
+        subprocess.run(
+            [str(PYTHON), str(VISION_ROOT / script), *(str(arg) for arg in args)],
+            cwd=VISION_ROOT,
+            check=True,
+        )
+    except BaseException:
+        timing.finish(stage, status="FAILURE")
+        raise
+    else:
+        timing.finish(stage)
 
 
-def predict(capture_dir: Path, sam2_url: str) -> Path:
+def predict(capture_dir: Path, sam2_url: str, timing: ExecutionTiming) -> Path:
     run_visual(
+        timing,
+        "sam2_mask_generation",
         "sam2_tabletop_masks.py",
         "--capture-dir",
         capture_dir,
         "--socket",
         sam2_url,
     )
-    run_visual("sam2_icp_grasp.py", "--capture-dir", capture_dir)
-    run_visual("visualize_grasp_3d.py", "--capture-dir", capture_dir)
+    run_visual(timing, "icp_grasp_pose", "sam2_icp_grasp.py", "--capture-dir", capture_dir)
+    run_visual(timing, "grasp_visualization", "visualize_grasp_3d.py", "--capture-dir", capture_dir)
     grasp_json = capture_dir / "sam2_masks/grasp_poses.json"
     records = json.loads(grasp_json.read_text(encoding="utf-8"))
     if len(records) != 1:
@@ -116,16 +127,26 @@ def main() -> int:
     capture_dir = args.capture_dir.expanduser().resolve()
     if not (capture_dir / "metadata.json").is_file():
         raise FileNotFoundError(f"不是有效头部 RGB-D 采集目录: {capture_dir}")
-    grasp_json = predict(capture_dir, args.sam2_url)
-    write_prediction(
-        args.prediction_file,
-        capture_dir=capture_dir,
-        grasp_json=grasp_json,
-        body_head=args.body_head,
-    )
-    print(f"MODULE_4_1_PREDICTION={args.prediction_file.resolve()}")
-    print(f"[module-4-1] 唯一反抓候选已预测: {grasp_json}")
-    return 0
+    timing = ExecutionTiming()
+    timing_path = capture_dir / "reverse_grasp_perception_timing.json"
+    outcome = "FAILURE"
+    try:
+        grasp_json = predict(capture_dir, args.sam2_url, timing)
+        timing.start("write_prediction")
+        write_prediction(
+            args.prediction_file,
+            capture_dir=capture_dir,
+            grasp_json=grasp_json,
+            body_head=args.body_head,
+        )
+        timing.finish("write_prediction")
+        outcome = "SUCCESS"
+        print(f"MODULE_4_1_PREDICTION={args.prediction_file.resolve()}")
+        print(f"[module-4-1] 唯一反抓候选已预测: {grasp_json}")
+        return 0
+    finally:
+        timing.write(timing_path, outcome)
+        print(f"REVERSE_GRASP_PERCEPTION_TIMING={timing_path}", flush=True)
 
 
 if __name__ == "__main__":

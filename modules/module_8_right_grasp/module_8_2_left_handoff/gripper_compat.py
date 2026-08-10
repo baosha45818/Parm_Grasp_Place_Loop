@@ -143,6 +143,7 @@ def release_left_gripper(
             hand,
             position,
             force=force,
+            speed=80.0,
             mode="async",
             preempt=True,
             timeout=60.0,

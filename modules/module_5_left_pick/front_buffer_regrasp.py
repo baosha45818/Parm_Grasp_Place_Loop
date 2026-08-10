@@ -34,7 +34,9 @@ from modules.stage_result import write_stage_result
 DEFAULT_PREGRASP_HEIGHT_M = 0.05
 DEFAULT_DESCENT_DISTANCE_M = 0.02
 POST_GRASP_LIFT_M = 0.03
-HELD_POSITION_MAX_PERCENT = 85.0
+# 新左夹爪在桌面反抓到工件后应保留至少 35% 的开度；过小开度表示
+# 夹爪基本闭合，不能把它当作可靠持件。
+HELD_POSITION_MIN_PERCENT = 35.0
 NO_GRASP_EXIT_CODE = 20
 MAX_ICP_ROTATION_PROJECTION_ERROR = 0.01
 BODY_HEAD = (
@@ -204,7 +206,7 @@ def _wait_for_hold(gripper_host: str, timeout_s: float = 3.0) -> tuple[bool, flo
                 position = float(state.get("position"))
             except (TypeError, ValueError):
                 position = None
-            if motion_state == "gripping" and position is not None and position < HELD_POSITION_MAX_PERCENT:
+            if motion_state == "gripping" and position is not None and position > HELD_POSITION_MIN_PERCENT:
                 return True, position, motion_state
             if motion_state in {"error", "dropped"} or time.monotonic() >= deadline:
                 return False, position, motion_state
@@ -217,7 +219,7 @@ def _open_left_gripper_or_raise(gripper_host: str, *, context: str) -> None:
 
     with Gripper(host=gripper_host, status_port=7702) as gripper:
         response = gripper.move(
-            1, 100.0, force=100.0, mode="sync", preempt=False, timeout=60.0,
+            1, 100.0, force=100.0, speed=80.0, mode="sync", preempt=False, timeout=60.0,
         )
     payload = (response.get("data") or response) if isinstance(response, dict) else {}
     device = (payload.get("devices") or {}).get("left_gripper") or {}
@@ -369,7 +371,7 @@ def main() -> int:
         planner.execute_planned_result(pregrasp_plan)
         planner.execute_planned_result(descent_plan)
         with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-            response = gripper.move(1, 0.0, force=100.0, mode="sync", preempt=False, timeout=60.0)
+            response = gripper.move(1, 0.0, force=100.0, speed=80.0, mode="sync", preempt=False, timeout=60.0)
         if response.get("status") != "success":
             raise RuntimeError(f"左夹爪闭合命令失败: {response}")
         planner.execute_planned_result(lift_plan)

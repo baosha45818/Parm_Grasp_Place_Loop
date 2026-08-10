@@ -1,76 +1,22 @@
-# 模块 7：Right Align（只调整，不最终抓取）
+# Module 7：右臂工件姿态调整
 
-## 职责与边界
+本目录是从原调整链路重构出的独立模块。入口 `right_align.py` 接收相机/视觉模块产生的 `mask_pose.json`，根据对应工件的单一 TOML 配置，使用右臂抓取、抬升、转向和放置，把 Q2--Q4 朝向的工件调整到 Q1 的可抓取朝向后释放。
 
-Module 7 的实机入口是 `push_to_q1_pipeline.py`。它调用 Module 4-2 观察工件，
-并在需要时把缓冲区中的工件调整至右臂可直接抓取的 Q1 朝向；它不执行交给
-Module 8-1 的最终 Q1 抓取。
+目录内已包含完整的本地依赖：
 
-可直接抓取的判定为：视觉结果在 Q1，且红线朝向 yaw 位于 **15°--75°**。
-Q2--Q4 以及 Q1 的边缘朝向都需要调整。
+- `right_align.py`：调整姿态入口；
+- `configs/workpiece_1_turn_candidates.toml`、`configs/workpiece_2_turn_candidates.toml`：两种工件唯一的调整参数源；按预抓取、下探/闭抓、抬起、摆正、安全下放顺序编排并附中文注释；
+- 右臂目标直接使用规划器原生 `right_eef`；
+- `move_by_joints.py`、`move_by_eef_pose.py`、`grasp_motion_support.py`、`planning_log.py`：调整执行所需的本地运动与规划公共代码。
 
-## 输入与依赖
-
-- 右臂使用 `--arm-id 2`。
-- 每次观察均从示教关节位 `3.json` 进行，并调用 Module 4-2；该模块将云台设为
-  pitch=`38.5°`、yaw=`0°`，采集 head RGB、分割 mask、计算工件的 `Q1--Q4` 与 yaw。
-- Module 7 从 Module 4-2 的 `output/4_2` 中读取本次新生成的 pose JSON。
-- 调整动作使用本模块 `vendor/push_t/reorient_q3_to_q1_old.py`；
-  该动作会抓住工件、抬起、转向，并放回可抓取的 Q1 区域。
-- 调整前右臂经 `10.json` 过渡到 `6.json`；调整后经 `10.json` 回 `3.json`。
-- 本模块的 `vendor/push_t/` 包含调整脚本、TCP 配置与示教关节位；
-  SDK 优先使用工程统一的 `runtime/parm_sdk/`，`vendor/parm_sdk/` 仅作为
-  随模块携带的离线备用副本。不会读取 `/home/dainanjun/zhuyiming`。
-
-## 流程
-
-```text
-启动
-  → 到 3.json
-  → 拍照 / mask / 位姿计算
-  → 是否已处于可直接抓取 Q1（Q1 且 yaw 15°--75°）？
-       ├─ 是，且从未调整
-       │    → 输出“该阶段不需要右臂调整，可直接抓”
-       │    → 结束（不抓取）
-       └─ 否
-            → 到 6.json
-            → 抓住工件并旋转、放回 Q1
-            → 回 3.json
-            → 重新拍照 / mask / 位姿计算
-            → 是否已可直接抓取？
-                 ├─ 是 → 输出“右臂调整完成，可进行下一步抓取” → 结束（不抓取）
-                 └─ 否 → 继续下一次调整
-```
-
-## 重试与异常处理
-
-- `--max-attempts` 控制最多调整次数，默认 `10`，必须至少为 `1`。
-- 调整命令失败时，先打开右夹爪，确认已松开后回 `3.json` 再观察并重试；
-  这样不会带着状态不明的工件回观察位。
-- 达到最大次数仍无法转至可抓 Q1 时，流程以错误结束。
-- 若 Module 4-2 检测到缓冲区/桌面没有工件，Module 7 输出
-  `桌面没有工件，右臂无法抓取。` 并以专用退出码 **24** 结束。该码表示没有
-  可供右臂处理的工件，调用方不得进入 Module 8-1 或将其当成摆正重试。
-- 无论初始可抓还是调整成功，本模块都不调用最终 Q1 抓取脚本，也不更新为
-  “已抓取”状态；下一步应由 Module 8-1 执行。
-- 每次运行会在 `output/right_trajectories/<时间戳>/` 写入右臂规划 JSONL。
-  每条规划 RPC 都保存起点、目标、规划器/速度参数、规划轨迹、成功或失败状态：
-  关节 `PTP` 保存实际起点与目标/轨迹终点的 7 轴关节角；笛卡尔 `LIN` 保存规划前
-  IK 末端位姿与目标末端位姿。包括经 `10.json` 的关节 PTP，以及调整过程中的所有
-  笛卡尔候选预规划和执行规划。
-
-## 运行
-
-默认 `--motion-speed-scale=2.5`；可显式传入 `--motion-speed-scale 1` 恢复原始
-速度。该倍率会同时作用于 Module 7 的初始关节运动、关节过渡和抓住工件后的
-调整轨迹，Module 4-2 相机流程不受影响。
+先进行预演（不加 `--execute` 不会发送机械臂或夹爪动作）：
 
 ```bash
-/home/dainanjun/Public/data_collector/.venv/bin/python \
-  modules/module_7_right_align/push_to_q1_pipeline.py --execute
+python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_7_right_align/right_align.py \
+  --workpiece 1 \
+  --arm-id 2
 ```
 
-不带 `--execute` 时仅预演首个到 `3.json` 和观察步骤，不会下发机器人、云台或
-夹爪运动。
+`--workpiece` 会自动选择同编号调整配置，并读取 `output/module_4_2/workpiece_<编号>/` 中最新的 `mask_pose.json`；可用 `--workpiece-pose-file` 显式覆盖，但文件的工件标记必须一致。确认预演结果与现场状态后，追加 `--execute` 才会实际打开夹爪、抓取、翻转、放置并释放。该模块需要可访问的 `parm_sdk`、右臂/夹爪服务和规划器；工件位姿 JSON 中的 `calibration` 字段必须指向可读取的头相机标定文件，以便放置阶段执行可见 ROI 过滤。
 
-`implementation.py` 仍只供早期、未接入实机流程的 scheduler 骨架使用。
+校准记录默认写到 `/home/dainanjun/Public/Parm_Grasp_Place_Loop/output/module_7/reorient_q3_records/`。可通过 `--calibration-record-file` 指定其他记录文件。

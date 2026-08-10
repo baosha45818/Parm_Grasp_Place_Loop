@@ -41,7 +41,7 @@ MODULE_5_2 = (
 )
 MODULE_7_8_1 = (
     ROOT
-    / "modules/module_8_right_grasp_new/module_8_1_buffer_grasp/"
+    / "modules/module_8_right_grasp/module_8_1_buffer_grasp/"
     "workpiece_pipeline.py"
 )
 MODULE_8_2 = (
@@ -54,8 +54,8 @@ RIGHT_IDLE_POSE = (
     ROOT / "modules/module_10_right_idle/right_idle_pose.json"
 )
 BASE_MOTION_SPEED = 0.1
-DEFAULT_LEFT_SPEED = 0.2
-DEFAULT_RIGHT_SPEED = 0.1
+DEFAULT_LEFT_SPEED = 0.3
+DEFAULT_RIGHT_SPEED = 0.3
 
 # multiprocessing spawn 会在子进程重新导入 target 所在模块；因此必须在模块
 # 顶层就让旧调度器目录可被标准 import 找到，不能使用临时动态模块名。
@@ -607,6 +607,9 @@ if __name__ == "__main__":
             run_dir / "latest_module_status.json"
         )
         log_path = run_dir / "run.log"
+        # Traditional ICP uses this to send its verbose reports to this
+        # persistent run log while keeping the scheduler terminal concise.
+        os.environ["PARM_LOOP_RUNTIME_LOG_FILE"] = str(log_path)
         with RuntimeLogCapture(log_path):
             print(f"[log] 本次完整运行日志: {log_path}", flush=True)
             print(f"[log] 结构化事件: {run_dir / 'events.jsonl'}", flush=True)

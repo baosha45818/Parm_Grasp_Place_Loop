@@ -152,7 +152,7 @@ def reopen_and_return_to_reverse_ready(args: argparse.Namespace, workpiece: str)
     target = list(ready["ready_joints_deg"])
     print("[reverse-flow] 本次未夹到工件：同步张开新左夹爪。", flush=True)
     with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-        response = gripper.move(1, 100.0, force=100.0, mode="sync", preempt=False, timeout=60.0)
+        response = gripper.move(1, 100.0, force=100.0, speed=80.0, mode="sync", preempt=False, timeout=60.0)
     payload = response.get("data") or response
     device = (payload.get("devices") or {}).get("left_gripper") or {}
     device_state = str(device.get("device_state", "")).strip().lower()

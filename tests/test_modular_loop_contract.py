@@ -23,11 +23,7 @@ if str(ROOT) not in sys.path:
 
 from modules import modular_dual_arm_loop
 from modules.module_4_head_judge import ObjectOrientation
-from modules.module_4_head_judge.module_4_2_pose_estimation.buffer_judge import (
-    select_workpiece,
-)
 from modules.module_5_left_pick import run_head_judge_then_pick
-from modules.module_8_right_grasp import run_align_then_buffer_grasp
 
 
 class ModularLoopContractTest(unittest.TestCase):
@@ -256,62 +252,19 @@ class ModularLoopContractTest(unittest.TestCase):
         self.assertEqual(len(capture_calls), 2)
         self.assertEqual(len(execution_calls), 1)
 
-    def test_buffer_judge_uses_q1_yaw_range(self) -> None:
-        payload = {
-            "workpieces": [{
-                "head_direction_base_quadrant": 1,
-                "head_direction_base_angle_deg": 45.0,
-            }]
-        }
-        self.assertEqual(select_workpiece(payload, 0), (1, 45.0))
-
-    def _run_buffer_adapter(self, decision: dict) -> list[str]:
-        labels: list[str] = []
-
-        def fake_run_stage(label, script, args, *extra, **_kwargs):
-            labels.append(label)
-            if label == "module-4-2-buffer-judge":
-                decision_path = Path(extra[extra.index("--decision-file") + 1])
-                decision_path.write_text(json.dumps(decision), encoding="utf-8")
-            return 0
-
-        argv = ["run_align_then_buffer_grasp.py", "--execute"]
-        with mock.patch.object(sys, "argv", argv), mock.patch.object(
-            run_align_then_buffer_grasp,
-            "run_stage",
-            side_effect=fake_run_stage,
-        ):
-            self.assertEqual(run_align_then_buffer_grasp.main(), 0)
-        return labels
-
-    def test_buffer_adapter_delegates_q1_decision_to_module_7(self) -> None:
-        labels = self._run_buffer_adapter({
-            "pose_file": "/tmp/module_4_q1_pose.json",
-            "quadrant": 1,
-            "yaw_deg": 45.0,
-            "needs_align": False,
-        })
-        self.assertEqual(
-            labels,
-            [
-                "module-7",
-                "module-8-1",
-            ],
+    def test_right_pipeline_uses_replaced_module_paths(self) -> None:
+        pipeline = (
+            MODULES
+            / "module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py"
         )
-
-    def test_buffer_adapter_delegates_non_q1_decision_to_module_7(self) -> None:
-        labels = self._run_buffer_adapter({
-            "pose_file": "/tmp/module_4_q3_pose.json",
-            "quadrant": 3,
-            "yaw_deg": 180.0,
-            "needs_align": True,
-        })
-        self.assertEqual(
-            labels,
-            [
-                "module-7",
-                "module-8-1",
-            ],
+        source = pipeline.read_text(encoding="utf-8")
+        self.assertTrue(pipeline.is_file())
+        self.assertIn(
+            "modules/module_4_head_judge/module_4_2_pose_estimation", source
+        )
+        self.assertIn("modules/module_7_right_align", source)
+        self.assertFalse(
+            (MODULES / "module_8_right_grasp/run_align_then_buffer_grasp.py").exists()
         )
 
 

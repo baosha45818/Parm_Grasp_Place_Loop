@@ -45,7 +45,7 @@ def _normalize_module_name(module: str, message: str) -> str:
         return "module_5_2_handoff_prepare"
     return {
         "run_head_judge_then_pick": "module_4_to_5_reverse_pipeline",
-        "run_align_then_buffer_grasp": "module_4_7_8_1_right_pipeline",
+        "workpiece_pipeline": "module_4_7_8_1_right_pipeline",
         "place_hole_a_wiggle": "module_9_right_place",
     }.get(module, module)
 

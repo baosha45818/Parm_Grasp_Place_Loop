@@ -215,7 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=100.0,
         help="closing force percentage; separate from the opening/planned-width force (default: 100)",
     )
-    parser.add_argument("--gripper-speed", type=float, default=None)
+    parser.add_argument(
+        "--gripper-speed",
+        type=float,
+        default=80.0,
+        help="left gripper opening/closing speed percentage (default: 80)",
+    )
     parser.add_argument("--gripper-command-retries", type=int, default=3)
     parser.add_argument("--gripper-retry-delay-s", type=float, default=1.0)
     parser.add_argument("--auto-open-gripper", dest="auto_open_gripper", action="store_true", default=True)

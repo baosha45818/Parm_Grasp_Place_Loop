@@ -120,7 +120,8 @@ python3 /home/dainanjun/zhuyiming/push_T_ALL/workpiece_2/q1_closed_loop_pipeline
 ```
 
 该文件保留在 `zhuyiming/push_T_ALL/workpiece_2/`，总控只引用它，不复制、
-不修改其实现。工件1仍使用原 `run_align_then_buffer_grasp.py`。
+不修改其实现。工件1改由模块内
+`module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py` 运行。
 
 `tests/reversed_head_observation_2/full-execute` 仍是独立联调工具，不会被总控
 调用，因为它还包含右手最终放置，会与 Module 9 的职责冲突。

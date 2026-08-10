@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from modules.module_5_left_pick.reverse_grasp_weight_check import (
     verify_object_after_lift,
 )
 from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
+from modules.module_5_left_pick.module_5_1_reverse_grasp.execution_timing import ExecutionTiming
 
 
 NO_GRASP_EXIT_CODE = 20
@@ -220,6 +222,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--approach-angles-deg", type=float, nargs="+", default=[90., 15., -15.],
                    help="相对桌面的接近角；90 为竖直，15/-15 为绕两指轴侧向接近")
     p.add_argument("--speed", type=float, default=.15)
+    p.add_argument(
+        "--planning-inflight",
+        type=int,
+        default=3,
+        help="并发离线规划请求数；每个请求使用独立 Planner 客户端",
+    )
     p.add_argument("--close-force", type=float, default=100.)
     p.add_argument("--planner-host", default="127.0.0.1")
     p.add_argument("--gripper-host", default="127.0.0.1")
@@ -230,11 +238,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    timing = ExecutionTiming()
+    timing_status = "FAILURE"
     if args.execute and args.preflight_only:
         raise ValueError("--execute 与 --preflight-only 不能同时使用")
     if (args.pregrasp_m <= 0 or abs(args.lift_m - POST_CLOSE_CHECK_LIFT_M) > 1e-9 or not (0 < args.speed <= 1)
             or not args.approach_angles_deg or any(not 0 < abs(x) <= 90 for x in args.approach_angles_deg)):
         raise ValueError(f"pregrasp 必须为正，lift 必须固定为 {POST_CLOSE_CHECK_LIFT_M:.2f}m，speed 必须在 (0,1]")
+    if args.planning_inflight < 1:
+        raise ValueError("--planning-inflight 必须不小于 1")
     output = within_here(args.output_dir)
     if output.exists():
         raise FileExistsError(f"输出目录已存在，拒绝覆盖: {output}")
@@ -291,6 +303,7 @@ def main() -> int:
             raise RuntimeError("execution blocked: Module-5-1 ICP quality gate rejected pose " + json.dumps(quality, ensure_ascii=False))
         if not args.execute and not args.preflight_only:
             report["status"] = "dry_run_ok_no_hardware_access"
+            timing_status = "SUCCESS_DRY_RUN"
             return 0
         check_head(args.head_host, calibration["head_pose_deg"])
         from loop_config import LoopConfig
@@ -306,64 +319,127 @@ def main() -> int:
         try:
             runtime.open(required_frames={"body_base", "left_eef"})
             if args.execute:
+                timing.start("move_to_reverse_ready")
                 runtime.move_left_joints(ready, planner="rrtstar")
                 wait_left(args.arm_host, ready, "左臂预备位")
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     state = gripper.get_state().get(1)
                     if not is_gripper_usable(state):
                         raise RuntimeError("左夹爪不可用或未初始化")
-                    gripper.move(1, 100., force=args.close_force, mode="sync", preempt=False, timeout=60.)
+                    gripper.move(1, 100., force=args.close_force, speed=80.0, mode="sync", preempt=False, timeout=60.)
+                timing.finish("move_to_reverse_ready")
             # Rotating around TCP +Y leaves the signed jaw direction untouched:
             # left finger remains object +X and right finger object -X.
-            attempts, reachable = [], []
+            timing.start("parallel_approach_preflight")
+            candidates = []
             for angle in sorted(dict.fromkeys(args.approach_angles_deg), key=lambda x: -abs(x)):
                 tilt_deg = float(np.copysign(90. - abs(angle), angle))
                 candidate_tcp = T_camera_tcp.copy()
                 candidate_tcp[:3, :3] = T_camera_tcp[:3, :3] @ Rotation.from_rotvec([0., np.deg2rad(tilt_deg), 0.]).as_matrix()
                 target, above = build_targets(candidate_tcp, body_head, args.pregrasp_m)
-                item = {"table_approach_angle_deg": angle, "side_tilt_about_tcp_y_deg": tilt_deg,
-                        "left_finger_axis_alignment": "TCP +Y unchanged = object +X",
-                        "pregrasp_body_base": debug_pose(above), "grasp_body_base": debug_pose(target)}
+                candidates.append((angle, tilt_deg, candidate_tcp, target, above))
+
+            def plan_offline_candidate(candidate: tuple[float, float, np.ndarray, np.ndarray, np.ndarray]) -> dict:
+                """Plan one approach through its own SDK connection.
+
+                This follows Module 3's offline-planning model: PlannerRuntime
+                clients are not shared because the underlying SDK serializes a
+                shared client.  All candidates use the same verified reverse-
+                ready joint state, so their trajectories are comparable.
+                """
+                angle, tilt_deg, candidate_tcp, target, above = candidate
+                item = {
+                    "table_approach_angle_deg": angle,
+                    "side_tilt_about_tcp_y_deg": tilt_deg,
+                    "left_finger_axis_alignment": "TCP +Y unchanged = object +X",
+                    "pregrasp_body_base": debug_pose(above),
+                    "grasp_body_base": debug_pose(target),
+                    "planning_start_joints_deg": ready,
+                }
+                candidate_planner = PlannerRuntime(cfg)
                 try:
-                    # Preflight must use exactly the state used by real
-                    # execution (the fixed reverse-grasp ready pose), not an
-                    # arbitrary parked arm state at the time of the check.
-                    pre = runtime.plan_cartesian_pose("left", pose(above), planner="rrtstar", start_joints_deg=ready)
+                    candidate_planner.open(required_frames={"body_base", "left_eef"})
+                    pre = candidate_planner.plan_cartesian_pose(
+                        "left", pose(above), planner="rrtstar",
+                        start_joints_deg=ready, rrtstar_goal_tolerance=True,
+                    )
                     endpoint = ((pre or {}).get("data") or {}).get("trajectory") or []
                     if not endpoint or len(endpoint[-1]) != 7:
                         raise RuntimeError("预抓取规划没有返回七关节终点")
-                    descent = runtime.plan_cartesian_pose("left", pose(target), planner="lin", start_joints_deg=endpoint[-1])
+                    descent = candidate_planner.plan_cartesian_pose(
+                        "left", pose(target), planner="lin", start_joints_deg=endpoint[-1],
+                    )
                     item["reachable"] = True
                     item["pregrasp_joint_target_deg"] = [float(x) for x in endpoint[-1]]
-                    reachable.append((angle, candidate_tcp, target, above, pre, descent,
-                                      [float(x) for x in endpoint[-1]], item))
+                    return {
+                        "item": item, "candidate_tcp": candidate_tcp,
+                        "target": target, "above": above, "pre": pre,
+                        "descent": descent,
+                        "pre_endpoint": [float(x) for x in endpoint[-1]],
+                    }
                 except Exception as exc:
                     item["reachable"] = False
                     item["reason"] = str(exc)
-                attempts.append(item)
+                    return {"item": item}
+                finally:
+                    candidate_planner.close()
+
+            attempts, reachable = [], []
+            print(
+                f"[反抓离线规划并发] 候选={len(candidates)}，最多{args.planning_inflight}条在飞；"
+                "每条使用独立 Planner 客户端。",
+                flush=True,
+            )
+            with ThreadPoolExecutor(
+                max_workers=min(args.planning_inflight, len(candidates)),
+                thread_name_prefix="module5-reverse-grasp-plan",
+            ) as executor:
+                futures = {executor.submit(plan_offline_candidate, candidate): candidate for candidate in candidates}
+                for future in as_completed(futures):
+                    result = future.result()
+                    attempts.append(result["item"])
+                    if result["item"]["reachable"]:
+                        reachable.append(result)
+            timing.finish("parallel_approach_preflight")
             report["approach_preflight"] = attempts
             if not reachable:
                 raise RuntimeError("所有保持左右指方向的接近角均不可达；检查 grasp_plan.json 的 approach_preflight")
-            angle, selected_tcp, target, above, pre, descent, pre_endpoint, selected = reachable[0]
+            # Module 3 likewise selects the first feasible completion: this
+            # minimizes time-to-plan while every candidate still began from
+            # the same reverse-ready joint state.
+            selected_result = reachable[0]
+            target = selected_result["target"]
+            pre = selected_result["pre"]
+            descent = selected_result["descent"]
+            pre_endpoint = selected_result["pre_endpoint"]
+            selected = selected_result["item"]
             report["selected_approach"] = selected
             report["preflight_status"] = "ptp_pregrasp_and_lin_descent_reachable"
             if args.preflight_only:
                 report["status"] = "preflight_ok_no_motion"
+                timing_status = "SUCCESS_PREFLIGHT"
                 return 0
+            timing.start("move_to_pregrasp")
             runtime.execute_planned_result(pre)
             wait_left(args.arm_host, pre_endpoint, "左臂预抓取位")
+            timing.finish("move_to_pregrasp")
+            timing.start("linear_grasp_descent")
             runtime.execute_planned_result(descent)
             descent_end = ((descent or {}).get("data") or {}).get("trajectory") or []
             if not descent_end:
                 raise RuntimeError("LIN 下探没有返回终点")
             wait_left(args.arm_host, descent_end[-1], "左臂抓取位")
+            timing.finish("linear_grasp_descent")
             weight_baseline = capture_open_gripper_baseline()
+            timing.start("gripper_close")
             with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-                response = gripper.move(1, 0., force=args.close_force, mode="sync", preempt=False, timeout=60.)
+                response = gripper.move(1, 0., force=args.close_force, speed=80.0, mode="sync", preempt=False, timeout=60.)
                 state = wait_gripper_terminal(gripper, 1, "左夹爪闭合")
                 report["gripper_close_state"] = state
+            timing.finish("gripper_close")
             check_lift = target.copy(); check_lift[2, 3] += POST_CLOSE_CHECK_LIFT_M
             # 先固定上提 3 cm，脱离桌面后才以同姿态力差判断抓空/有工件。
+            timing.start("post_grasp_lift_and_force_check")
             lift_plan = runtime.plan_cartesian_pose("left", pose(check_lift), planner="rrtstar")
             runtime.execute_planned_result(lift_plan)
             lift_end = ((lift_plan or {}).get("data") or {}).get("trajectory") or []
@@ -372,10 +448,12 @@ def main() -> int:
             wait_left(args.arm_host, lift_end[-1], "左臂上提3cm检查位")
             post_lift_weight = verify_object_after_lift(weight_baseline)
             report["post_lift_force_check"] = post_lift_weight
+            timing.finish("post_grasp_lift_and_force_check")
             if not post_lift_weight["accepted"]:
                 with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                     gripper.move(
                         1, 100.0, force=100.0, mode="sync",
+                        speed=80.0,
                         preempt=False, timeout=60.0,
                     )
                 print(
@@ -386,6 +464,7 @@ def main() -> int:
                 raise SystemExit(NO_GRASP_EXIT_CODE)
             report["status"] = "grasp_and_lift_complete"
             report["gripper_close_response"] = response
+            timing_status = "SUCCESS"
         finally:
             runtime.close()
     except Exception as exc:
@@ -393,6 +472,7 @@ def main() -> int:
         report["error"] = str(exc)
         raise
     finally:
+        report["timing"] = timing.complete(timing_status)
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"GRASP_REPORT={report_path}")
     return 0
