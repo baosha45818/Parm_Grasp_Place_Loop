@@ -197,9 +197,15 @@ def main():
             and reverse_match >= float(orientation['minimum_reverse_depth_match_fraction'])
         )
         accepted_side = side if side != 'reverse' or geometry_ok else 'rejected_geometry'
+        # Keep the winning ICP pose in the public diagnostic contract.  The
+        # Buffer recovery path consumes this exact estimate to re-grasp a part
+        # which has been corrected to its front side; recomputing a centre from
+        # the mask would discard the CAD/ICP registration we just validated.
         diag = {'object_key': f'sam2-{i}', 'classification': accepted_side, 'score_margin_m': margin, 'required_margin_m': threshold,
+                'table_normal_camera': scene_normal.round(9).tolist(),
                 'reverse_geometry_quality': {'icp_fitness': reverse_fitness, 'minimum_icp_fitness': orientation['minimum_reverse_icp_fitness'], 'depth_match_fraction': reverse_match, 'minimum_depth_match_fraction': orientation['minimum_reverse_depth_match_fraction'], 'accepted': geometry_ok},
-                'positive': {k:v for k,v in best['positive'].items() if k!='T'}, 'reverse': {k:v for k,v in best['reverse'].items() if k!='T'}}
+                'positive': {**{k:v for k,v in best['positive'].items() if k!='T'}, 'T_camera_object': best['positive']['T'].round(9).tolist()},
+                'reverse': {**{k:v for k,v in best['reverse'].items() if k!='T'}, 'T_camera_object': best['reverse']['T'].round(9).tolist()}}
         diagnostics.append(diag)
         color = {'positive': (0,180,0), 'reverse': (0,0,220), 'unknown': (0,180,255), 'rejected_geometry': (120,120,120)}[accepted_side]
         tint = np.zeros_like(orient); tint[:]=color; orient[m>0] = (.55*orient[m>0]+.45*tint[m>0]).astype(np.uint8)

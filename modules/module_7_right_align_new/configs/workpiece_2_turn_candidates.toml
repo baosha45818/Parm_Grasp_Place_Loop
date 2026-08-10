@@ -41,9 +41,9 @@ pregrasp_positive_workpiece_z_m = [0.07]
 pregrasp_position_tolerance_m = [0.0, 0.0, 0.0]
 
 # 预抓取姿态中 TCP 局部 roll 候选。
-# 阶段 1 原始遍历数 = 2(夹爪对称方向：+Y/+Z 与 -Y/-Z 同步成对切换，+X 不变) ×
-# 7(roll) × 7(pitch) × 7(yaw) = 686；
-# 运行时不再按 TCP/工件轴夹角做二次过滤，所有去重后的候选都会送入规划器。
+# 阶段 1 有 1(抓取点) × 1(X) × 1(Y) × 1(Z) × 7(roll) × 7(pitch) × 7(yaw) = 343 组。
+# 每组都会同时规划两种对称夹爪方向：+Y/+Z 与 -Y/-Z 同步成对切换（TCP +X 不变），
+# 再按规划轨迹的关节总运动量选择较小的一种；两种都不可达才换下一组。
 pregrasp_roll_candidates_deg = [0.0, 2.0, -2.0, 4.0, -4.0, 6.0, -6.0]
 
 # 预抓取姿态中 TCP 局部 pitch 候选。
@@ -53,7 +53,7 @@ pregrasp_pitch_candidates_deg = [0.0, 2.0, -2.0, 4.0, -4.0, 6.0, -6.0]
 pregrasp_yaw_candidates_deg = [0.0, 2.0, -2.0, 4.0, -4.0, 6.0, -6.0]
 
 # 阶段 1 预抓取主路径规划器：RRTstar；goal-tolerance 由下方开关控制。
-pregrasp_rrtstar_goal_tolerance = true
+pregrasp_rrtstar_goal_tolerance = false
 planner = "rrtstar"
 
 # 统一的规划速度比例。
@@ -67,9 +67,6 @@ planning_timeout_s = 5.0
 
 # 已规划轨迹的执行速度倍率。
 trajectory_execution_speed_scale = 2.0
-
-# 轨迹起点同步失败时的重试次数。
-start_sync_retries = 3
 
 # Servo 线速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
 servo_linear_speed_mps = 0.05
@@ -139,9 +136,6 @@ lift_rrtstar_goal_tolerance = true
 
 # 4. 摆正到 Q1
 [turn]
-# 旧兼容参数。（当前不使用；当前摆正实际读取下方 [turn] 的 planner。）
-turn_planner = "rrtconnect"
-
 # 阶段 4 摆正实际使用的规划器；goal-tolerance 由下方开关控制。
 turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
@@ -153,7 +147,7 @@ front_base_rpy_deg = [0.0, 0.0, 0.0]
 x_offset_candidates_m = [0.0, 0.1]
 
 # 闭爪抬起后工件中心的 body_base Y 偏移候选。
-y_offset_candidates_m = [-0.3, -0.2, -0.1]
+y_offset_candidates_m = [-0.2, -0.1, 0.0]
 
 # 闭爪抬起后工件中心的 body_base Z 偏移候选。
 z_offset_candidates_m = [0.0]
@@ -168,22 +162,10 @@ roll_candidates_deg = [10.0, 20.0, 30.0]
 pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
 
 # 工件局部 yaw 摆正候选，优先落在 Q1。
-yaw_candidates_deg = [45.0, 60.0, 30.0, 0.0, 75.0, 15.0]
+yaw_candidates_deg = [35.0, 30.0, 45.0, 60.0, 75.0, 0.0]
 
 # 旧搜索兼容参数：摆正姿态搜索步长。
 turn_attitude_search_step_deg = 15.0
-
-# 旧搜索兼容参数：摆正平移搜索步长。
-turn_relocation_step_m = 0.04
-
-# 旧搜索兼容参数：摆正前沿 body_base -X 的后撤距离。
-post_grasp_turn_search_negative_base_x_m = 0.03
-
-# 旧搜索兼容参数：摆正前沿 body_base -Y 的后撤距离。
-post_grasp_turn_search_negative_base_y_m = 0.2
-
-# 旧搜索兼容参数：翻转站相对抓取点的 TCP 高度。
-turn_station_tcp_height_m = 0.12
 
 # 旧搜索兼容参数：摆正区域网格步长。
 turn_search_grid_step_m = 0.05
@@ -197,40 +179,22 @@ turn_positive_x_max_m = 0.2
 # 并行 RRTConnect 摆正规划的最大 worker 数。
 rrt_turn_parallelism = 3
 
-# Q1 yaw 下界；供状态/兼容校验使用。
-q1_yaw_min_deg = 15.0
-
-# Q1 yaw 上界；供状态/兼容校验使用。
-q1_yaw_max_deg = 75.0
-
-# Q1 yaw 搜索步长；兼容参数。
-q1_yaw_search_step_deg = 5.0
-
-# Q1 yaw 首选值；兼容参数。
-q1_preferred_yaw_deg = 35.0
-
-
 # 5. 安全下放、松爪和撤离
 [place]
 # 阶段 5 安全下放规划器：RRTstar；启用 goal-tolerance。
 # 正常下放候选的 RRTstar goal-tolerance 开关。
 place_rrtstar_goal_tolerance = true
 
-# 所有偏移下放失败时，原地下放兜底的 RRTstar goal-tolerance 开关。
-place_fallback_rrtstar_goal_tolerance = true
+# 下放后工件中心相对最终选中抓取 TCP 的 X 偏移候选。
+# 阶段 5 按 clearance→Y→X 顺序遍历，不做相机 ROI 过滤。
+place_x_offset_candidates_m = [0.050, 0.025, 0.00]
 
-# 下放后工件中心相对初始语义抓取点的 X 偏移候选。
-# 阶段 5 初始平面遍历数 = len(place_x) × len(place_y) = 4 × 6 = 24；循环顺序为 y→x，
-# 不做相机 ROI 过滤，24 个平面候选都会按顺序尝试。
-# 高度遍历数 = 1 + max(0, floor((max(lift_z, 当前工件中心 z) - 标准下放工件中心 z - ε) / 0.01))，
-# 即先标准高度，再每次上调 10 mm；总下放规划数 = 过滤后平面数 × 高度遍历数。
-place_x_offset_candidates_m = [0.050, 0.025, 0.000, -0.020]
+# 下放后工件中心相对最终选中抓取 TCP 的 Y 偏移候选。
+place_y_offset_candidates_m = [-0.200, -0.150, -0.100, -0.050, 0.000]
 
-# 下放后工件中心相对初始语义抓取点的 Y 偏移候选。
-place_y_offset_candidates_m = [-0.250, -0.200, -0.150, -0.100, -0.050, 0.000]
-
-# 松爪时 TCP 相对抓取高度的额外安全余量。
-place_tcp_extra_clearance_m = 0.02
+# 松爪时 TCP 相对抓取高度的额外安全余量候选；按左到右顺序规划。
+# 每个余量都会与全部 XY 候选组合；均不可达则保留工件并报错，不自动生成更高的余量。
+place_tcp_extra_clearance_m = [0.02]
 
 # 并行 RRTConnect 下放规划的最大 worker 数。
 rrt_place_parallelism = 3
@@ -241,4 +205,4 @@ rrt_place_parallelism = 3
 release_rrtstar_goal_tolerance = true
 
 # 松爪后保持 XY/姿态沿 body_base +Z 的撤离抬起距离。
-post_release_lift_height_m = [0.02]
+post_release_lift_height_m = [0.05, 0.04, 0.03, 0.02, 0.01, 0.00]

@@ -38,6 +38,8 @@ NO_GRASP_EXIT_CODE = 20
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "tool") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tool"))
 
 from loop_types import ResultStatus
 from modules.module_status import (
@@ -54,13 +56,21 @@ def run_stage(
     module: str,
     cwd: Path,
     recoverable: bool = False,
+    recoverable_return_codes: set[int] | None = None,
 ) -> None:
     """执行一个适配器子模块，并让跨进程统计拿到准确起止时间。"""
     report_module_status(module, ResultStatus.WAIT, f"开始：{module}")
     try:
         subprocess.run(command, cwd=cwd, check=True)
     except subprocess.CalledProcessError as exc:
-        if recoverable:
+        if exc.returncode in (recoverable_return_codes or set()):
+            report_module_status(
+                module,
+                ResultStatus.RETRY,
+                "左夹爪未确认抓持；回反抓预备位后重新观察、预测并抓取",
+                reason_code="LEFT_REVERSE_GRASP_RETRY",
+            )
+        elif recoverable:
             report_module_status(
                 module,
                 ResultStatus.RETRY,
@@ -402,16 +412,11 @@ def main() -> int:
                 command,
                 module="module_5_1_reverse_grasp",
                 cwd=LEFT_PICK_EXECUTION.parent,
+                recoverable_return_codes={NO_GRASP_EXIT_CODE},
             )
     except subprocess.CalledProcessError as exc:
         if exc.returncode != NO_GRASP_EXIT_CODE:
             raise
-        report_module_status(
-            "module_5_1_reverse_grasp",
-            ResultStatus.RETRY,
-            "左夹爪未夹到单件或抬升后重量未确认SINGLE；回预备位后重新观察",
-            reason_code="LEFT_REVERSE_GRASP_RETRY",
-        )
         reopen_and_return_to_reverse_ready(args, workpiece)
         current_attempt = int(os.environ.get("PARM_REVERSE_GRASP_ATTEMPT", "1"))
         if current_attempt >= max_grasp_attempts:

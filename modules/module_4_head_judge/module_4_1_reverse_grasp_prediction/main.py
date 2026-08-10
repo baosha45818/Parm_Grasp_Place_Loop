@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -24,6 +25,10 @@ VISION_ROOT = (
 CONFIG_DIR = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/config"
 PYTHON = Path(sys.executable)
 BODY_HEAD = CONFIG_DIR / "body_head_calibration.json"
+DEFAULT_SAM2_URL = (
+    "unix:///home/dainanjun/Public/Parm_Grasp_Place_Loop/"
+    "tool/sam2-service/runtime/sam2-service.sock"
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +37,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prediction-file", type=Path, required=True)
     parser.add_argument("--body-head", type=Path, default=BODY_HEAD)
     parser.add_argument("--capture-dir", type=Path, required=True)
+    parser.add_argument(
+        "--sam2-url",
+        default=os.environ.get("PARM_SAM2_URL", DEFAULT_SAM2_URL),
+        help="驻留 SAM2 服务地址；总控默认继承 PARM_SAM2_URL",
+    )
     return parser.parse_args()
 
 
@@ -56,8 +66,14 @@ def run_visual(script: str, *args: object) -> None:
     )
 
 
-def predict(capture_dir: Path) -> Path:
-    run_visual("sam2_tabletop_masks.py", "--capture-dir", capture_dir)
+def predict(capture_dir: Path, sam2_url: str) -> Path:
+    run_visual(
+        "sam2_tabletop_masks.py",
+        "--capture-dir",
+        capture_dir,
+        "--socket",
+        sam2_url,
+    )
     run_visual("sam2_icp_grasp.py", "--capture-dir", capture_dir)
     run_visual("visualize_grasp_3d.py", "--capture-dir", capture_dir)
     grasp_json = capture_dir / "sam2_masks/grasp_poses.json"
@@ -100,7 +116,7 @@ def main() -> int:
     capture_dir = args.capture_dir.expanduser().resolve()
     if not (capture_dir / "metadata.json").is_file():
         raise FileNotFoundError(f"不是有效头部 RGB-D 采集目录: {capture_dir}")
-    grasp_json = predict(capture_dir)
+    grasp_json = predict(capture_dir, args.sam2_url)
     write_prediction(
         args.prediction_file,
         capture_dir=capture_dir,

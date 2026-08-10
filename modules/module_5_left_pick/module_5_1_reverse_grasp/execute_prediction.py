@@ -21,6 +21,7 @@ MODULE_DIR = Path(__file__).resolve().parent
 LOOP_ROOT = MODULE_DIR.parents[2]
 IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
 CONFIG_DIR = MODULE_DIR / "config"
+NO_GRASP_EXIT_CODE = 20
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,7 +133,15 @@ def execute_grasp(args: argparse.Namespace, grasp_json: Path, body_head: Path) -
     ]
     print("[module-5-1] 执行已确认反抓: " + " ".join(command))
     import subprocess
-    subprocess.run(command, cwd=IMPLEMENTATION_DIR, check=True)
+    try:
+        subprocess.run(command, cwd=IMPLEMENTATION_DIR, check=True)
+    except subprocess.CalledProcessError as exc:
+        # ``execute_confirmed_grasp.py`` uses 20 for the expected, recoverable
+        # case where the left gripper is fully closed after the lift.  Preserve
+        # that code so the parent can return to reverse-ready and retry.
+        if exc.returncode == NO_GRASP_EXIT_CODE:
+            raise SystemExit(NO_GRASP_EXIT_CODE) from exc
+        raise
 
 
 def main() -> int:

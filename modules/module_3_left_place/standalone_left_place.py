@@ -63,6 +63,41 @@ GRIPPER_HOLD_POLL_S = 0.1
 GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
+def select_face_candidate_order(
+    object_z_in_left_eef: np.ndarray,
+    *,
+    threshold_deg: float,
+    workpiece: str,
+) -> tuple[str, str, float, float]:
+    """Classify the held object's +Z against left_eef -X/+X.
+
+    ``front_then_reversed`` is the current branch convention for object +Z
+    aligned with left_eef -X; the opposite alignment selects the reversed
+    branch first.  Keep the existing workpiece-1 alternating policy intact.
+    """
+    object_z = np.asarray(object_z_in_left_eef, dtype=float)
+    if object_z.shape != (3,) or not np.all(np.isfinite(object_z)):
+        raise ValueError("left_eef 中的工件 +Z 必须是三个有限数")
+    magnitude = float(np.linalg.norm(object_z))
+    if magnitude <= 1e-9:
+        raise ValueError("left_eef 中的工件 +Z 不能为零向量")
+    object_z /= magnitude
+    minus_x_angle = float(np.degrees(np.arccos(np.clip(-object_z[0], -1.0, 1.0))))
+    plus_x_angle = float(np.degrees(np.arccos(np.clip(object_z[0], -1.0, 1.0))))
+    if minus_x_angle < threshold_deg:
+        face_branch_mode = "front_then_reversed"
+    elif plus_x_angle < threshold_deg:
+        face_branch_mode = "reversed_then_front"
+    else:
+        face_branch_mode = "alternating"
+    candidate_order = (
+        "reversed_only"
+        if face_branch_mode == "alternating" and str(workpiece) == "1"
+        else face_branch_mode
+    )
+    return face_branch_mode, candidate_order, minus_x_angle, plus_x_angle
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -480,8 +515,9 @@ def main() -> int:
         return 0
 
     validate_inspection_success(inspection)
-    # 两个工件均
-    # 使用工件 +Z 相对 body_base 正负Z的夹角来决定正反候选的优先顺序。
+    # T_tool_object remains the transfer-end relation used to construct
+    # Cartesian placement targets.  Face selection below deliberately uses
+    # the separately captured ICP-time left_eef relation.
     classification = "FRONT"
     branch = FRONT_PROFILE.placement_branch
     profile = FRONT_PROFILE
@@ -495,7 +531,10 @@ def main() -> int:
         "max_inflight": int(args.placement_planning_inflight),
         "planner": post_graspup_planner,
         "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
-        "face_priority_policy": "body_base_z_angle_selects_front_reversed_or_alternating",
+        "face_priority_policy": (
+            "object_plus_z_vs_left_eef_x_selects_face_candidate_order; "
+            "workpiece1_alternating_uses_reversed_only"
+        ),
     }
     tool_z_rejected_count = 0
 
@@ -679,18 +718,21 @@ def main() -> int:
                 return 0
 
         workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
-        T_body_object = np.asarray(inspection["T_body_base_object"], dtype=float)
-        object_z_body = T_body_object[:3, 2]
-        object_z_body /= np.linalg.norm(object_z_body)
-        positive_angle = float(np.degrees(np.arccos(np.clip(object_z_body[2], -1.0, 1.0))))
-        negative_angle = float(np.degrees(np.arccos(np.clip(-object_z_body[2], -1.0, 1.0))))
+        T_left_eef_object = np.asarray(inspection["T_left_eef_object"], dtype=float)
+        object_z_in_left_eef = T_left_eef_object[:3, 2]
         threshold = float(workpiece_parameters.BODY_BASE_Z_FACE_SELECTION_MAX_ANGLE_DEG)
-        if positive_angle < threshold:
-            face_branch_mode = "front_then_reversed"
-        elif negative_angle < threshold:
-            face_branch_mode = "reversed_then_front"
-        else:
-            face_branch_mode = "alternating"
+        (
+            face_branch_mode,
+            candidate_order,
+            minus_x_angle,
+            plus_x_angle,
+        ) = select_face_candidate_order(
+            object_z_in_left_eef,
+            threshold_deg=threshold,
+            workpiece=args.workpiece,
+        )
+        planning_scheduler_log["face_branch_mode"] = face_branch_mode
+        planning_scheduler_log["candidate_order"] = candidate_order
         face_specs = [
             {
                 "classification": "FRONT",
@@ -726,9 +768,11 @@ def main() -> int:
         if any(spec["center"].shape != (3,) or not np.all(np.isfinite(spec["center"])) for spec in face_specs):
             raise ValueError("目标工件 XYZ 必须包含三个有限米制数值")
         print(
-            f"[工件{args.workpiece}候选] +Z->body_base+Z={positive_angle:.1f}deg, "
-            f"+Z->body_base-Z={negative_angle:.1f}deg, mode={face_branch_mode}; "
-            "正反面均会纳入规划。",
+            f"[工件{args.workpiece}候选] +Z->left_eef-X={minus_x_angle:.1f}deg, "
+            f"+Z->left_eef+X={plus_x_angle:.1f}deg, "
+            f"姿态判定={face_branch_mode}, 实际遍历={candidate_order}; "
+            + ("仅反面候选会纳入规划。" if candidate_order == "reversed_only"
+               else "正反面均会纳入规划。"),
             flush=True,
         )
         planning_attempts: list[dict] = []
@@ -1008,10 +1052,12 @@ def main() -> int:
                     )
                     ordered_by_branch.append(branch_candidates)
                 front_candidates, reversed_candidates = ordered_by_branch
-                if face_branch_mode == "front_then_reversed":
+                if candidate_order == "front_then_reversed":
                     candidates = front_candidates + reversed_candidates
-                elif face_branch_mode == "reversed_then_front":
+                elif candidate_order == "reversed_then_front":
                     candidates = reversed_candidates + front_candidates
+                elif candidate_order == "reversed_only":
+                    candidates = reversed_candidates
                 else:
                     for index in range(max(len(front_candidates), len(reversed_candidates))):
                         if index < len(front_candidates):
@@ -1094,6 +1140,8 @@ def main() -> int:
                                 "target_object": target_object,
                                 "target_tool": target_tool,
                             }
+                            # 不论候选顺序如何（包括工件1的 reversed_only），每个
+                            # 末端目标都必须先通过 +Z 朝 body_base -Z 的硬约束。
                             if not tool_positive_z_points_toward_body_base_negative_z(
                                 target_tool
                             ):

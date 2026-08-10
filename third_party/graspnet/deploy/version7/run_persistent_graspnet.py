@@ -121,7 +121,7 @@ def build_parser():
     )
     group.add_argument("--planner-candidate-top-k", type=int, default=3,
                        help="number of score-ranked GraspNet candidates to preflight with the Planner")
-    group.add_argument("--max-planner-unreachable-retries", type=int, default=3,
+    group.add_argument("--max-planner-unreachable-retries", type=int, default=30,
                        help="fresh capture/inference cycles after every top-K candidate is Planner-unreachable")
     group.add_argument("--empty-failure-ban-count", type=int, default=2,
                        help="blacklist a local grasp pose after this many EMPTY weight results (default: 2)")

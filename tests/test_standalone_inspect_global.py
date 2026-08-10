@@ -315,6 +315,91 @@ class StandaloneInspectGlobalTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["component_selection"]["robot_veto_labels"], [])
 
+    def test_pc1_workpiece1_keeps_close_lobe_in_front_of_urdf(self) -> None:
+        args = self.parse("--auto-positive-count", "6")
+        measured = np.zeros((720, 1280), dtype=np.float32)
+        self_pixels = np.zeros_like(measured, dtype=bool)
+        bgr = np.zeros((720, 1280, 3), dtype=np.uint8)
+        rendered = np.full_like(measured, np.nan)
+
+        # Main brown body outside the gripper projection.
+        cv2.rectangle(measured, (450, 360), (570, 460), 0.220, -1)
+        cv2.rectangle(bgr, (450, 360), (570, 460), (58, 66, 74), -1)
+        # The same workpiece head is separated by a narrow visual gap and lies
+        # deep inside the projected gripper, but measured depth proves that it
+        # is 40 mm in front of the rendered robot.
+        cv2.rectangle(measured, (500, 300), (560, 344), 0.222, -1)
+        cv2.rectangle(bgr, (500, 300), (560, 344), (58, 67, 74), -1)
+        rendered[270:355, 480:541] = 0.262
+
+        result = global_inspect._auto_rgbd_prompt(
+            measured, self_pixels, bgr, args, rendered,
+            hypothesis="brown", view="pc1",
+        )
+
+        self.assertIsNotNone(result)
+        selection = result["component_selection"]
+        self.assertEqual(len(selection["pc1_retained_object_in_front_lobes"]), 1)
+        self.assertEqual(selection["pc1_excluded_deep_urdf_lobes"], [])
+        self.assertTrue(any(500 <= x <= 560 and 300 <= y <= 344
+                            for x, y in result["positives"]))
+        self.assertFalse(any(500 <= x <= 560 and 300 <= y <= 344
+                             for x, y in result["negatives"]))
+
+    def test_pc1_ambiguous_deep_lobe_near_object_is_not_negative(self) -> None:
+        args = self.parse("--auto-positive-count", "4")
+        measured = np.zeros((720, 1280), dtype=np.float32)
+        self_pixels = np.zeros_like(measured, dtype=bool)
+        bgr = np.zeros((720, 1280, 3), dtype=np.uint8)
+        rendered = np.full_like(measured, np.nan)
+        cv2.rectangle(measured, (450, 360), (570, 460), 0.220, -1)
+        cv2.rectangle(bgr, (450, 360), (570, 460), (58, 66, 74), -1)
+        cv2.rectangle(measured, (500, 300), (560, 344), 0.222, -1)
+        cv2.rectangle(bgr, (500, 300), (560, 344), (58, 67, 74), -1)
+        rendered[270:355, 480:541] = 0.262
+        # Small deep-overlap fragment close to the confirmed object, without
+        # enough object-in-front pixels to be trusted as a positive lobe.
+        cv2.rectangle(measured, (575, 370), (590, 390), 0.222, -1)
+        cv2.rectangle(bgr, (575, 370), (590, 390), (58, 67, 74), -1)
+        rendered[350:411, 560:611] = 0.223
+        rendered[370:391, 575:579] = 0.262
+
+        result = global_inspect._auto_rgbd_prompt(
+            measured, self_pixels, bgr, args, rendered,
+            hypothesis="brown", view="pc1",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertFalse(any(575 <= x <= 590 and 370 <= y <= 390
+                             for x, y in result["negatives"]))
+
+    def test_pc1_workpiece1_rejects_high_urdf_overlap_robot_lobe(self) -> None:
+        args = self.parse("--auto-positive-count", "6")
+        measured = np.zeros((720, 1280), dtype=np.float32)
+        self_pixels = np.zeros_like(measured, dtype=bool)
+        bgr = np.zeros((720, 1280, 3), dtype=np.uint8)
+        rendered = np.full_like(measured, np.nan)
+        cv2.rectangle(measured, (450, 360), (570, 460), 0.220, -1)
+        cv2.rectangle(bgr, (450, 360), (570, 460), (58, 66, 74), -1)
+        # Robot-coloured lobe 27 px away: half of its measured pixels appear
+        # in front because of projection/depth error, but almost the complete
+        # island lies deep inside the URDF silhouette.
+        cv2.rectangle(measured, (500, 300), (560, 332), 0.220, -1)
+        cv2.rectangle(bgr, (500, 300), (560, 332), (58, 70, 78), -1)
+        rendered[270:350, 480:581] = 0.221
+        rendered[300:333, 500:531] = 0.262
+
+        result = global_inspect._auto_rgbd_prompt(
+            measured, self_pixels, bgr, args, rendered,
+            hypothesis="brown", view="pc1",
+        )
+
+        self.assertIsNotNone(result)
+        selection = result["component_selection"]
+        self.assertEqual(selection["pc1_retained_object_in_front_lobes"], [])
+        self.assertFalse(any(500 <= x <= 560 and 300 <= y <= 332
+                             for x, y in result["positives"]))
+
     def test_semantic_prompt_keeps_object_pixels_inside_self_mask(self) -> None:
         args = self.parse()
         measured = np.zeros((720, 1280), dtype=np.float32)

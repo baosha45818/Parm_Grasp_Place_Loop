@@ -49,7 +49,7 @@ $PY $SCRIPT --camera 3
 
 11.
 python3 modules/module_9_right_place/place_hole_a_wiggle_new_config.py \
-  --workpiece 2 \
+  --workpiece 1 \
   --live --confirm-live
 
 12. 力传感器数据可视化

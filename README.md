@@ -10,7 +10,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
   modules/modular_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
   --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1
+  --arm-host 192.168.88.1 --workpiece 1
 ```
 
 它复用已经验证的双进程调度、共享状态、右臂 ServoPose 互斥和

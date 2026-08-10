@@ -38,6 +38,10 @@ DEFAULT_ALIGNMENT = (
     ROOT / "calibration/sdk_base_alignment/"
     "sdk_base_to_planner_alignment_pitch2_yaw26p5_kinematic.json"
 )
+# Backward-compatible exports used by the reversed-head observation contract.
+# The per-workpiece profile remains the runtime source of truth.
+HANDOFF_HEAD_PITCH_DEG = 2.0
+HANDOFF_HEAD_YAW_DEG = 26.5
 DEFAULT_OUTPUT_DIR = ROOT / "output/reversed_head_pose_d435"
 DEFAULT_AUTO_MASK_CONFIG = (
     ROOT

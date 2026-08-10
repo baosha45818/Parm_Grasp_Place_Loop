@@ -3,7 +3,8 @@
 # roll、pitch、yaw 均定义在工件局部坐标系，列表顺序即候选优先级。
 
 [shared]
-# 工件 +Z 接近 body_base +Z/-Z 时，优先完整提交对应面；其余姿态正反交替。
+# 工件 +Z 接近 left_eef -X/+X 时，优先完整提交对应面；其余姿态只提交反面候选。
+# 键名为兼容历史配置保留；其数值现在是 left_eef 轴向选择阈值。
 body_base_z_face_selection_max_angle_deg = 40.0
 allowed_handoff_weight_classes = ["SINGLE"]
 use_multiple_holding_min_g = true
@@ -16,14 +17,14 @@ xy_radius_factors = [0.0]
 [front]
 # 放置中心只读取 XY；实际工件目标高度和松爪高度由各自 Z 候选控制。
 # release_z_candidates_m = [] 表示到 target 位直接松爪，不执行第二段 LIN。
-target_object_xyz_m = [0.517668, -0.042779, -0.300000]
+target_object_xyz_m = [0.517668, -0.058779, -0.300000]
 target_z_candidates_m = [-0.36]
 release_z_candidates_m = []
 
 # yaw 从 45 度开始，每 45 度一次。
-# 当前候选数 = 2 个目标 Z × 1 个中心 XY × 4 个 roll × 3 个 pitch × 8 个 yaw = 192。
+# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 4 个 roll × 3 个 pitch × 8 个 yaw = 96。
 yaw_candidates_deg = [45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0]
-roll_candidates_deg = [-20.0, 20.0, 30.0, -30.0]
+roll_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
 pitch_candidates_deg = [0.0, -10.0, 10.0]
 # 零候选：工件 +X/+Y/+Z 与 body_base +X/+Y/+Z 对齐。
 base_rpy_deg = [0.0, 0.0, 0.0]
@@ -34,8 +35,8 @@ target_z_candidates_m = [-0.35]
 release_z_candidates_m = []
 
 # 基准姿态先绕工件局部 X 翻转 180 度。
-# 当前候选数 = 2 个目标 Z × 1 个中心 XY × 3 个 roll × 3 个 pitch × 7 个 yaw = 126。
+# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 4 个 roll × 3 个 pitch × 7 个 yaw = 84。
 yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0, -90.0, 90.0]
-roll_candidates_deg = [0.0, -15.0, 15.0]
-pitch_candidates_deg = [0.0, -15.0, 15.0]
+roll_candidates_deg = [-25.0, 25.0, -30.0, 30.0]
+pitch_candidates_deg = [0.0, -20.0, 20.0]
 base_rpy_deg = [180.0, 0.0, 0.0]

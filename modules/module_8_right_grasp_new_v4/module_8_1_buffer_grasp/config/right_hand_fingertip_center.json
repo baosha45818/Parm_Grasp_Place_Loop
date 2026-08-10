@@ -1,0 +1,8 @@
+{
+  "name": "right_hand_fingertip_center",
+  "parent_frame": "right_hand_transfer_base",
+  "translation_m": [0.264453, -0.0002439, -0.050180],
+  "rpy_rad": [0.0, 0.0, 0.0],
+  "source": "URDF/STL closed-gripper contact-centre estimate: transform the centres of the two innermost forward planar finger contact faces into right_hand_transfer_base, then take their midpoint. Relative to the midpoint of right_hand_link1/right_hand_link2 origins: +0.106053 m in X and -0.050750 m in Z. Validate against the physical closed-gripper contact centre before precision use.",
+  "transform_convention": "T_parent_virtual_tcp; p_parent = T_parent_virtual_tcp @ p_virtual_tcp"
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate one SAM2 mask per elevated tabletop component from an RGB-D capture."""
 from __future__ import annotations
-import argparse, json, sys
+import argparse, json, os, sys
 from pathlib import Path
 import cv2, numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
@@ -96,7 +96,7 @@ def retain_supported_workpiece_components(mask, valid, gray, height, positives):
 
 def main():
  workspace=json.loads((MODULE_ROOT/'config/tabletop_workspace.json').read_text())
- p=argparse.ArgumentParser(); p.add_argument('--capture-dir',type=Path,required=True); p.add_argument('--socket',default='unix:///tmp/sam2-service.sock'); p.add_argument('--height-mm',type=float,default=3.0); p.add_argument('--max-gray',type=int,default=105); p.add_argument('--min-seed-area',type=int,default=90); p.add_argument('--roi',nargs=4,type=int,default=workspace['safe_roi_xywh'],metavar=('X','Y','W','H')); p.add_argument('--out',type=Path,default=None); a=p.parse_args()
+ p=argparse.ArgumentParser(); p.add_argument('--capture-dir',type=Path,required=True); p.add_argument('--socket',default=os.environ.get('PARM_SAM2_URL','unix:///home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/sam2-service/runtime/sam2-service.sock')); p.add_argument('--height-mm',type=float,default=3.0); p.add_argument('--max-gray',type=int,default=105); p.add_argument('--min-seed-area',type=int,default=90); p.add_argument('--roi',nargs=4,type=int,default=workspace['safe_roi_xywh'],metavar=('X','Y','W','H')); p.add_argument('--out',type=Path,default=None); a=p.parse_args()
  meta=json.loads((a.capture_dir/'metadata.json').read_text()); rgb=cv2.imread(str(a.capture_dir/'rgb_000.png')); d=cv2.imread(str(a.capture_dir/'depth_aligned_000.png'),cv2.IMREAD_UNCHANGED)
  k=meta['color_intrinsics']; K=np.array([[k['fx'],0,k['ppx']],[0,k['fy'],k['ppy']],[0,0,1.]])
  xyz=depth_to_xyz(d,K,float(meta['depth_scale_m'])); valid=(d>0)&(d<65535); pts=xyz[valid]

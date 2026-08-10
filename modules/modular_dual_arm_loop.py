@@ -25,7 +25,7 @@ PYTHON = ROOT / ".venv/bin/python"
 
 MODULE_1 = (
     ROOT
-    / "modules/module_1_left_grasp/module_1_1_graspnet/"
+    / "modules/module_1_left_grasp/module_1_3_icp_grasp/"
     "run_grasp_to_inspect_place.sh"
 )
 MODULE_2_3 = (
@@ -74,7 +74,6 @@ from modules.module_0_prepare.ensure_camera_broker import (
     stop_camera_broker,
 )
 from modules.module_0_prepare.ensure_sam2_service import ensure_sam2_service, sam2_url
-from modules.module_0_prepare.ensure_graspnet_service import ensure_graspnet_service
 from modules.module_0_prepare.preflight_robot_infrastructure import (
     preflight_robot_infrastructure,
 )
@@ -511,12 +510,16 @@ def main() -> None:
     configure_motion_speeds()
     inject_fixed_module_arguments()
     readiness_args = scheduler.parse_args()
-    # Camera ownership must be established before either worker can move or
-    # begin its first capture.  All later modules use the Broker socket.
+    # Every RGB-D consumer uses this singleton, including traditional ICP
+    # Module 1.  It alone owns the physical D405/Femto devices.
     ensure_sam2_service()
-    os.environ["PARM_SAM2_URL"] = sam2_url()
     ensure_camera_broker()
-    ensure_graspnet_service()
+    os.environ["PARM_SAM2_URL"] = sam2_url()
+    print(
+        "[module-0] 传统 ICP Module 1 与 Module 2 共用 Camera Broker；"
+        "GraspNet 服务不启动。",
+        flush=True,
+    )
     # ``spawn`` 产生的左右 worker 会重新导入旧调度器；用环境标记让它们
     # 同样恢复 modules 下的业务入口，而不是回退到旧目录中的脚本。
     os.environ["PARM_MODULAR_LOOP_ENTRIES"] = "1"

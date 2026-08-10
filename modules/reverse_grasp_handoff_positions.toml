@@ -6,7 +6,7 @@
 ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
 arrival_tolerance_deg = 0.5
 arrival_timeout_s = 90.0
-# 反抓闭爪后只上提 3 cm，随后立即进行力传感器持件判断。
+# 反抓闭爪后只上提 3 cm；工件1在上提后读取左夹爪 gripping/position 状态判断持件。
 post_close_lift_m = 0.03
 max_grasp_attempts = 5
 

@@ -93,7 +93,7 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --femto-frame-read-retries "${CAMERA_BROKER_FEMTO_FRAME_READ_RETRIES:-10}" \
   --max-no-grasp-retries 99 \
   --planner-candidate-top-k 3 \
-  --max-planner-unreachable-retries 3 \
+  --max-planner-unreachable-retries 30 \
   --empty-failure-ban-count 2 \
   --empty-failure-position-radius-m 0.020 \
   --empty-failure-orientation-deg 15 \
@@ -130,7 +130,7 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --femto-serial CL8L56301LK \
   --femto-z-min 0.20 --femto-z-max 2.00 \
   --femto-x-abs-max 1.20 --femto-y-abs-max 1.20 \
-  --roi 0 0 512 336 \
+  --roi 0 0 512 372 \
   --femto-roi 175 281 488 228 \
   --collision-thresh 0.5 \
   --collision-voxel-size 0.005 \
@@ -141,7 +141,7 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --grasp-downward-probe-m -0.02 \
   --gripper-host "${PARM_GRIPPER_HOST:-127.0.0.1}" \
   --gripper-hand 1 \
-  --gripper-open-width-m 0.065 \
+  --gripper-open-width-m 0.075 \
   --gripper-width-margin-m 0.005 \
   --gripper-force 100 \
   --gripper-close-force 100 \

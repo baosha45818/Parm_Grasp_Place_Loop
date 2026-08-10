@@ -53,11 +53,11 @@ SAVED_POSE_PLAN_RETRIES = 3
 
 WORKPIECE_CONFIGS = {
     1: {
-        "grasp": MODULE_ROOT / "configs/workpiece_1_grasp.json",
+        "grasp": MODULE_ROOT / "configs/workpiece_1_grasp.toml",
         "reorient": ALIGN_MODULE_DIR / "configs/workpiece_1_turn_candidates.toml",
     },
     2: {
-        "grasp": MODULE_ROOT / "configs/workpiece_2_grasp.json",
+        "grasp": MODULE_ROOT / "configs/workpiece_2_grasp.toml",
         "reorient": ALIGN_MODULE_DIR / "configs/workpiece_2_turn_candidates.toml",
     },
 }
@@ -136,11 +136,12 @@ class PipelineRunLog:
     """Own one human-readable log and one structured event stream per run."""
 
     def __init__(self, args: argparse.Namespace) -> None:
-        args.log_dir.mkdir(parents=True, exist_ok=True)
+        self.log_dir = args.log_dir / f"workpiece_{args.workpiece}"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S_%f")
         stem = f"workpiece_{args.workpiece}_{stamp}_pid{os.getpid()}"
-        self.text_path = args.log_dir / f"{stem}.log"
-        self.event_path = args.log_dir / f"{stem}.jsonl"
+        self.text_path = self.log_dir / f"{stem}.log"
+        self.event_path = self.log_dir / f"{stem}.jsonl"
         self.handle = self.text_path.open("a", encoding="utf-8", buffering=1)
         self.lock = threading.Lock()
         self.original_stdout, self.original_stderr = sys.stdout, sys.stderr

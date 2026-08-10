@@ -14,6 +14,7 @@ those parameters; this file contains the common motion implementation.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
 import os
@@ -45,8 +46,8 @@ RRTSTAR_TIMEOUT_S = 30.0
 Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE = 20
 POSE_OUTPUT_ROOT = MODULE_ROOT.parents[2] / "output/module_4_2"
 WORKPIECE_CONFIGS = {
-    1: MODULE_ROOT / "configs/workpiece_1_grasp.json",
-    2: MODULE_ROOT / "configs/workpiece_2_grasp.json",
+    1: MODULE_ROOT / "configs/workpiece_1_grasp.toml",
+    2: MODULE_ROOT / "configs/workpiece_2_grasp.toml",
 }
 
 
@@ -62,7 +63,6 @@ class Q1DirectPathUnavailableError(RuntimeError):
     """No direct Q1 approach candidate can be planned."""
 
 
-CONFIG_SCHEMA = "direct-grasp-workpiece-config/v2"
 CONFIGURABLE_OPTIONS = frozenset({
     "--grasp-point-semantic-offset-m",
     "--tcp-local-offset-at-grasp-m",
@@ -98,22 +98,74 @@ CONFIGURABLE_OPTIONS = frozenset({
 
 
 def load_grasp_config(path: Path) -> dict[str, object]:
-    """Read a workpiece calibration JSON used to populate parser options."""
+    """Read one editable TOML grasp configuration on Python 3.10."""
+    tables: dict[str, dict[str, object]] = {}
+    current_table: dict[str, object] | None = None
+    pending_key: str | None = None
+    pending_value: list[str] = []
+
+    def store(table: dict[str, object], key: str, raw: str, line_number: int) -> None:
+        if key in table:
+            raise ValueError(f"抓取 TOML 键重复: {path}:{line_number}: {key}")
+        try:
+            table[key] = True if raw == "true" else False if raw == "false" else ast.literal_eval(raw)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"抓取 TOML 无法解析: {path}:{line_number}: {raw!r}") from exc
+
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取抓取配置 {path}: {exc}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("抓取配置的顶层必须是 JSON 对象")
-    if payload.get("schema") != CONFIG_SCHEMA:
-        raise ValueError(f"配置 schema 必须是 {CONFIG_SCHEMA!r}")
-    if not isinstance(payload.get("direct_grasp_arguments"), dict):
-        raise ValueError("配置缺少对象 direct_grasp_arguments")
-    return payload
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ValueError(f"无法读取抓取 TOML {path}: {exc}") from exc
+    for line_number, raw_line in enumerate(lines, 1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if pending_key is not None:
+            pending_value.append(line)
+            joined = " ".join(pending_value)
+            if joined.count("[") == joined.count("]"):
+                assert current_table is not None
+                store(current_table, pending_key, joined, line_number)
+                pending_key, pending_value = None, []
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1].strip()
+            if not name or name in tables:
+                raise ValueError(f"抓取 TOML 表无效或重复: {path}:{line_number}")
+            current_table = tables[name] = {}
+            continue
+        if current_table is None or "=" not in line:
+            raise ValueError(f"抓取 TOML 只支持 [table] 内的 key = value: {path}:{line_number}")
+        key, raw_value = (part.strip() for part in line.split("=", 1))
+        if not key:
+            raise ValueError(f"抓取 TOML 键为空: {path}:{line_number}")
+        if raw_value.count("[") != raw_value.count("]"):
+            pending_key, pending_value = key, [raw_value]
+        else:
+            store(current_table, key, raw_value, line_number)
+    if pending_key is not None:
+        raise ValueError(f"抓取 TOML 数组未闭合: {path}")
+
+    meta = tables.get("meta", {})
+    workpiece = meta.get("workpiece")
+    if not isinstance(workpiece, str) or not workpiece.strip():
+        raise ValueError("抓取 TOML 的 [meta] 必须包含非空 workpiece")
+    configured: dict[str, object] = {}
+    for table_name, table in tables.items():
+        if table_name == "meta":
+            continue
+        for key, value in table.items():
+            option = "--" + key.replace("_", "-")
+            if option not in CONFIGURABLE_OPTIONS:
+                raise ValueError(f"抓取 TOML 包含未知参数: {table_name}.{key}")
+            if option in configured:
+                raise ValueError(f"抓取 TOML 参数重复: {option}")
+            configured[option] = value
+    return {"workpiece": workpiece, "direct_grasp_arguments": configured}
 
 
 def apply_grasp_config(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    """Set recognised argparse options from the selected JSON calibration."""
+    """Set recognised argparse options from the selected TOML calibration."""
     assert isinstance(args.config, Path)
     payload = load_grasp_config(args.config)
     configured = payload["direct_grasp_arguments"]
@@ -639,7 +691,7 @@ def main() -> int:
             candidate_xyz = [approach_anchor_xyz[axis] + parameter * tcp_x_axis[axis] for axis in range(3)]
             candidate = candidate_xyz + orientation
             try:
-                trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=candidate, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, stage=f"Q1 rear alignment candidate {candidate_index}/{len(parameters)}", rrtstar_goal_tolerance=True)
+                trajectory, frequency = preplan_tcp_trajectory(planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=candidate, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, stage=f"Q1 rear alignment candidate {candidate_index}/{len(parameters)}", rrtstar_goal_tolerance=False)
             except TrajectoryPlanningError as exc:
                 failures.append(f"{parameter * 1000:.1f} mm: {exc}")
                 continue

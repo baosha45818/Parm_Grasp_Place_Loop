@@ -1846,12 +1846,31 @@ def _auto_rgbd_prompt(
         if remote_tail_candidates:
             associated.add(max(remote_tail_candidates, key=lambda label: int(areas[label])))
     pc1_excluded_lobes: list[int] = []
+    pc1_retained_front_lobes: list[int] = []
     if view == "pc1":
-        # PC1 is a wide, clean-body view.  Do not let a second lobe inside the
-        # gripper projection create a positive cue; PC2 handles occluded lobes.
+        # Most secondary islands deep inside the PC1 gripper projection are
+        # robot highlights.  A brown workpiece lobe can nevertheless be split
+        # from its main body by the projected finger while remaining clearly
+        # in front of the rendered robot.  Preserve that narrowly evidenced
+        # case; otherwise the true lobe becomes a SAM2 negative before the
+        # model ever sees it (for example a perforated workpiece-1 head).
+        pc1_decisions = {
+            int(decision["label"]): decision for decision in component_decisions
+        }
+        pc1_retained_front_lobes = [
+            label for label in associated if label != anchor_label
+            and str(args.workpiece) == "1"
+            and float(signatures[label]["urdf_deep_overlap_ratio"]) >= 0.35
+            and float(signatures[label]["urdf_deep_overlap_ratio"]) <= 0.80
+            and float(signatures[label]["object_in_front_of_urdf_ratio"])
+            >= 0.55
+            and float(pc1_decisions[label]["gap_to_anchor_px"]) <= 20.0
+            and float(pc1_decisions[label]["lab_chroma_delta"]) <= 5.0
+        ]
         pc1_excluded_lobes = [
             label for label in associated if label != anchor_label
             and float(signatures[label]["urdf_deep_overlap_ratio"]) >= 0.35
+            and label not in pc1_retained_front_lobes
         ]
         associated.difference_update(pc1_excluded_lobes)
     prompt_support = np.isin(labels, list(associated))
@@ -1883,9 +1902,27 @@ def _auto_rgbd_prompt(
                 anchor_interior = _prompt_interior(anchor_eligible)
         else:
             anchor_interior = _prompt_interior(anchor_eligible)
-        positives = _spatially_uniform_positive_points(
-            anchor_interior, int(args.auto_positive_count)
+        positive_budget = int(args.auto_positive_count)
+        retained_front_label = (
+            max(pc1_retained_front_lobes, key=lambda label: int(areas[label]))
+            if pc1_retained_front_lobes else None
         )
+        retained_front_count = (
+            min(2, max(1, positive_budget // 3))
+            if retained_front_label is not None and positive_budget >= 2 else 0
+        )
+        positives = _spatially_uniform_positive_points(
+            anchor_interior, max(1, positive_budget - retained_front_count)
+        )
+        if retained_front_label is not None:
+            retained_front_region = (
+                (labels == retained_front_label) & (measured > 0)
+            )
+            retained_front_interior = _prompt_interior(retained_front_region)
+            positives.extend(_spatially_uniform_positive_points(
+                retained_front_interior, retained_front_count
+            ))
+            positive_labels.append(retained_front_label)
         if not positives:
             positives = [points[anchor_label]]
     else:
@@ -2000,6 +2037,9 @@ def _auto_rgbd_prompt(
             -int(areas[label]),
         )
     )
+    distance_to_prompt_support = cv2.distanceTransform(
+        (~prompt_support).astype(np.uint8), cv2.DIST_L2, 5
+    )
     extra_negatives: list[list[int]] = []
     for label in rejected_labels:
         if (
@@ -2007,6 +2047,15 @@ def _auto_rgbd_prompt(
             and str(args.workpiece) == "1"
             and not bool(signatures[label]["robot_veto"])
         ):
+            continue
+        if (
+            view == "pc1"
+            and label in pc1_excluded_lobes
+            and float(np.min(distance_to_prompt_support[labels == label])) <= 35.0
+        ):
+            # A tiny island split from a retained object lobe by the projected
+            # finger is ambiguous: do not promote it to object support, but do
+            # not place a negative cue at the physical workpiece junction.
             continue
         point = points[label]
         x, y = point
@@ -2039,6 +2088,9 @@ def _auto_rgbd_prompt(
             "associated_labels": sorted(int(label) for label in associated),
             "positive_labels": [int(label) for label in positive_labels],
             "pc1_excluded_deep_urdf_lobes": [int(label) for label in pc1_excluded_lobes],
+            "pc1_retained_object_in_front_lobes": [
+                int(label) for label in pc1_retained_front_lobes
+            ],
             "robot_veto_labels": [
                 int(label) for label in ids if signatures[label]["robot_veto"]
             ],
@@ -4112,7 +4164,9 @@ def main() -> int:
         )
     )
     try:
-        planner.open(required_frames={"body_base", "left_hand_transfer_end"})
+        planner.open(required_frames={
+            "body_base", "left_hand_transfer_end", "left_eef",
+        })
         from parm_sdk import Gripper
 
         # Module 1 已在同姿态 pregrasp 完成单件/多件重量判断。之后不同
@@ -4368,6 +4422,14 @@ def main() -> int:
             raise RuntimeError("规划器没有返回 left_hand_transfer_end TF")
         T_body_tool = _planner_matrix(tool_response)
         T_tool_object = np.linalg.inv(T_body_tool) @ T_body_object
+        eef_response = planner.lookup_transform("body_base", "left_eef")
+        if eef_response is None:
+            raise RuntimeError("规划器没有返回 left_eef TF")
+        # Keep this TCP snapshot paired with the ICP result.  Module 3 uses
+        # the rigid object orientation in left_eef, while T_tool_object stays
+        # the transfer-end relation used for Cartesian placement planning.
+        T_body_left_eef = _planner_matrix(eef_response)
+        T_left_eef_object = np.linalg.inv(T_body_left_eef) @ T_body_object
         triangles = load_object_triangles(cfg)
         cad_for_visualization = sample_surface_points(
             triangles, min(int(cfg["cad_sample_points"]), 12000), int(cfg["seed"])
@@ -4469,6 +4531,8 @@ def main() -> int:
             "T_camera_object": T_camera_object.tolist(),
             "T_body_base_object": T_body_object.tolist(),
             "T_tool_object": T_tool_object.tolist(),
+            "T_body_left_eef_at_inspect": T_body_left_eef.tolist(),
+            "T_left_eef_object": T_left_eef_object.tolist(),
             "pose_visualizations": {
                 "overlay": str(pose_visualization),
                 "camera": str(camera_visualization),

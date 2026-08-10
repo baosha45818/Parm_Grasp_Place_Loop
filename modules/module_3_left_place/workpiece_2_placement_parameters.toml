@@ -3,6 +3,7 @@
 # roll、pitch、yaw 均定义在工件局部坐标系，列表顺序即候选优先级。
 
 [shared]
+# 键名为兼容历史配置保留；其数值现在是工件 +Z 相对 left_eef -X/+X 的选择阈值。
 body_base_z_face_selection_max_angle_deg = 40.0
 allowed_handoff_weight_classes = ["SINGLE", "MULTIPLE"]
 use_multiple_holding_min_g = true
@@ -30,7 +31,7 @@ target_z_candidates_m = [-0.335]
 release_z_candidates_m = []
 
 # 基准姿态先绕工件局部 X 翻转 180 度。
-# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 3 个 roll × 5 个 pitch × 5 个 yaw = 75。
+# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 4 个 roll × 5 个 pitch × 5 个 yaw = 100。
 yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0]
 roll_candidates_deg = [0,-10.0,-20.0,10.0]
 pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]

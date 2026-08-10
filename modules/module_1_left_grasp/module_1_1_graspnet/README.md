@@ -1,23 +1,21 @@
-# 模块 1-1：左臂 GraspNet 抓取
+# 模块 1-1：历史 GraspNet 兼容入口
 
-本目录是模块化 Loop 的 **生产入口层**。真实 GraspNet 实现、常驻服务和
-模型资源统一位于 `third_party/graspnet`；本目录不保存另一份生产实现。
+当前总控的生产抓取算法是传统 `SAM -> STL -> ICP`，入口为
+`module_1_3_icp_grasp/run_grasp_to_inspect_place.sh`。本目录保留仅为兼容旧命令：
+`run_grasp_to_inspect_place.sh` 会直接转发到该传统 ICP 入口，且不会再调用
+GraspNet。
 
-## 生产调用链
+当前调用链：
 
 ```text
 modules/modular_dual_arm_loop.py
-  -> tests/loop/simple_dual_arm_loop.py（并发调度器）
-  -> modules/module_1_left_grasp/module_1_1_graspnet/
+  -> modules/module_1_left_grasp/module_1_3_icp_grasp/
      run_grasp_to_inspect_place.sh
-  -> third_party/graspnet/deploy/version7/run_grasp_to_module2.sh
-  -> third_party/graspnet/deploy/version7/run_grasp_v7.sh
-  -> third_party/graspnet/deploy/version7/run_persistent_graspnet.py
+  -> 传统 ICP 抓取、重量/夹爪验证、icp_weight_handoff.json
   -> modules/module_2_left_inspect_apart/run_inspect_then_place.py
 ```
 
-`run_grasp_to_inspect_place.sh` 是唯一的模块化生产入口。它只转发到经过实机
-验证的 Version7，不会调用本目录下的 Version9。
+下方 Version7 内容仅是历史 GraspNet 资料；它不描述当前总控运行路径。
 
 ## 当前生产配置
 

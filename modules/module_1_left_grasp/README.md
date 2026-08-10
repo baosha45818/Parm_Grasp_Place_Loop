@@ -8,7 +8,8 @@
 
 ## 子模块
 
-- `module_1_1_graspnet`：GraspNet 抓取实现契约。
+- `module_1_1_graspnet`：历史兼容入口；当前会转发至 `module_1_3_icp_grasp`。
+- `module_1_3_icp_grasp`：当前总控使用的传统 SAM/STL/ICP 抓取实现。
 - `module_1_2_dp_grasp`：仅保留空模块位置，当前调用会抛 `NotImplementedError`。
 
 ## 输入

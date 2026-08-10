@@ -15,6 +15,7 @@ from modules.module_3_left_place.standalone_left_place import (
     GRASPUP_ABOVE_PLANNING_TIMEOUT_S,
     parse_args as parse_left_place_args,
     resolve_place_profile,
+    select_face_candidate_order,
 )
 from modules.module_3_left_place.placement_config import load_workpiece_parameters
 from modules.stage_result import (
@@ -38,11 +39,14 @@ class ApartModuleContractTest(unittest.TestCase):
                 "outcome": "success",
                 "T_body_base_object": [[1, 0, 0, 0]] * 4,
                 "T_tool_object": [[1, 0, 0, 0]] * 4,
+                "T_body_left_eef_at_inspect": [[1, 0, 0, 0]] * 4,
+                "T_left_eef_object": [[1, 0, 0, 0]] * 4,
             }
             write_stage_result(path, payload)
             loaded = read_stage_result(path, expected_stage="left_inspect")
             validate_inspection_success(loaded)
             self.assertIn("T_body_base_object", loaded)
+            self.assertIn("T_left_eef_object", loaded)
 
     def test_wrong_stage_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -72,6 +76,26 @@ class ApartModuleContractTest(unittest.TestCase):
             self.assertEqual(resolve_place_profile(*arguments).module_id, module_id)
         with self.assertRaises(RuntimeError):
             resolve_place_profile("UNKNOWN", "BRANCH_1_FRONT")
+
+    def test_face_candidate_order_uses_object_plus_z_vs_left_eef_x(self) -> None:
+        front, order, minus_x_angle, plus_x_angle = select_face_candidate_order(
+            [-1.0, 0.0, 0.0], threshold_deg=40.0, workpiece="1",
+        )
+        self.assertEqual((front, order), ("front_then_reversed", "front_then_reversed"))
+        self.assertAlmostEqual(minus_x_angle, 0.0)
+        self.assertAlmostEqual(plus_x_angle, 180.0)
+
+        reversed_mode, order, minus_x_angle, plus_x_angle = select_face_candidate_order(
+            [1.0, 0.0, 0.0], threshold_deg=40.0, workpiece="1",
+        )
+        self.assertEqual((reversed_mode, order), ("reversed_then_front", "reversed_then_front"))
+        self.assertAlmostEqual(minus_x_angle, 180.0)
+        self.assertAlmostEqual(plus_x_angle, 0.0)
+
+        alternating, order, _, _ = select_face_candidate_order(
+            [0.0, 1.0, 0.0], threshold_deg=40.0, workpiece="1",
+        )
+        self.assertEqual((alternating, order), ("alternating", "reversed_only"))
 
     def test_original_candidate_cli_aliases_are_supported(self) -> None:
         argv = [

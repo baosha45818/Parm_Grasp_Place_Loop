@@ -47,7 +47,12 @@ def read_stage_result(path: Path, *, expected_stage: str) -> dict[str, Any]:
 def validate_inspection_success(payload: dict[str, Any]) -> None:
     if payload.get("outcome") != "success":
         raise RuntimeError(f"Inspect 未成功，不能进入 Left Place: {payload}")
-    for name in ("T_body_base_object", "T_tool_object"):
+    for name in (
+        "T_body_base_object",
+        "T_tool_object",
+        "T_body_left_eef_at_inspect",
+        "T_left_eef_object",
+    ):
         matrix = payload.get(name)
         if (
             not isinstance(matrix, list)

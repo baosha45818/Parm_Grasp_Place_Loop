@@ -43,9 +43,7 @@ sys.path.insert(0, project_root_string)
 from move_by_eef_pose import compose_pose, inverse_pose, pose_from_lookup_transform
 from move_by_joints import current_pose, finite, import_sdk, move_l, rotvec_to_quat, rotvec_to_rpy, rpy_to_rotvec
 from grasp_motion_support import (
-    can_plan_target as pilz_can_plan_target,
     ensure_ready,
-    plan_and_follow as pilz_plan_and_follow,
     set_gripper_state,
 )
 from planning_log import append_event, planner_start_pose, planning_event
@@ -107,11 +105,6 @@ def normalize_deg(value: float) -> float:
     return value % 360.0
 
 
-def shortest_angle_delta_deg(start_deg: float, end_deg: float) -> float:
-    """Signed base-Z turn from start to end in [-180, 180)."""
-    return (end_deg - start_deg + 180.0) % 360.0 - 180.0
-
-
 def signed_offsets(limit_deg: float, step_deg: float) -> list[float]:
     values = [0.0]
     for index in range(1, int(math.floor(limit_deg / step_deg + 1e-9)) + 1):
@@ -120,12 +113,6 @@ def signed_offsets(limit_deg: float, step_deg: float) -> list[float]:
     if limit_deg > sampled_limit + 1e-9:
         values.extend((limit_deg, -limit_deg))
     return values
-
-
-def prioritise_q1_yaws(yaws_deg: list[float], preferred_yaw_deg: float) -> list[float]:
-    """Try the configured preferred Q1 yaw, then expand outwards."""
-    unique_yaws = list(dict.fromkeys(normalize_deg(value) for value in yaws_deg))
-    return sorted(unique_yaws, key=lambda value: (abs(value - preferred_yaw_deg), value))
 
 
 def finite_matrix4(value: object, name: str) -> list[list[float]]:
@@ -413,29 +400,35 @@ def nominal_tcp_orientation(
     ]))
 
 
-def attitude_candidates(
+def attitude_candidate_pairs(
     workpiece_x_base: list[float], workpiece_y_base: list[float], workpiece_z_base: list[float], *,
     roll_candidates_deg: list[float], pitch_candidates_deg: list[float],
     yaw_candidates_deg: list[float],
-) -> list[tuple[list[float], int]]:
-    """Return configured local-TCP RPY candidates around both symmetric poses.
+) -> list[tuple[tuple[float, float, float], list[tuple[list[float], int]]]]:
+    """Return paired +/-Y TCP orientations for every local RPY offset.
 
     The semantic axes are full 3-D directions. Tool +Y may be either +Y or
     -Y of the workpiece because the two jaws are symmetric. The nominal TCP
     axes are +X=-workpiece Z, +Y=±workpiece Y, and +Z=±workpiece X.
     The TOML roll, pitch and yaw offsets are right-multiplied onto that nominal
     orientation, so they are rotations about the TCP's own local X/Y/Z axes.
-    Their list order is the planning priority: sign, roll, pitch, then yaw.
+    Each pair has the same local roll/pitch/yaw offset and contains the two
+    symmetric jaw directions.  The caller must plan both members of a pair
+    and choose the one whose returned joint trajectory has less total motion.
+    The pair priority is roll, then pitch, then yaw.
     """
-    candidates: list[tuple[list[float], int]] = []
+    nominals: list[tuple[list[float], int]] = []
     for sign in (1, -1):
         try:
-            nominal = nominal_tcp_orientation(workpiece_y_base, workpiece_z_base, sign)
+            nominals.append((nominal_tcp_orientation(workpiece_y_base, workpiece_z_base, sign), sign))
         except ValueError:
             continue
-        for roll_deg, pitch_deg, yaw_deg in product(
-            roll_candidates_deg, pitch_candidates_deg, yaw_candidates_deg,
-        ):
+    candidates: list[tuple[tuple[float, float, float], list[tuple[list[float], int]]]] = []
+    for roll_deg, pitch_deg, yaw_deg in product(
+        roll_candidates_deg, pitch_candidates_deg, yaw_candidates_deg,
+    ):
+        pair: list[tuple[list[float], int]] = []
+        for nominal, sign in nominals:
             local_delta = rpy_to_rotvec([
                 math.radians(roll_deg),
                 math.radians(pitch_deg),
@@ -445,8 +438,10 @@ def attitude_candidates(
                 [0.0, 0.0, 0.0] + nominal,
                 [0.0, 0.0, 0.0] + local_delta,
             )[3:]
-            if all(any(abs(a - b) > 1e-8 for a, b in zip(rotvec, known[0])) for known in candidates):
-                candidates.append((rotvec, sign))
+            if all(any(abs(a - b) > 1e-8 for a, b in zip(rotvec, known[0])) for known in pair):
+                pair.append((rotvec, sign))
+        if pair:
+            candidates.append(((roll_deg, pitch_deg, yaw_deg), pair))
     return candidates
 
 
@@ -615,84 +610,6 @@ def rrtconnect_plan_tcp_trajectory(
     return trajectory, float(frequency)
 
 
-def can_plan_target(
-    planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str,
-    tcp_offset: list[float], target: list[float], target_is_tcp: bool,
-    planner_kind: str, max_vel: float, max_acc: float, timeout_s: float = 5.0,
-) -> tuple[bool, str]:
-    if planner_kind == RRTSTAR_PLANNER_KIND:
-        if not target_is_tcp:
-            return False, "RRTstar 精确目标检查只接受 TCP 目标"
-        try:
-            trajectory, _ = preplan_tcp_trajectory(
-                planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-                tcp_offset=tcp_offset, target_tcp=target, planner_kind=RRTSTAR_PLANNER_KIND,
-                max_vel=max_vel, max_acc=max_acc, timeout_s=timeout_s,
-                stage="reorient RRTstar exact feasibility check",
-            )
-        except Exception as exc:
-            return False, f"RRTstar 精确目标: {exc}"
-        return True, f"RRTstar 精确目标，{len(trajectory)} 个关节路点"
-    if planner_kind != RRTCONNECT_PLANNER_KIND:
-        return pilz_can_plan_target(
-            planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-            tcp_offset=tcp_offset, target=target, target_is_tcp=target_is_tcp,
-            planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, timeout_s=timeout_s,
-        )
-    try:
-        trajectory, _ = rrtconnect_plan_tcp_trajectory(
-            planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-            tcp_offset=tcp_offset, target=target, target_is_tcp=target_is_tcp,
-            max_vel=max_vel, max_acc=max_acc, timeout_s=timeout_s,
-            stage="reorient feasibility check",
-        )
-    except Exception as exc:
-        return False, f"RRTConnect: {exc}"
-    return True, f"RRTConnect {len(trajectory)} 个关节路点"
-
-
-def plan_and_follow(
-    arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str,
-    tcp_offset: list[float], target: list[float], target_is_tcp: bool, planner_kind: str,
-    max_vel: float, max_acc: float, retries: int, stage: str, execution_speed_scale: float,
-) -> None:
-    if planner_kind == RRTSTAR_PLANNER_KIND:
-        if not target_is_tcp:
-            raise RuntimeError(f"{stage} RRTstar 精确规划只接受 TCP 目标")
-        print(f"{stage} RRTstar 精确 TCP target [xyz(m), rotvec(rad)]: "
-              f"{[round(value, 6) for value in target]}")
-        try:
-            trajectory, frequency = preplan_tcp_trajectory(
-                planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-                tcp_offset=tcp_offset, target_tcp=target, planner_kind=RRTSTAR_PLANNER_KIND,
-                max_vel=max_vel, max_acc=max_acc, timeout_s=RRTCONNECT_TIMEOUT_S,
-                stage=stage,
-            )
-            arm.follow_trajectory(arm_id=arm_id, trajectory=trajectory,
-                                  sample_frequency=frequency * execution_speed_scale)
-        except Exception as exc:
-            raise RuntimeError(f"{stage} RRTstar 精确规划或执行失败: {exc}") from exc
-        return
-    if planner_kind != RRTCONNECT_PLANNER_KIND:
-        return pilz_plan_and_follow(
-            arm, planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-            tcp_offset=tcp_offset, target=target, target_is_tcp=target_is_tcp,
-            planner_kind=planner_kind, max_vel=max_vel, max_acc=max_acc, retries=retries, stage=stage,
-        )
-    print(f"{stage} RRTConnect TCP target [xyz(m), rotvec(rad)]: {[round(value, 6) for value in target]}")
-    try:
-        trajectory, frequency = rrtconnect_plan_tcp_trajectory(
-            planner, arm_id=arm_id, group=group, frame_id=frame_id, ik_frame=ik_frame,
-            tcp_offset=tcp_offset, target=target, target_is_tcp=target_is_tcp,
-            max_vel=max_vel, max_acc=max_acc, timeout_s=RRTCONNECT_TIMEOUT_S,
-            stage=stage,
-        )
-        arm.follow_trajectory(arm_id=arm_id, trajectory=trajectory,
-                              sample_frequency=frequency * execution_speed_scale)
-    except Exception as exc:
-        raise RuntimeError(f"{stage} RRTConnect 规划或执行失败: {exc}") from exc
-
-
 def preplan_tcp_trajectory(
     planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str,
     tcp_offset: list[float], target_tcp: list[float], planner_kind: str,
@@ -747,6 +664,28 @@ def preplan_tcp_trajectory(
     return trajectory, float(frequency)
 
 
+def joint_trajectory_travel_deg(trajectory: list) -> float:
+    """Return total absolute joint travel of a degree-valued planner trajectory.
+
+    This is deliberately the sum of every joint's absolute change over every
+    consecutive waypoint, rather than only an endpoint difference: detours in
+    an RRT trajectory count as real arm movement too.
+    """
+    if not isinstance(trajectory, list) or not trajectory:
+        raise ValueError("规划轨迹为空，无法比较运动量")
+    points: list[list[float]] = []
+    for index, point in enumerate(trajectory):
+        if (not isinstance(point, (list, tuple)) or len(point) != 7
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in point)):
+            raise ValueError(f"规划轨迹第 {index} 个关节路点无效")
+        points.append([float(value) for value in point])
+    return sum(
+        abs(next_point[joint] - point[joint])
+        for point, next_point in zip(points, points[1:])
+        for joint in range(7)
+    )
+
+
 def rrtconnect_plan_tcp_batch(
     sdk: object, *, planner_host: str, arm_id: int, group: str, frame_id: str,
     ik_frame: str, tcp_offset: list[float], jobs: list[tuple[int, list[float], float, list[float]]],
@@ -799,22 +738,19 @@ CONFIGURABLE_OPTIONS = frozenset({
     "--servo-hz", "--servo-position-tolerance-m",
     "--servo-orientation-tolerance-rad", "--servo-settle-timeout-s",
     "--place-tcp-extra-clearance-m", "--lift-height-m", "--post-release-lift-height-m",
-    "--planning-timeout-s", "--q1-yaw-min-deg", "--q1-yaw-max-deg",
-    "--q1-yaw-search-step-deg", "--q1-preferred-yaw-deg",
+    "--planning-timeout-s",
     "--turn-attitude-search-step-deg",
-    "--turn-relocation-step-m", "--post-grasp-turn-search-negative-base-x-m",
-    "--post-grasp-turn-search-negative-base-y-m", "--turn-station-tcp-height-m",
     "--turn-search-grid-step-m", "--turn-positive-x-min-m",
     "--turn-positive-x-max-m", "--rrt-place-parallelism",
-    "--rrt-turn-parallelism", "--planner", "--turn-planner",
-    "--max-vel", "--max-acc", "--start-sync-retries",
+    "--rrt-turn-parallelism", "--planner",
+    "--max-vel", "--max-acc",
     "--gripper-timeout-s", "--gripper-position-tolerance",
     "--grasp-minimum-close-travel", "--grasp-contact-settle-s",
     "--trajectory-execution-speed-scale",
-    "--rrtstar-goal-tolerance", "--lift-rrtstar-goal-tolerance",
-    "--pregrasp-rrtstar-goal-tolerance", "--turn-rrtstar-goal-tolerance",
+    "--lift-rrtstar-goal-tolerance", "--pregrasp-rrtstar-goal-tolerance",
+    "--turn-rrtstar-goal-tolerance",
     "--grasp-rrtstar-goal-tolerance",
-    "--place-rrtstar-goal-tolerance", "--place-fallback-rrtstar-goal-tolerance",
+    "--place-rrtstar-goal-tolerance",
     "--release-rrtstar-goal-tolerance",
 })
 def load_reorient_config(path: Path) -> dict[str, object]:
@@ -993,7 +929,11 @@ def apply_reorient_config(parser: argparse.ArgumentParser, args: argparse.Namesp
             continue
         action = by_option[option]
         try:
-            if action.nargs in ("+", "*") or isinstance(action.nargs, int):
+            if isinstance(action, argparse.BooleanOptionalAction):
+                if not isinstance(raw_value, bool):
+                    raise ValueError("必须是 true 或 false")
+                value = raw_value
+            elif action.nargs in ("+", "*") or isinstance(action.nargs, int):
                 if not isinstance(raw_value, list) or not raw_value:
                     raise ValueError("必须是非空数组")
                 if isinstance(action.nargs, int) and len(raw_value) != action.nargs:
@@ -1220,134 +1160,6 @@ def append_turn_planning_records(
     return history_path
 
 
-def execute_workpiece_1_legacy_turn(
-    *, args: argparse.Namespace, sdk: object, arm: object, planner: object,
-    group: str, ik_frame: str, tcp_offset: list[float], lifted_tcp: list[float],
-    chosen_rpy: list[float], red_yaw_deg: float, grasp_z: float,
-) -> tuple[list[float], float]:
-    """Run Workpiece 1's original post-lift relocation and Q1 turn search."""
-    requested_xy = [
-        args.post_grasp_turn_search_negative_base_x_m,
-        args.post_grasp_turn_search_negative_base_y_m,
-    ]
-    requested_distance = math.hypot(*requested_xy)
-    relocation_distances: list[float] = []
-    if requested_distance > 1e-9:
-        distance = requested_distance
-        while distance > 1e-9:
-            relocation_distances.append(distance)
-            distance -= args.turn_relocation_step_m
-    selected_relocation: tuple[list, float] | None = None
-    failures: list[str] = []
-    print(
-        "阶段 4b：从实际抬起 TCP 沿 body_base -X/-Y 尽量后撤到翻转搜索原点；"
-        f"最大偏移=−{requested_xy[0] * 1000.0:.1f}/−{requested_xy[1] * 1000.0:.1f} mm，"
-        f"降级步长={args.turn_relocation_step_m * 1000.0:.1f} mm。"
-    )
-    for distance in relocation_distances:
-        scale = distance / requested_distance
-        target = [
-            lifted_tcp[0] - scale * requested_xy[0],
-            lifted_tcp[1] - scale * requested_xy[1], lifted_tcp[2], *lifted_tcp[3:],
-        ]
-        try:
-            trajectory, frequency = preplan_tcp_trajectory(
-                planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                ik_frame=ik_frame, tcp_offset=tcp_offset, target_tcp=target,
-                planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc,
-                timeout_s=args.planning_timeout_s,
-                stage="阶段 4b：抬起后后撤到翻转搜索原点",
-            )
-        except Exception as exc:
-            failures.append(f"{distance * 1000.0:.1f} mm: {exc}")
-            continue
-        selected_relocation = (trajectory, frequency)
-        print(f"阶段 4b：可规划；采用后撤 {distance * 1000.0:.1f} mm。")
-        break
-    if selected_relocation is not None:
-        try:
-            arm.follow_trajectory(
-                arm_id=args.arm_id, trajectory=selected_relocation[0], sample_frequency=selected_relocation[1],
-            )
-        except Exception as exc:
-            raise RuntimeError(f"阶段 4b 后撤轨迹执行失败: {exc}") from exc
-    elif relocation_distances:
-        print("阶段 4b：所有后撤候选均不可规划；保持抬起后的当前位置，直接进入翻转搜索。"
-              + (f" 最近失败：{failures[-1]}" if failures else ""))
-
-    actual_ik = pose_from_lookup_transform(planner.lookup_transform(args.frame_id, ik_frame).get("data"))
-    origin_tcp = compose_pose(actual_ik, tcp_offset)
-    origin_xy = origin_tcp[:2].copy()
-    turn_z = grasp_z + args.turn_station_tcp_height_m
-
-    place_x_offsets = args.turn_candidates["place_x_offset_candidates_m"]
-    place_y_offsets = args.turn_candidates["place_y_offset_candidates_m"]
-    assert isinstance(place_x_offsets, list) and isinstance(place_y_offsets, list)
-    stations = [
-        [origin_xy[0] + x_offset, origin_xy[1] + y_offset]
-        for y_offset in place_y_offsets for x_offset in place_x_offsets
-    ]
-    q1_count = int(math.floor((args.q1_yaw_max_deg - args.q1_yaw_min_deg) / args.q1_yaw_search_step_deg + 1e-9))
-    q1_yaws = [args.q1_yaw_min_deg + index * args.q1_yaw_search_step_deg for index in range(q1_count + 1)]
-    if q1_yaws[-1] < args.q1_yaw_max_deg - 1e-9:
-        q1_yaws.append(args.q1_yaw_max_deg)
-    q1_yaws = prioritise_q1_yaws(q1_yaws + [args.q1_preferred_yaw_deg], args.q1_preferred_yaw_deg)
-    attitude_offsets = [(0.0, 0.0)]
-    attitude_offsets.sort(key=lambda item: (max(abs(item[0]), abs(item[1])), abs(item[0]) + abs(item[1]), abs(item[0]), abs(item[1]), item[0], item[1]))
-    jobs: list[tuple[int, list[float], float, list[float]]] = []
-    rpy_by_priority: dict[int, list[float]] = {}
-    priority = 0
-    for yaw in q1_yaws:
-        delta = shortest_angle_delta_deg(red_yaw_deg, yaw)
-        for roll, pitch in attitude_offsets:
-            rpy = [chosen_rpy[0] + math.radians(roll), chosen_rpy[1] + math.radians(pitch), chosen_rpy[2] + math.radians(delta)]
-            for station in stations:
-                jobs.append((priority, station, yaw, station + [turn_z] + rpy_to_rotvec(rpy)))
-                rpy_by_priority[priority] = rpy
-                priority += 1
-    failures = []
-    selected: tuple[list[float], float, list, float] | None = None
-    for batch_start in range(0, len(jobs), args.rrt_turn_parallelism):
-        batch = jobs[batch_start:batch_start + args.rrt_turn_parallelism]
-        if args.turn_planner == RRTCONNECT_PLANNER_KIND:
-            results = rrtconnect_plan_tcp_batch(
-                sdk, planner_host=args.planner_host, arm_id=args.arm_id, group=group,
-                frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, jobs=batch,
-                max_vel=args.max_vel, max_acc=args.max_acc, timeout_s=args.planning_timeout_s,
-                parallelism=args.rrt_turn_parallelism,
-            )
-            for job_priority, _station, yaw, trajectory, frequency, failure in results:
-                if failure is None:
-                    selected = (rpy_by_priority[job_priority], yaw, trajectory, frequency)
-                    break
-                failures.append(str(failure))
-        else:
-            for job_priority, _station, yaw, target in batch:
-                try:
-                    trajectory, frequency = preplan_tcp_trajectory(
-                        planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                        ik_frame=ik_frame, tcp_offset=tcp_offset, target_tcp=target,
-                        planner_kind=args.turn_planner, max_vel=args.max_vel, max_acc=args.max_acc,
-                        timeout_s=args.planning_timeout_s,
-                    )
-                except Exception as exc:
-                    failures.append(str(exc))
-                    continue
-                selected = (rpy_by_priority[job_priority], yaw, trajectory, frequency)
-                break
-        if selected is not None:
-            break
-    if selected is None:
-        raise RuntimeError("翻转区没有可规划的 Q1 朝向；" + "；".join(failures[-12:]))
-    reoriented_rpy, selected_yaw, trajectory, frequency = selected
-    print(f"阶段 5/6：执行原工件1整体后撤+转向轨迹，Q1 yaw={selected_yaw:.2f}°，{len(trajectory)} 个关节路点。")
-    try:
-        arm.follow_trajectory(arm_id=args.arm_id, trajectory=trajectory, sample_frequency=frequency)
-    except Exception as exc:
-        raise RuntimeError(f"整体后撤+转向轨迹执行失败（不会改为分段重规划）: {exc}") from exc
-    return reoriented_rpy, selected_yaw
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workpiece", type=int, choices=(1, 2), required=True,
@@ -1378,12 +1190,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--pregrasp-position-tolerance-m", nargs=3, type=float,
                         default=(0.0, 0.0, 0.0), metavar=("X", "Y", "Z"),
                         help="到达预抓取点后，沿实际 TCP 局部 X/Y/Z 的固定平移（m）")
-    parser.add_argument("--tcp-x-negative-workpiece-z-tolerance-deg", type=float, default=45.0,
-                        help="TCP +X 与工件 -Z 的最大夹角")
-    parser.add_argument("--tcp-y-parallel-workpiece-y-tolerance-deg", type=float, default=45.0,
-                        help="TCP +Y 与工件 ±Y 的最大夹角")
-    parser.add_argument("--tcp-z-parallel-workpiece-x-tolerance-deg", type=float, default=45.0,
-                        help="TCP +Z 与工件 ±X 的最大夹角")
     parser.add_argument("--servo-linear-speed-mps", type=float, default=0.05)
     parser.add_argument("--servo-angular-speed-radps", type=float, default=0.30)
     parser.add_argument("--servo-max-linear-accel-mps2", type=float, default=0.10)
@@ -1392,31 +1198,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--servo-position-tolerance-m", type=float, default=0.0005)
     parser.add_argument("--servo-orientation-tolerance-rad", type=float, default=0.035)
     parser.add_argument("--servo-settle-timeout-s", type=float, default=8.0)
-    parser.add_argument("--place-tcp-extra-clearance-m", type=float, default=0.005)
+    parser.add_argument(
+        "--place-tcp-extra-clearance-m", type=float, nargs="+", default=(0.005,),
+        help="松爪时 TCP 相对抓取高度的安全余量候选（m），按给定顺序依次规划",
+    )
     parser.add_argument("--lift-height-m", nargs="+", type=float, default=(0.080,),
                         help="闭爪后 RRTstar 抬起高度候选（m），按给定顺序依次尝试")
     parser.add_argument("--post-release-lift-height-m", type=float, nargs="+", default=(0.020,),
                         help="松爪后 TCP 沿 body_base +Z 直线抬起的距离（m）")
     parser.add_argument("--planning-timeout-s", type=float, default=5.0)
-    parser.add_argument("--q1-yaw-min-deg", type=float, default=15.0)
-    parser.add_argument("--q1-yaw-max-deg", type=float, default=75.0)
-    parser.add_argument("--q1-yaw-search-step-deg", type=float, default=2.5)
-    parser.add_argument("--q1-preferred-yaw-deg", type=float, default=35.0)
-    parser.add_argument("--turn-roll-tolerance-deg", type=float, default=0.0)
-    parser.add_argument("--turn-pitch-tolerance-deg", type=float, default=0.0)
     parser.add_argument("--turn-attitude-search-step-deg", type=float, default=5.0)
-    parser.add_argument("--turn-relocation-step-m", type=float, default=0.040)
-    parser.add_argument("--post-grasp-turn-search-negative-base-x-m", type=float, default=0.030)
-    parser.add_argument("--post-grasp-turn-search-negative-base-y-m", type=float, default=0.200)
-    parser.add_argument("--turn-station-tcp-height-m", type=float, default=0.160)
     parser.add_argument("--turn-search-grid-step-m", type=float, default=0.050)
     parser.add_argument("--turn-positive-x-min-m", type=float, default=0.0)
     parser.add_argument("--turn-positive-x-max-m", type=float, default=0.200)
     parser.add_argument("--rrt-place-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--rrt-turn-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--planner", choices=("lin", "ptp", RRTCONNECT_PLANNER_KIND, RRTSTAR_PLANNER_KIND),
-                        default=RRTCONNECT_PLANNER_KIND)
-    parser.add_argument("--turn-planner", choices=("lin", "ptp", RRTCONNECT_PLANNER_KIND),
                         default=RRTCONNECT_PLANNER_KIND)
     parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
@@ -1426,16 +1223,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-acc", type=float, default=0.08)
     parser.add_argument("--trajectory-execution-speed-scale", type=float, default=2.0,
                         help="已规划轨迹执行采样频率倍率；2 表示以原轨迹两倍速度执行")
-    parser.add_argument("--rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=False,
-                        help="统一控制 Module 7 所有 RRTstar 请求是否传 rrtstar_goal_tolerance")
     parser.add_argument("--pregrasp-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--grasp-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--turn-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--lift-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--place-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--place-fallback-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--release-rrtstar-goal-tolerance", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--start-sync-retries", type=int, default=3)
     parser.add_argument("--gripper-timeout-s", type=float, default=5.0)
     parser.add_argument("--gripper-position-tolerance", type=float, default=5.0)
     parser.add_argument("--grasp-minimum-close-travel", type=float, default=5.0)
@@ -1469,10 +1262,9 @@ def main() -> int:
         print(f"错误: 工件位姿文件不存在: {args.workpiece_pose_file}", file=sys.stderr)
         return 1
     positive = (*args.pregrasp_positive_workpiece_z_m, *args.lift_height_m,
-                args.turn_search_grid_step_m,
-                args.turn_relocation_step_m)
+                args.turn_search_grid_step_m)
     if (any(value <= 0.0 for value in positive)
-            or args.place_tcp_extra_clearance_m < 0.0):
+            or any(value < 0.0 for value in args.place_tcp_extra_clearance_m)):
         print("错误: 高度和步长必须大于 0，放置余量必须非负", file=sys.stderr)
         return 1
     if not (
@@ -1536,13 +1328,6 @@ def main() -> int:
     if (args.turn_positive_x_min_m < 0.0
             or args.turn_positive_x_max_m < args.turn_positive_x_min_m):
         print("错误: 翻转区域距离无效", file=sys.stderr)
-        return 1
-    if abs(args.turn_station_tcp_height_m) > 0.5:
-        print("错误: --turn-station-tcp-height-m 的相对高度偏移不能超过 0.5 m", file=sys.stderr)
-        return 1
-    if (args.post_grasp_turn_search_negative_base_x_m < 0.0
-            or args.post_grasp_turn_search_negative_base_y_m < 0.0):
-        print("错误: 翻转搜索前的 -X/-Y 后撤距离不能小于 0", file=sys.stderr)
         return 1
     try:
         workpiece_transform, red_yaw_deg, quadrant, table_plane_z, workpiece_item, calibration_path = load_workpiece(
@@ -1611,9 +1396,8 @@ def main() -> int:
     vision_grasp_xy = semantic_grasp_points[0][:2].copy()
     grasp_z = final_grasp_xyz[2]
     lift_z = grasp_z + args.lift_height_m[0]
-    turn_station_z = grasp_z + args.turn_station_tcp_height_m
-    if args.place_tcp_extra_clearance_m > min(args.lift_height_m):
-        print("错误: --place-tcp-extra-clearance-m 不能高于任一 --lift-height-m 候选", file=sys.stderr)
+    if max(args.place_tcp_extra_clearance_m) > min(args.lift_height_m):
+        print("错误: 任一 --place-tcp-extra-clearance-m 候选不能高于任一 --lift-height-m 候选", file=sys.stderr)
         return 1
     print(
         f"输入工件朝向=Q{quadrant}；闭爪后将读取 right_hand_transfer_end，"
@@ -1667,15 +1451,14 @@ def main() -> int:
     )
     print(
         f"TCP 高度：构造抓取点 z={grasp_xyz[2]:.6f}，预抓取 z={pregrasp_xyz[2]:.6f}，"
-        f"抓取={grasp_z:.6f}，标准放下={grasp_z + args.place_tcp_extra_clearance_m:.6f}，"
-        f"阶段 4 首选抬起={lift_z:.6f} m（+{args.lift_height_m[0] * 1000.0:.1f} mm）；"
-        f"翻转站={turn_station_z:.6f} m（相对抓取点 {args.turn_station_tcp_height_m * 1000.0:+.1f} mm）"
+        f"抓取={grasp_z:.6f}，松爪 TCP 高度候选="
+        f"{[round(grasp_z + clearance, 6) for clearance in args.place_tcp_extra_clearance_m]}，"
+        f"阶段 4 首选抬起={lift_z:.6f} m（+{args.lift_height_m[0] * 1000.0:.1f} mm）"
     )
-    if args.place_tcp_extra_clearance_m:
-        print(
-            f"放下/松爪将比抓取 TCP 高 {args.place_tcp_extra_clearance_m * 1000.0:.1f} mm，"
-            f"目标 z={grasp_z + args.place_tcp_extra_clearance_m:.6f} m。"
-        )
+    print(
+        "放下/松爪将按配置顺序尝试 TCP 相对抓取高度余量(mm)="
+        f"{[round(clearance * 1000.0, 1) for clearance in args.place_tcp_extra_clearance_m]}。"
+    )
     if not args.execute:
         turn = args.turn_candidates
         pregrasp_total = (
@@ -1716,21 +1499,22 @@ def main() -> int:
         current_tcp = compose_pose(current_ik, tcp_offset)
         current_rpy = rotvec_to_rpy(current_tcp[3:])
         print(f"当前 TCP xyz(m)={[round(v, 6) for v in current_tcp[:3]]}；rpy(deg)={[round(math.degrees(v), 2) for v in current_rpy]}")
-        orientation_candidates = attitude_candidates(
+        orientation_candidate_pairs = attitude_candidate_pairs(
             workpiece_x_base, workpiece_y_base, workpiece_z_base,
             roll_candidates_deg=list(args.turn_candidates["pregrasp_roll_candidates_deg"]),
             pitch_candidates_deg=list(args.turn_candidates["pregrasp_pitch_candidates_deg"]),
             yaw_candidates_deg=list(args.turn_candidates["pregrasp_yaw_candidates_deg"]),
         )
-        if not orientation_candidates:
+        if not orientation_candidate_pairs:
             raise RuntimeError("无法构造 TCP +X=-工件 Z、+Y=±工件 Y 的预抓取姿态")
-        candidates: list[tuple[list[float], list[float], int]] = [
-            (position, orientation, y_sign)
+        candidates: list[tuple[list[float], tuple[float, float, float], list[tuple[list[float], int]]]] = [
+            (position, local_rpy_deg, orientation_pair)
             for position in pregrasp_xyz_candidates
-            for orientation, y_sign in orientation_candidates
+            for local_rpy_deg, orientation_pair in orientation_candidate_pairs
         ]
         print(
-            f"开始按 TOML 列表顺序预规划 {len(candidates)} 个预抓取六维候选；"
+            f"开始按 TOML 列表顺序预规划 {len(candidates)} 组预抓取候选；每组同时比较 TCP +Y=工件 +Y/-Y 的两种对称姿态，"
+            "并选择规划关节轨迹总运动量较小的可达姿态；"
             "预抓取点不再搜索 XYZ 偏差；到达后将沿实际 TCP 局部 X/Y/Z 固定平移(m)="
             f"{list(args.pregrasp_position_tolerance_m)}，"
             "绕 TCP 自身 X/Y/Z 的候选数量="
@@ -1743,52 +1527,82 @@ def main() -> int:
 
         chosen_xyz: list[float] | None = None
         chosen_orientation: list[float] | None = None
+        selected_pregrasp_candidate_index: int | None = None
         chosen_y_sign: int | None = None
+        selected_pregrasp_trajectory: list | None = None
+        selected_pregrasp_frequency: float | None = None
+        selected_pregrasp_joint_travel_deg: float | None = None
         failures: list[str] = []
-        for index, (candidate_xyz, orientation, y_sign) in enumerate(candidates, start=1):
-            rpy = rotvec_to_rpy(orientation)
-            turn_angle_deg = math.degrees(orientation_distance_rad(current_tcp[3:], orientation))
+        for index, (candidate_xyz, local_rpy_deg, orientation_pair) in enumerate(candidates, start=1):
             print(
-                f"预规划候选 {index}/{len(candidates)}：相对当前转动={turn_angle_deg:.2f}°；"
-                f"夹爪方向=工件 {'+' if y_sign > 0 else '-'}Y；"
+                f"预规划候选组 {index}/{len(candidates)}：局部 RPY 偏置(deg)={list(local_rpy_deg)}；"
                 f"xyz(m)={[round(value, 6) for value in candidate_xyz]}；"
-                f"rpy(deg)={[round(math.degrees(v), 2) for v in rpy]}",
+                "分别规划 +Y/-Y 对称夹爪方向。",
                 flush=True,
             )
-            target = candidate_xyz + orientation
-            print("  检查精确六维预抓取目标...", end="", flush=True)
-            feasible, detail = can_plan_target(
-                planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                ik_frame=ik_frame, tcp_offset=tcp_offset, target=target,
-                target_is_tcp=True, planner_kind=args.planner,
-                max_vel=args.max_vel, max_acc=args.max_acc,
-                timeout_s=args.planning_timeout_s,
-            )
-            print("可达" if feasible else f"失败（{detail}）", flush=True)
-            if feasible:
+            planned_pair: list[tuple[float, list[float], int, list, float]] = []
+            pair_errors: list[str] = []
+            for orientation, y_sign in orientation_pair:
+                target = candidate_xyz + orientation
+                try:
+                    trajectory, frequency = preplan_tcp_trajectory(
+                        planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
+                        ik_frame=ik_frame, tcp_offset=tcp_offset, target_tcp=target,
+                        planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc,
+                        timeout_s=args.planning_timeout_s,
+                        rrtstar_goal_tolerance=args.pregrasp_rrtstar_goal_tolerance,
+                        stage=f"阶段 1：预抓取候选组 {index}，工件 {'+' if y_sign > 0 else '-'}Y",
+                    )
+                    travel_deg = joint_trajectory_travel_deg(trajectory)
+                    planned_pair.append((travel_deg, orientation, y_sign, trajectory, frequency))
+                    print(
+                        f"  工件 {'+' if y_sign > 0 else '-'}Y：可达，"
+                        f"关节总运动量={travel_deg:.2f}°。",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}: {exc}"
+                    pair_errors.append(f"工件 {'+' if y_sign > 0 else '-'}Y: {detail}")
+                    print(f"  工件 {'+' if y_sign > 0 else '-'}Y：失败（{detail}）", flush=True)
+            if planned_pair:
+                # Equal scores retain +Y precedence because it was appended first.
+                travel_deg, orientation, y_sign, trajectory, frequency = min(
+                    planned_pair, key=lambda planned: planned[0]
+                )
                 chosen_xyz = candidate_xyz
                 chosen_orientation = orientation
+                selected_pregrasp_candidate_index = index
                 chosen_y_sign = y_sign
-                print(f"候选 {index}/{len(candidates)} 可规划（{detail}）；采用该 TOML 最高优先级可达候选。")
+                selected_pregrasp_trajectory = trajectory
+                selected_pregrasp_frequency = frequency
+                selected_pregrasp_joint_travel_deg = travel_deg
+                print(
+                    f"候选组 {index}/{len(candidates)} 选择工件 {'+' if y_sign > 0 else '-'}Y："
+                    f"两种姿态中关节总运动量最小，为 {travel_deg:.2f}°。",
+                    flush=True,
+                )
                 break
             if len(failures) < 8:
-                failures.append(f"候选 {index}: {detail}")
-        if (chosen_xyz is None or chosen_orientation is None
-                or chosen_y_sign is None):
+                failures.append(f"候选组 {index}: {'；'.join(pair_errors)}")
+        if (chosen_xyz is None or chosen_orientation is None or selected_pregrasp_candidate_index is None
+                or chosen_y_sign is None or selected_pregrasp_trajectory is None
+                or selected_pregrasp_frequency is None or selected_pregrasp_joint_travel_deg is None):
             raise RuntimeError("所有实时预抓取候选都不可规划。前几个失败原因：" + "；".join(failures))
-        print("选择 TOML 列表中最高优先级的可规划候选："
-              f"夹爪方向=工件 {'+' if chosen_y_sign > 0 else '-'}Y。")
+        print("选择 TOML 列表中最高优先级的可规划候选组："
+              f"夹爪方向=工件 {'+' if chosen_y_sign > 0 else '-'}Y，"
+              f"关节总运动量={selected_pregrasp_joint_travel_deg:.2f}°。")
 
         selected_pregrasp_target = chosen_xyz + chosen_orientation
         set_gripper_state(gripper, arm_id=args.arm_id, target_open=True, timeout_s=args.gripper_timeout_s,
                           tolerance=args.gripper_position_tolerance)
-        plan_and_follow(
-            arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-            ik_frame=ik_frame, tcp_offset=tcp_offset, target=selected_pregrasp_target,
-            target_is_tcp=True, planner_kind=args.planner, max_vel=args.max_vel,
-            max_acc=args.max_acc, retries=args.start_sync_retries,
-            stage="阶段 1：RRTstar 精确规划到工件 +Z 预抓取位姿",
-            execution_speed_scale=args.trajectory_execution_speed_scale,
+        print(
+            "阶段 1：执行已比较并选中的预抓取轨迹；"
+            f"夹爪方向=工件 {'+' if chosen_y_sign > 0 else '-'}Y，"
+            f"关节总运动量={selected_pregrasp_joint_travel_deg:.2f}°。"
+        )
+        arm.follow_trajectory(
+            arm_id=args.arm_id, trajectory=selected_pregrasp_trajectory,
+            sample_frequency=selected_pregrasp_frequency * args.trajectory_execution_speed_scale,
         )
         try:
             reached_pregrasp_tcp = require_driver_right_eef_at_target(
@@ -2349,37 +2163,26 @@ def main() -> int:
         selected_place_frequency: float | None = None
         selected_place_z: float | None = None
         place_failures: list[str] = []
-        # Try the desired table-placement height first.  If it is not
-        # reachable, try progressively higher targets so the workpiece is put
-        # down as far as the planner can safely lower it instead of aborting
-        # while still grasping it.
-        # Preserve the configured release-height semantics while changing the
-        # planning semantics to object-centre placement: first map the legacy
-        # nominal TCP release pose to its corresponding held-object pose, then
-        # vary that object-centre height for fallback attempts.
-        nominal_tcp_release = centre_xy + [
-            grasp_z + args.place_tcp_extra_clearance_m, *rpy_to_rotvec(reoriented_rpy)
-        ]
-        nominal_eef_release = compose_pose(nominal_tcp_release, inverse_pose(tcp_offset))
-        nominal_transfer_release = compose_pose(
-            nominal_eef_release, inverse_pose(transfer_from_eef)
-        )
-        nominal_object_release = compose_pose(
-            nominal_transfer_release, transfer_from_object_centre
-        )
-        standard_object_place_z = nominal_object_release[2]
-        place_z_candidates = [standard_object_place_z]
-        fallback_step_m = 0.010
-        # Do not command a fallback lower than the present held object.  The
-        # old TCP-based lift limit is retained as a conservative upper bound.
-        fallback_z = standard_object_place_z + fallback_step_m
-        max_object_place_z = max(lift_z, reoriented_object_centre[2])
-        while fallback_z < max_object_place_z - 1e-9:
-            place_z_candidates.append(fallback_z)
-            fallback_z += fallback_step_m
         priority = 0
-        place_jobs: list[tuple[int, list[float], float, list[float]]] = []
-        for candidate_object_z in place_z_candidates:
+        # Each configured TCP clearance is an explicit release-height
+        # candidate.  Do not synthesize progressively higher fallbacks: if no
+        # configured candidate is plannable, retain the object and fail.
+        place_jobs: list[tuple[int, list[float], float, float, list[float]]] = []
+        for clearance_m in args.place_tcp_extra_clearance_m:
+            # Preserve the legacy TCP-height meaning while planning object
+            # placement: derive the held object's centre pose for this exact
+            # TCP release-height candidate, then map it back to a TCP target.
+            nominal_tcp_release = centre_xy + [
+                grasp_z + clearance_m, *rpy_to_rotvec(reoriented_rpy)
+            ]
+            nominal_eef_release = compose_pose(nominal_tcp_release, inverse_pose(tcp_offset))
+            nominal_transfer_release = compose_pose(
+                nominal_eef_release, inverse_pose(transfer_from_eef)
+            )
+            nominal_object_release = compose_pose(
+                nominal_transfer_release, transfer_from_object_centre
+            )
+            candidate_object_z = nominal_object_release[2]
             for object_place_xy in object_place_candidates:
                 object_target = object_place_xy + [candidate_object_z] + selected_turn_object_centre[3:]
                 transfer_target = compose_pose(
@@ -2387,17 +2190,16 @@ def main() -> int:
                 )
                 eef_target = compose_pose(transfer_target, transfer_from_eef)
                 tcp_target = compose_pose(eef_target, tcp_offset)
-                place_jobs.append((priority, object_place_xy, candidate_object_z, tcp_target))
+                place_jobs.append((priority, object_place_xy, clearance_m, candidate_object_z, tcp_target))
                 priority += 1
         # Placement is intentionally searched serially with Cartesian RRTstar.
         # This is independent of --planner, which continues to govern the
         # pregrasp motion and other non-placement stages.
-        for _, object_place_xy, candidate_object_z, tcp_place_target in place_jobs:
-            height_note = "标准工件下放高度" if abs(candidate_object_z - standard_object_place_z) < 1e-9 else (
-                f"降级工件下放高度，比标准高 {(candidate_object_z - standard_object_place_z) * 1000.0:.1f} mm"
-            )
+        selected_place_clearance_m: float | None = None
+        for _, object_place_xy, clearance_m, candidate_object_z, tcp_place_target in place_jobs:
             print(
-                f"RRTstar 预规划工件下放候选：工件中心 xy={object_place_xy}，{height_note}；"
+                f"RRTstar 预规划工件下放候选：工件中心 xy={object_place_xy}，"
+                f"松爪 TCP 相对抓取高度余量={clearance_m * 1000.0:.1f} mm；"
                 f"反算 TCP xyz={tcp_place_target[:3]}...",
                 flush=True,
             )
@@ -2419,58 +2221,26 @@ def main() -> int:
             selected_place_trajectory = trajectory
             selected_place_frequency = frequency
             selected_place_z = candidate_object_z
+            selected_place_clearance_m = clearance_m
             print(
-                f"选择 RRTstar 可下放工件中心 xy(m)={object_place_xy}，z={candidate_object_z:.6f}；"
+                f"选择 RRTstar 可下放工件中心 xy(m)={object_place_xy}，z={candidate_object_z:.6f}，"
+                f"松爪 TCP 高度余量={clearance_m * 1000.0:.1f} mm；"
                 f"反算 TCP xyz(m)={tcp_place_target[:3]}；"
                 f"已保存 {len(trajectory)} 个关节路点的下放轨迹。"
             )
             break
         if (selected_object_place_xy is None or selected_tcp_place_target is None
                 or selected_place_trajectory is None or selected_place_frequency is None
-                or selected_place_z is None):
-            # All offset candidates failed planning. Keep the fallback
-            # consistent with the placement search:
-            # lower the object centre at the original grasp-point XY, not at
-            # the turn station, using the same closed-grasp inverse mapping.
-            fallback_object_target = centre_xy + [
-                standard_object_place_z, *selected_turn_object_centre[3:]
-            ]
-            fallback_transfer_target = compose_pose(
-                fallback_object_target, inverse_pose(transfer_from_object_centre)
-            )
-            fallback_eef_target = compose_pose(fallback_transfer_target, transfer_from_eef)
-            fallback_tcp_target = compose_pose(fallback_eef_target, tcp_offset)
-            print(
-                f"所有偏移工件下放候选不可用；尝试将工件中心放到初始抓取点 xy={centre_xy} "
-                f"和标准 z={standard_object_place_z:.6f}...",
-                flush=True,
-            )
-            try:
-                trajectory, frequency = preplan_tcp_trajectory(
-                    planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame,
-                    tcp_offset=tcp_offset, target_tcp=fallback_tcp_target, planner_kind=RRTSTAR_PLANNER_KIND,
-                    max_vel=args.max_vel, max_acc=args.max_acc, timeout_s=args.planning_timeout_s,
-                    stage="阶段 6：RRTstar 工件原地兜底下放",
-                    rrtstar_goal_tolerance=args.place_fallback_rrtstar_goal_tolerance,
-                )
-            except Exception as exc:
-                details = "；".join(place_failures[-12:])
-                raise RuntimeError(
-                    f"工件下放操作无法规划，初始抓取点原地下放也失败：{exc}。最后偏移候选失败原因：{details}"
-                ) from exc
-            selected_object_place_xy = centre_xy.copy()
-            selected_tcp_place_target = fallback_tcp_target
-            selected_place_trajectory = trajectory
-            selected_place_frequency = frequency
-            selected_place_z = standard_object_place_z
-            print(
-                f"已选择初始抓取点工件中心下放 xy(m)={selected_object_place_xy}，z={selected_place_z:.6f}；"
-                f"反算 TCP xyz(m)={selected_tcp_place_target[:3]}；"
-                f"已保存 {len(trajectory)} 个关节路点的下放轨迹。"
+                or selected_place_z is None or selected_place_clearance_m is None):
+            details = "；".join(place_failures[-12:])
+            raise RuntimeError(
+                "阶段 6：所有配置的松爪高度余量和 XY 下放候选均不可规划；"
+                f"未执行松爪。最后候选失败原因：{details}"
             )
         print(
             f"阶段 6：执行已保存的下放轨迹，目标工件中心 xy(m)={selected_object_place_xy}，"
             f"z={selected_place_z:.6f}，目标 TCP xyz(m)={selected_tcp_place_target[:3]}，"
+            f"松爪 TCP 高度余量={selected_place_clearance_m * 1000.0:.1f} mm，"
             f"{len(selected_place_trajectory)} 个关节路点。"
         )
         try:
@@ -2491,6 +2261,7 @@ def main() -> int:
             f"候选高度(mm)={[value * 1000.0 for value in args.post_release_lift_height_m]}。"
         )
         release_errors = []
+        selected_release_height: float | None = None
         for height in args.post_release_lift_height_m:
             post_release_lift_target = [released_tcp[0], released_tcp[1], released_tcp[2] + height, *released_tcp[3:]]
             try:
@@ -2502,11 +2273,35 @@ def main() -> int:
                     rrtstar_goal_tolerance=args.release_rrtstar_goal_tolerance)
                 arm.follow_trajectory(arm_id=args.arm_id, trajectory=trajectory,
                                     sample_frequency=frequency * args.trajectory_execution_speed_scale)
+                selected_release_height = height
+                print(f"阶段 7：选中撤离高度候选 {height * 1000.0:.1f} mm。")
                 break
             except Exception as exc:
                 release_errors.append(str(exc))
         else:
             raise RuntimeError("阶段 7：所有松爪后抬起高度候选均失败：" + "；".join(release_errors))
+        selected_turn_detail = turn_details_by_priority[selected_priority]
+        selected_place_offset_xy = [
+            selected_object_place_xy[axis] - centre_xy[axis]
+            for axis in range(2)
+        ]
+        print(
+            "[Module 7 最终候选汇总]\n"
+            f"  1. 预抓取：#{selected_pregrasp_candidate_index}/{len(candidates)}；"
+            f"TCP xyz(m)={[round(value, 6) for value in chosen_xyz]}；"
+            f"TCP rpy(deg)={[round(math.degrees(value), 2) for value in rotvec_to_rpy(chosen_orientation)]}；"
+            f"夹爪方向=工件 {'+' if chosen_y_sign > 0 else '-'}Y。\n"
+            f"  2. 下探抓取：抓取点 #{selected_grasp_index + 1}/{len(final_grasp_xyz_candidates)}；"
+            f"额外工件-Z={selected_extra_descent * 1000.0:+.1f}mm；"
+            f"TCP 局部 RPY(deg)={selected_grasp_local_rpy_offset_deg}。\n"
+            f"  3. 闭抓后抬起：高度={selected_lift_height * 1000.0:.1f}mm。\n"
+            f"  4. 摆正：#{selected_priority + 1}/{len(turn_jobs)}；"
+            f"工件中心偏移 xyz(m)={selected_turn_detail['centre_offset_m']}；"
+            f"工件局部 RPY(deg)={selected_turn_detail['local_rpy_deg']}。\n"
+            f"  5. 安全下放：工件中心偏移 xy(m)={selected_place_offset_xy}；"
+            f"工件中心 xyz(m)={selected_object_place_xy + [selected_place_z]}。\n"
+            f"     松爪后撤离高度={selected_release_height * 1000.0:.1f}mm。"
+        )
         print("工件重定向到 Q1 完成。请重新拍照、分割并生成 pose JSON，再执行后续 Q1 流程。")
         return 0
     except Exception as exc:
