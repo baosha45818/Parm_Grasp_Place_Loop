@@ -6,9 +6,14 @@
   "minimum_score_margin_m": 0.00035,
   "minimum_reverse_icp_fitness": 0.75,
   "minimum_reverse_depth_match_fraction": 0.70,
-  "wide_head_outward_grasp_offset_m": 0.01,
-  "wide_head_inward_grasp_offset_m": 0.010,
+  "grasp_offset_object_x_m": 0.000,
+  "grasp_offset_object_x_definition": "Fixed displacement from the wide-head reference point along the STL/workpiece X axis; 0.0 m means no contact-point object-X displacement. It is independent of the camera viewing direction.",
   "grasp_width_axis_stl": [-0.00040286, -0.99999954, -0.00086799],
-  "grasp_lateral_offset_m": 0.005,
-  "grasp_lateral_offset_axis": "grasp_frame_+Y"
+  "grasp_lateral_offset_m": 0.000,
+  "grasp_lateral_offset_axis": "grasp_frame_+Y",
+  "left_eef_offset_when_grasp_z_image_down_object_x_m": -0.010,
+  "left_eef_offset_when_grasp_z_image_down_object_y_m": -0.010,
+  "left_eef_offset_when_grasp_z_image_up_object_x_m": 0.010,
+  "left_eef_offset_when_grasp_z_image_up_object_y_m": 0.005,
+  "left_eef_offset_rule": "Use the same projected grasp-frame +Z (blue retreat arrow) shown in grasp_overlay.png. Blue arrow down (image y increases; quadrants III/IV) means the physical wide head is inward and shifts the Planner left_eef target -10 mm along workpiece X and -5 mm along workpiece Y. Blue arrow up (image y decreases; quadrants I/II) means outward and shifts it +10 mm along workpiece X and +5 mm along workpiece Y. Both offsets are applied to the Planner left_eef target, not the contact point."
 }

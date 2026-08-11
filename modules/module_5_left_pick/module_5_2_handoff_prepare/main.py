@@ -55,6 +55,8 @@ WORKPIECE_2_AUTO_MASK_CONFIG = (
 WORKPIECE_2_HANDOFF_CONFIG = WORKPIECE_2_CONFIG_DIR / "handoff_config.json"
 WORKPIECE_2_OUTPUT_DIR = ROOT / "output/module_5_2_workpiece_2_head_d435"
 HEAD_MOTION = ROOT / "tool/move_head_gimbal.py"
+NO_GRASP_EXIT_CODE = 20
+LEFT_GRIPPER_HELD_POSITION_MIN_PERCENT = 20.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--driver-host", default="127.0.0.1")
     parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument(
         "--workpiece",
         choices=("1", "2"),
@@ -110,9 +113,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def run(command: list[str]) -> None:
+def run(
+    command: list[str], *, recoverable_return_codes: set[int] | None = None
+) -> int:
     print("\n[module-5-2] " + " ".join(command), flush=True)
-    subprocess.run(command, cwd=ROOT, check=True)
+    completed = subprocess.run(command, cwd=ROOT, check=False)
+    recoverable = recoverable_return_codes or set()
+    if completed.returncode != 0 and completed.returncode not in recoverable:
+        raise subprocess.CalledProcessError(completed.returncode, command)
+    return int(completed.returncode)
 
 
 def cancel_left_arm(arm_host: str) -> None:
@@ -213,7 +222,7 @@ def main() -> int:
         )
 
     # 1. 左手经共用高位准备点到共用观察位。
-    run([
+    observation_exit = run([
         sys.executable,
         "-m",
         "tests.reversed_head_observation.execute_plan",
@@ -223,6 +232,8 @@ def main() -> int:
         args.driver_host,
         "--arm-host",
         args.arm_host,
+        "--gripper-host",
+        args.gripper_host,
         "--speed",
         str(0.05 * args.speed_multiplier),
         "--middle-joints-deg",
@@ -230,8 +241,18 @@ def main() -> int:
         "--observation-joints-deg",
         *(str(value) for value in observation["observation_joints_deg"]),
         "--skip-head",
+        "--verify-left-gripper-held",
+        "--held-position-min-percent",
+        str(LEFT_GRIPPER_HELD_POSITION_MIN_PERCENT),
         *([] if args.require_confirmation else ["--auto-confirm"]),
-    ])
+    ], recoverable_return_codes={NO_GRASP_EXIT_CODE})
+    if observation_exit == NO_GRASP_EXIT_CODE:
+        print(
+            "[module-5-2] 观察位夹爪复检未确认持件；左臂已原路返回，"
+            "通知上层重新执行反抓。",
+            flush=True,
+        )
+        return NO_GRASP_EXIT_CODE
 
     # 2. 反手交接专用流程：云台到标定角度，再运行 D435、SAM2 和 ICP。
     previous = set(output_dir.glob("*/result.json"))
@@ -335,21 +356,31 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     previous = set(output_dir.glob("*/result.json"))
 
     # 工件2复用已验证的左臂头部观察位；该动作不涉及右臂。
-    run([
+    observation_exit = run([
         sys.executable,
         "-m",
         "tests.reversed_head_observation.execute_plan",
         "--planner-host", args.planner_host,
         "--driver-host", args.driver_host,
         "--arm-host", args.arm_host,
+        "--gripper-host", args.gripper_host,
         "--speed", str(0.05 * args.speed_multiplier),
         "--middle-joints-deg",
         *(str(value) for value in observation["prepare_joints_deg"]),
         "--observation-joints-deg",
         *(str(value) for value in observation["observation_joints_deg"]),
         "--skip-head",
+        "--verify-left-gripper-held",
+        "--held-position-min-percent", str(LEFT_GRIPPER_HELD_POSITION_MIN_PERCENT),
         *([] if args.require_confirmation else ["--auto-confirm"]),
-    ])
+    ], recoverable_return_codes={NO_GRASP_EXIT_CODE})
+    if observation_exit == NO_GRASP_EXIT_CODE:
+        print(
+            "[module-5-2/workpiece2] 观察位夹爪复检未确认持件；"
+            "左臂已原路返回，通知上层重新执行反抓。",
+            flush=True,
+        )
+        return NO_GRASP_EXIT_CODE
     run([
         str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.driver_host,
         "--pitch", str(head_pose["pitch"]),

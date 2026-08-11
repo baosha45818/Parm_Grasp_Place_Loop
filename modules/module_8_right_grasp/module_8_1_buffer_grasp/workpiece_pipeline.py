@@ -50,6 +50,7 @@ Q1_MAX_DEG = 75.0
 CAPTURE_READY_TIMEOUT_S = 30.0
 RIGHT_ARM_JOINT_NAMES = [f"right_arm_joint{index}" for index in range(1, 8)]
 SAVED_POSE_PLAN_RETRIES = 3
+Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE = 20
 
 WORKPIECE_CONFIGS = {
     1: {
@@ -556,6 +557,27 @@ def main() -> int:
                     if grasp_status == 0:
                         print("[done] 直接抓取成功，总控结束。")
                         return 0
+
+                    if grasp_status == Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE:
+                        print(
+                            "[decision] 直接抓取 servo 线段未通过无碰撞预检；"
+                            "不闭爪，直接进入 Module 7 调整。"
+                        )
+                        release_gripper(args, "直接抓取预检不可达")
+                        move_to_saved_pose(4, args)
+                        move_to_saved_pose(10, args)
+                        move_to_saved_pose(6, args)
+                        reorient_status = reorient(pose_file, args)
+                        if reorient_status != 0:
+                            print(f"[retry] 调整失败（exit={reorient_status}）；打开夹爪后返回观察位。")
+                            release_gripper(args, "直接抓取预检后的调整失败")
+                        else:
+                            print("[motion] 调整完成；连续抓取失败计数清零。")
+                            consecutive_grasp_failures = 0
+                        print("[motion] 按 6 -> 10 返回；到达 10.json 后拍照，并在 10 -> 4 回程中完成计算。")
+                        move_to_saved_pose(10, args)
+                        observation_at_pose_10 = True
+                        continue
 
                     consecutive_grasp_failures += 1
                     print(

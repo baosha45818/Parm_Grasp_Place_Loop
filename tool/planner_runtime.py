@@ -27,6 +27,7 @@ class PlannerRuntime:
     # placement trajectory and must not make these logs noisy.
     _RECORDED_LOGICAL_MOTIONS = {
         ("left_graspup_top", "left_place_position"),
+        ("left_place_position", "left_graspup_top"),
         ("left_place_position", "left_graspup"),
     }
 
@@ -285,9 +286,18 @@ class PlannerRuntime:
         return self._planner.lookup_transform(source_frame, target_frame)
 
     def move_left_joints(
-        self, joints_deg: list[float], *, planner: str = "rrtstar"
+        self,
+        joints_deg: list[float],
+        *,
+        planner: str = "rrtstar",
+        use_left_eef_collision_box: bool = False,
     ) -> None:
-        self._move_arm_joints("left", joints_deg, planner=planner)
+        self._move_arm_joints(
+            "left",
+            joints_deg,
+            planner=planner,
+            use_left_eef_collision_box=use_left_eef_collision_box,
+        )
 
     def move_right_joints(
         self, joints_deg: list[float], *, planner: str = "rrtstar"
@@ -296,14 +306,29 @@ class PlannerRuntime:
         self._move_arm_joints("right", joints_deg, planner=planner)
 
     def _move_arm_joints(
-        self, arm: str, joints_deg: list[float], *, planner: str = "rrtstar"
+        self,
+        arm: str,
+        joints_deg: list[float],
+        *,
+        planner: str = "rrtstar",
+        use_left_eef_collision_box: bool = False,
     ) -> None:
-        response = self.plan_joint_trajectory(arm, joints_deg, planner=planner)
+        response = self.plan_joint_trajectory(
+            arm,
+            joints_deg,
+            planner=planner,
+            use_left_eef_collision_box=use_left_eef_collision_box,
+        )
         if response is not None:
             self.execute_planned_result(response)
 
     def plan_joint_trajectory(
-        self, arm: str, joints_deg: list[float], *, planner: str = "rrtstar"
+        self,
+        arm: str,
+        joints_deg: list[float],
+        *,
+        planner: str = "rrtstar",
+        use_left_eef_collision_box: bool = False,
     ) -> dict[str, Any] | None:
         """Plan one arm joint-space target without executing it."""
         if arm not in {"left", "right"}:
@@ -316,7 +341,12 @@ class PlannerRuntime:
             print(f"[planner][dry-run] {arm} {planner.upper()} joints(deg)={joints_deg}")
             return None
         group = self.config.left_group if arm == "left" else self.config.right_group
-        target = {"joint_values_deg": [float(value) for value in joints_deg]}
+        if use_left_eef_collision_box and arm != "left":
+            raise ValueError("use_left_eef_collision_box 仅支持左臂请求")
+        target = {
+            "joint_values_deg": [float(value) for value in joints_deg],
+            "use_left_eef_collision_box": bool(use_left_eef_collision_box),
+        }
         start_joints_deg = self._recorded_start_joints(arm)
         try:
             joint_names = [f"{arm}_arm_joint{index}" for index in range(1, 8)]
@@ -326,8 +356,7 @@ class PlannerRuntime:
                 # Send the standard joint waypoint directly so startup recovery
                 # can use that server-side pipeline without weakening SDK checks
                 # for the existing planners.
-                response = self._planner._trajectory.send_payload(
-                    {
+                payload = {
                         "waypoints": [{
                             "name": "runtime_rrtstar_joint_target",
                             "type": "joint",
@@ -342,9 +371,10 @@ class PlannerRuntime:
                             "max_vel_factor": self.config.max_velocity,
                             "max_acc_factor": self.config.max_acceleration,
                         },
-                    },
-                    timeout=30.0,
-                )
+                    }
+                if use_left_eef_collision_box:
+                    payload["use_left_eef_collision_box"] = True
+                response = self._planner._trajectory.send_payload(payload, timeout=30.0)
             else:
                 response = self._planner.plan_joint_trajectory(
                     group=group,
@@ -353,6 +383,7 @@ class PlannerRuntime:
                     joint_values=target["joint_values_deg"],
                     max_vel=self.config.max_velocity,
                     max_acc=self.config.max_acceleration,
+                    use_left_eef_collision_box=use_left_eef_collision_box,
                 )
         except BaseException as exc:
             self._record_plan(
@@ -386,10 +417,20 @@ class PlannerRuntime:
         self.move_cartesian_pose(arm, pose, planner=planner)
 
     def move_cartesian_pose(
-        self, arm: str, pose: ObjectPose, *, planner: str = "rrtstar"
+        self,
+        arm: str,
+        pose: ObjectPose,
+        *,
+        planner: str = "rrtstar",
+        use_left_eef_collision_box: bool = False,
     ) -> None:
         """Plan and execute one explicit Cartesian tool pose in body_base."""
-        response = self.plan_cartesian_pose(arm, pose, planner=planner)
+        response = self.plan_cartesian_pose(
+            arm,
+            pose,
+            planner=planner,
+            use_left_eef_collision_box=use_left_eef_collision_box,
+        )
         if response is not None:
             self.execute_planned_result(response)
 
@@ -401,6 +442,7 @@ class PlannerRuntime:
         planner: str = "rrtstar",
         start_joints_deg: list[float] | None = None,
         rrtstar_goal_tolerance: bool = False,
+        use_left_eef_collision_box: bool = False,
     ) -> dict[str, Any] | None:
         """Plan one explicit Cartesian tool pose without executing it."""
         if planner not in {"lin", "ompl", "rrtstar"}:
@@ -409,6 +451,8 @@ class PlannerRuntime:
             raise ValueError(
                 "rrtstar_goal_tolerance is only valid with planner='rrtstar'"
             )
+        if use_left_eef_collision_box and arm != "left":
+            raise ValueError("use_left_eef_collision_box 仅支持左臂请求")
         self._validate_pose(pose)
         group = self.config.left_group if arm == "left" else self.config.right_group
         tool_frame = (
@@ -425,6 +469,7 @@ class PlannerRuntime:
             "ik_frame": tool_frame,
             "position_m": list(pose.position),
             "orientation_xyzw": list(pose.orientation),
+            "use_left_eef_collision_box": bool(use_left_eef_collision_box),
         }
         recorded_start = self._recorded_start_joints(arm, start_joints_deg)
         try:
@@ -465,6 +510,8 @@ class PlannerRuntime:
                     }
                 if rrtstar_goal_tolerance:
                     payload["rrtstar_goal_tolerance"] = True
+                if use_left_eef_collision_box:
+                    payload["use_left_eef_collision_box"] = True
                 response = self._planner._trajectory.send_payload(payload, timeout=30.0)
             elif planner in {"ompl", "rrtstar"}:
                 payload = {
@@ -489,6 +536,8 @@ class PlannerRuntime:
                     }
                 if rrtstar_goal_tolerance:
                     payload["rrtstar_goal_tolerance"] = True
+                if use_left_eef_collision_box:
+                    payload["use_left_eef_collision_box"] = True
                 response = self._planner._trajectory.send_payload(payload, timeout=30.0)
             else:
                 response = self._planner.plan_cart_trajectory(
@@ -501,6 +550,7 @@ class PlannerRuntime:
                     max_vel=self.config.max_velocity,
                     max_acc=self.config.max_acceleration,
                     rrtstar_goal_tolerance=rrtstar_goal_tolerance,
+                    use_left_eef_collision_box=use_left_eef_collision_box,
                 )
         except BaseException as exc:
             self._record_plan(

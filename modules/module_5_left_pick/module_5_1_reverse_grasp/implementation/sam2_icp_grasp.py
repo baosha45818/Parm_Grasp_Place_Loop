@@ -52,6 +52,16 @@ def transform(T, p):
     return (T[:3, :3] @ np.asarray(p).T).T + T[:3, 3]
 
 
+def project_to_pixel(K, point):
+    point = np.asarray(point, dtype=float)
+    if point.shape != (3,) or point[2] <= 1e-9:
+        raise ValueError(f'Cannot project invalid camera point: {point}')
+    return np.array([
+        K[0, 0] * point[0] / point[2] + K[0, 2],
+        K[1, 1] * point[1] / point[2] + K[1, 2],
+    ])
+
+
 def planar_basis(points, normal):
     q = np.asarray(points) - np.mean(points, axis=0)
     q -= (q @ normal)[:, None] * normal
@@ -98,21 +108,6 @@ def face_initials(cad, observed, table_n, cad_up):
             T = np.eye(4); T[:3, :3] = R; T[:3, 3] = obs_center - R@cad_center
             starts.append((side, T))
     return starts
-
-
-def wide_head_outward_direction(vertices, head_center, long_axis):
-    """Unit STL direction from the wide head centre towards its outside end."""
-    v = np.asarray(vertices, dtype=float); origin = v.mean(axis=0); u = (v-origin) @ long_axis
-    head_u = float((np.asarray(head_center)-origin) @ long_axis)
-    inward = long_axis if abs(head_u-u.min()) < abs(head_u-u.max()) else -long_axis
-    return -inward
-
-
-def wide_head_grasp_point(head_center, outward_direction, outward_m, inward_m, head_towards_camera):
-    """Offset from the wide-head centre, moving inward only when its end faces the camera."""
-    direction = -outward_direction if head_towards_camera else outward_direction
-    distance = inward_m if head_towards_camera else outward_m
-    return np.asarray(head_center, dtype=float) + direction * float(distance)
 
 
 def depth_score(T, cad_render, feature, depth, mask, K, scale):
@@ -170,15 +165,24 @@ def main():
     scene_normal = table_normal(scene_points)
     cad_up = normalize(orientation['positive_face_normal_stl']); feature = (cad_render @ cad_up >= np.percentile(cad_render @ cad_up, 88))
     vertices = tris.reshape(-1,3)
-    raw_head, long_axis, width, _ = widest_head_in_stl(vertices)
+    raw_head, _, width, _ = widest_head_in_stl(vertices)
     if orientation.get('grasp_point_stl_m') is not None:
         raw_head = np.asarray(orientation['grasp_point_stl_m'], dtype=float)
     if orientation.get('grasp_width_axis_stl') is not None:
         width = normalize(np.asarray(orientation['grasp_width_axis_stl'], dtype=float))
-    if orientation.get('grasp_outward_axis_stl') is not None:
-        head_outward_stl = normalize(np.asarray(orientation['grasp_outward_axis_stl'], dtype=float))
-    else:
-        head_outward_stl = wide_head_outward_direction(vertices, raw_head, long_axis)
+    grasp_offset_object_x_m = float(orientation['grasp_offset_object_x_m'])
+    eef_offset_when_grasp_z_image_down_object_x_m = float(
+        orientation['left_eef_offset_when_grasp_z_image_down_object_x_m']
+    )
+    eef_offset_when_grasp_z_image_down_object_y_m = float(
+        orientation['left_eef_offset_when_grasp_z_image_down_object_y_m']
+    )
+    eef_offset_when_grasp_z_image_up_object_x_m = float(
+        orientation['left_eef_offset_when_grasp_z_image_up_object_x_m']
+    )
+    eef_offset_when_grasp_z_image_up_object_y_m = float(
+        orientation['left_eef_offset_when_grasp_z_image_up_object_y_m']
+    )
     records, diagnostics = [], []
     orient = rgb.copy()
     for i, raw_m in enumerate(masks):
@@ -212,25 +216,39 @@ def main():
         ys, xs = np.nonzero(m); cv2.putText(orient, f'{accepted_side} d={margin*1000:.1f}mm', (int(xs.mean()),int(ys.mean())), cv2.FONT_HERSHEY_SIMPLEX, .48, color, 2, cv2.LINE_AA)
         if accepted_side != 'reverse': continue
         T = best[side]['T']; rotation, translation = T[:3,:3], T[:3,3]
-        object_center = rotation @ vertices.mean(axis=0) + translation
-        object_to_camera = normalize(-object_center)
-        # The CAD direction runs from the wide-head centre to its outer end.
-        # A positive dot means that end is physically closer to the camera;
-        # use the configured inward displacement (zero means the head centre).
-        # The opposite direction uses its independently configured displacement.
-        head_towards_camera = bool(np.dot(rotation @ head_outward_stl, object_to_camera) > 0.0)
-        inward_offset_m = float(orientation['wide_head_inward_grasp_offset_m'])
-        outward_offset_m = float(orientation['wide_head_outward_grasp_offset_m'])
         lateral_offset_m = float(orientation.get('grasp_lateral_offset_m', 0.0))
-        head = wide_head_grasp_point(raw_head, head_outward_stl, outward_offset_m, inward_offset_m, head_towards_camera)
+        # The position offset is fixed in the CAD/workpiece frame, so it is
+        # invariant to the object's yaw and needs no camera-facing test.
+        head = np.asarray(raw_head, dtype=float) + np.array([grasp_offset_object_x_m, 0.0, 0.0])
         R = make_grasp_frame(rotation@width, scene_normal)
         # Apply the tuned side bias in the grasp/workpiece frame, never in the
         # camera frame.  Grasp +Y is the jaw-opening (workpiece-width) axis, so
         # the chosen physical side follows the part when its yaw changes.
-        center = rotation @ head + translation + R[:, 1] * lateral_offset_m
+        contact_center = rotation @ head + translation + R[:, 1] * lateral_offset_m
+        # Use the identical +Z vector drawn in blue by draw_grasp_overlay().
+        # In image coordinates +v points down: lower-half (III/IV) arrows are
+        # the calibrated "wide head inward" case, upper-half (I/II) arrows
+        # are the "wide head outward" case.
+        grasp_origin_uv = project_to_pixel(K, contact_center)
+        grasp_z_tip_uv = project_to_pixel(K, contact_center + R[:, 2] * .04)
+        grasp_z_image_delta_uv = grasp_z_tip_uv - grasp_origin_uv
+        grasp_z_image_down = bool(grasp_z_image_delta_uv[1] > 0.0)
+        left_eef_offset_object_x_m, left_eef_offset_object_y_m = (
+            (eef_offset_when_grasp_z_image_down_object_x_m,
+             eef_offset_when_grasp_z_image_down_object_y_m)
+            if grasp_z_image_down
+            else (eef_offset_when_grasp_z_image_up_object_x_m,
+                  eef_offset_when_grasp_z_image_up_object_y_m)
+        )
+        # ``grasp_pose`` is the direct Planner target for ``left_eef``.  Keep
+        # the physical contact reference separate, then shift only the EEF
+        # target by the selected object-frame X/Y tool offset.
+        center = contact_center + rotation @ np.array(
+            [left_eef_offset_object_x_m, left_eef_offset_object_y_m, 0.0]
+        )
         # Version7/GraspNet convention: +X is the approach axis.  Retreating
         # by -X is therefore a vertical, above-table pregrasp for this frame.
-        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'grasp_lateral_offset_m':lateral_offset_m, 'grasp_lateral_offset_axis':'grasp_frame_+Y', 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
+        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'grasp_offset_object_x_m':grasp_offset_object_x_m, 'grasp_offset_object_axis':'STL/workpiece +X', 'grasp_lateral_offset_m':lateral_offset_m, 'grasp_lateral_offset_axis':'grasp_frame_+Y', 'grasp_contact_point_camera_m':contact_center.round(7).tolist(), 'grasp_z_image_direction':'down' if grasp_z_image_down else 'up', 'grasp_z_image_delta_uv':grasp_z_image_delta_uv.round(3).tolist(), 'left_eef_offset_object_x_m':left_eef_offset_object_x_m, 'left_eef_offset_object_y_m':left_eef_offset_object_y_m, 'left_eef_offset_object_axis':'STL/workpiece +X/+Y', 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
     # One workpiece can receive overlapping SAM2 prompts.  Associate duplicate
     # reverse masks by their CAD/TCP centres and retain the stronger face score.
     unique = []

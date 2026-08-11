@@ -25,6 +25,9 @@ class TaskBusyError(RuntimeError):
     """目标机械臂已有 SDK 任务占用。"""
 
 
+NO_GRASP_EXIT_CODE = 20
+
+
 def analyze_target_response(
     response: dict[str, Any], target_deg: list[float], tolerance_deg: float
 ) -> dict[str, Any]:
@@ -237,7 +240,9 @@ def ask_confirm(args: argparse.Namespace, prompt: str) -> bool:
     return confirmed(input(prompt))
 
 
-def run_arm_phase(args: argparse.Namespace, label: str, planner_fn) -> dict[str, Any]:
+def run_arm_phase(
+    args: argparse.Namespace, label: str, planner_fn
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """规划、确认并执行一个阶段；任务占用时可确认软停止后重新规划。"""
     response, summary = planner_fn(
         args.planner_host, args.speed, args.tolerance_deg
@@ -255,7 +260,7 @@ def run_arm_phase(args: argparse.Namespace, label: str, planner_fn) -> dict[str,
             payload["trajectory"][-1],
             tolerance_deg=args.tolerance_deg,
         )
-        return result
+        return result, payload
     except TaskBusyError:
         print("检测到左臂已有任务，可能是录制/示教任务没有退出或其他程序正在控制。")
         if not ask_confirm(args, "确认要软停止左臂现有任务并重新规划，输入 y："):
@@ -276,7 +281,94 @@ def run_arm_phase(args: argparse.Namespace, label: str, planner_fn) -> dict[str,
             payload["trajectory"][-1],
             tolerance_deg=args.tolerance_deg,
         )
-        return result
+        return result, payload
+
+
+def left_gripper_holds_object(state: object, position_min_percent: float) -> bool:
+    """Return whether one left-gripper snapshot indicates a held object."""
+    if not isinstance(state, dict):
+        return False
+    motion_state = str(state.get("motion_state", "")).strip().lower()
+    try:
+        position = float(state.get("position"))
+    except (TypeError, ValueError):
+        return False
+    return motion_state == "gripping" and position > float(position_min_percent)
+
+
+def read_left_gripper_hold(
+    gripper_host: str, position_min_percent: float
+) -> tuple[bool, dict[str, Any]]:
+    """Read the left gripper at the observation pose and apply the hold gate."""
+    from parm_sdk import Gripper
+
+    with Gripper(host=gripper_host, status_port=7702) as gripper:
+        state = gripper.get_state().get(1) or {}
+    held = left_gripper_holds_object(state, position_min_percent)
+    print(
+        "[观察位夹爪复检] "
+        f"motion_state={state.get('motion_state')!r} "
+        f"position={state.get('position')!r} held={held} "
+        f"(要求 gripping 且 position > {position_min_percent:.1f}%)",
+        flush=True,
+    )
+    return held, state
+
+
+def open_left_gripper_after_failed_hold(gripper_host: str) -> dict[str, Any]:
+    """Open the empty left gripper only after the arm has rolled back safely."""
+    from parm_sdk import Gripper
+
+    with Gripper(host=gripper_host, status_port=7702) as gripper:
+        response = gripper.move(
+            1,
+            100.0,
+            force=100.0,
+            speed=80.0,
+            mode="sync",
+            preempt=False,
+            timeout=60.0,
+        )
+    payload = response.get("data") or response
+    device = (payload.get("devices") or {}).get("left_gripper") or {}
+    device_state = str(device.get("device_state", "")).strip().lower()
+    if response.get("status") != "success" or device_state != "arrived":
+        raise RuntimeError(f"观察位复检失败后左夹爪未确认张开：{response}")
+    print("观察位复检失败回退完成；左夹爪已张开，允许重新反抓。", flush=True)
+    return response
+
+
+def reverse_executed_phase(
+    arm_host: str,
+    payload: dict[str, Any],
+    *,
+    tolerance_deg: float,
+    label: str,
+) -> None:
+    """Replay one already-executed joint trajectory in exact reverse order."""
+    reverse_payload = dict(payload)
+    trajectory = payload.get("trajectory")
+    if not isinstance(trajectory, list) or not trajectory:
+        raise RuntimeError(f"{label}缺少可倒序回放的轨迹")
+    reverse_payload["trajectory"] = list(reversed(trajectory))
+    # Joint arrival can precede the driver's task_state terminal update by a
+    # few PUB frames.  Wait briefly for our just-finished phase to become idle;
+    # never cancel it or preempt an unrelated task during automatic rollback.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            execute_trajectory(arm_host, reverse_payload)
+            break
+        except TaskBusyError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{label}倒序回放前左臂持续处于running状态")
+            time.sleep(0.1)
+    wait_for_left_joint_target(
+        arm_host,
+        reverse_payload["trajectory"][-1],
+        tolerance_deg=tolerance_deg,
+    )
+    print(f"{label}已原路倒序返回。", flush=True)
 
 
 def head_target_reached(
@@ -345,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--driver-host", default="127.0.0.1")
     parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument("--speed", type=float, default=0.05)
     parser.add_argument("--auto-confirm", action="store_true")
     parser.add_argument("--tolerance-deg", type=float, default=0.5)
@@ -378,6 +471,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="手臂已到位时只转动并校验云台，不规划或执行手臂",
     )
+    parser.add_argument(
+        "--verify-left-gripper-held",
+        action="store_true",
+        help="到达观察位后用左夹爪motion_state/position复检持件；失败则原路返回",
+    )
+    parser.add_argument(
+        "--held-position-min-percent",
+        type=float,
+        default=20.0,
+        help="观察位持件复检要求的最小左夹爪开度百分比，默认20",
+    )
     return parser
 
 
@@ -385,6 +489,8 @@ def main() -> int:
     args = build_parser().parse_args()
     validate_joint_vector(args.middle_joints_deg, "middle joints")
     validate_joint_vector(args.observation_joints_deg, "observation joints")
+    if not 0.0 <= args.held_position_min_percent < 100.0:
+        raise ValueError("--held-position-min-percent 必须在 [0, 100) 内")
     if args.head_only:
         print(
             f"仅云台模式：目标 pitch={HEAD_TARGET_DEG['pitch']}°, "
@@ -403,7 +509,7 @@ def main() -> int:
 
     print("阶段 1/2：规划当前状态到反向抓取中间起始点。")
     try:
-        result = run_arm_phase(
+        result, middle_payload = run_arm_phase(
             args,
             "阶段 1（到中间起始点）",
             lambda host, speed, tolerance: plan_to_middle(
@@ -427,7 +533,7 @@ def main() -> int:
             f"yaw={HEAD_TARGET_DEG['yaw']}°."
         )
     try:
-        result = run_arm_phase(
+        result, observation_payload = run_arm_phase(
             args,
             "阶段 2（到目标观察位）",
             lambda host, speed, tolerance: plan_motion(
@@ -445,6 +551,31 @@ def main() -> int:
         print(f"阶段 2 失败；未转动云台：{type(exc).__name__}: {exc}")
         return 3
     print(f"阶段 2 执行完成：{result}")
+
+    if args.verify_left_gripper_held:
+        held, _ = read_left_gripper_hold(
+            args.gripper_host, args.held_position_min_percent
+        )
+        if not held:
+            print(
+                "NO_GRASP: 到达观察位后左夹爪未确认持件；"
+                "开始按已执行轨迹原路返回。",
+                flush=True,
+            )
+            reverse_executed_phase(
+                args.arm_host,
+                observation_payload,
+                tolerance_deg=args.tolerance_deg,
+                label="观察位到中间位",
+            )
+            reverse_executed_phase(
+                args.arm_host,
+                middle_payload,
+                tolerance_deg=args.tolerance_deg,
+                label="中间位到反抓后起始位",
+            )
+            open_left_gripper_after_failed_hold(args.gripper_host)
+            return NO_GRASP_EXIT_CODE
 
     if args.skip_head:
         print("--skip-head：云台未运动。")

@@ -128,6 +128,7 @@ MODULE2_REGISTRATION_FAILED_RECOVERED = "PC1_PC2_REGISTRATION_FAILED_RECOVERED"
 MODULE2_HELD_OBJECT_DROPPED = "HELD_OBJECT_DROPPED"
 MODULE2_PLANNING_TIMEOUT_RECOVERED = "PLANNING_TIMEOUT_RECOVERED"
 BUFFER_FACE_BACK_EXIT_CODE = 20
+BUFFER_FACE_UNCERTAIN_EXIT_CODE = 21
 
 
 def _apply_modular_entries_for_spawned_worker() -> None:
@@ -206,7 +207,7 @@ def parse_args() -> argparse.Namespace:
         help="正面桌面重抓预抓位相对 ICP 的 body_base +Z 高度，默认0.05m",
     )
     parser.add_argument(
-        "--front-regrasp-descent-distance-m", type=float, default=0.02,
+        "--front-regrasp-descent-distance-m", type=float, default=0.022,
         help="正面桌面重抓从预抓位 LIN 下移距离，默认0.02m",
     )
     parser.add_argument("--require-confirmation", action="store_true",
@@ -654,13 +655,20 @@ def check_reversed_workpiece_on_table(
         ],
         cwd=BUFFER_FACE_CHECK.parent, stop_event=stop_event, arm_host=args.arm_host,
         label="Buffer Check 正反面 ICP 复检",
-        recoverable_exit_codes=frozenset({BUFFER_FACE_BACK_EXIT_CODE}),
+        recoverable_exit_codes=frozenset({
+            BUFFER_FACE_BACK_EXIT_CODE,
+            BUFFER_FACE_UNCERTAIN_EXIT_CODE,
+        }),
     )
     if not result_file.is_file():
         raise RuntimeError("Buffer Check 结束但未发布本轮结果文件")
     payload = json.loads(result_file.read_text(encoding="utf-8"))
     decision = str(payload.get("decision") or "")
-    expected_exit = {"FRONT": 0, "BACK": BUFFER_FACE_BACK_EXIT_CODE}.get(decision)
+    expected_exit = {
+        "FRONT": 0,
+        "BACK": BUFFER_FACE_BACK_EXIT_CODE,
+        "UNCERTAIN": BUFFER_FACE_UNCERTAIN_EXIT_CODE,
+    }.get(decision)
     if expected_exit is None or exit_code != expected_exit:
         raise RuntimeError(
             "Buffer Check 退出码与结果不一致："
@@ -793,7 +801,7 @@ def wait_for_module2_ready(
                 )
                 return MODULE2_PLANNING_TIMEOUT_RECOVERED
             branch = str(payload.get("placement_branch") or "")
-            if branch not in {"BRANCH_1_FRONT", "BRANCH_1_REVERSED"}:
+            if branch not in {"BRANCH_1_FRONT", "BRANCH_1_REVERSED", "BRANCH_1_DIRECT"}:
                 raise RuntimeError(f"inspect 返回未知放置分支: {payload}")
             print(
                 f"[left] Left Place 已在 graspup 上方完成最终规划；分支={branch}，"
@@ -843,7 +851,7 @@ def wait_for_module2_ready(
                 )
                 return MODULE2_PLANNING_TIMEOUT_RECOVERED
             branch = str(payload.get("placement_branch") or "")
-            if branch in {"BRANCH_1_FRONT", "BRANCH_1_REVERSED"}:
+            if branch in {"BRANCH_1_FRONT", "BRANCH_1_REVERSED", "BRANCH_1_DIRECT"}:
                 print(
                     "[left] inspect 子进程已正常结束；"
                     f"已从结果文件恢复分支={branch}。",
@@ -1201,12 +1209,31 @@ def left_worker(
                     return
                 continue
 
-            # 工件初始判为反面并放到桌面后，夹爪可能已将它拨正。先在与
-            # Module 5-1 相同的头部观察位复用 SAM2/CAD-ICP 复检：正面则
-            # 重新抓取并回既有左侧正面 Buffer 位；反面才进入原反抓/交接链。
+            # 反面或 direct 放置都不能预先确认桌面朝向。先在与 Module 5-1
+            # 相同的头部观察位复用 SAM2/CAD-ICP 复检：正面则重新抓取并回
+            # 既有左侧正面 Buffer 位；反面才进入原反抓/交接链。
             decision, _ = check_reversed_workpiece_on_table(
                 args, stop_event, cycle_dir
             )
+            if decision == "UNCERTAIN":
+                complete_workpiece_timer(
+                    active_workpiece_id,
+                    outcome="TABLE_OBJECT_LOST",
+                    detail="Buffer Check 重试耗尽仍未识别到桌面工件",
+                )
+                report_module_status(
+                    "module_4_head_judge",
+                    ResultStatus.RETRY,
+                    "Buffer Check 多次观察仍不确定；视为工件已掉落，"
+                    "保持 Buffer 空并从 Module 1 重新抓取",
+                    reason_code="BUFFER_OBJECT_LOST",
+                )
+                print(
+                    "[left] Buffer Check 重试耗尽仍未看到工件；判定工件已掉落，"
+                    "直接开始下一轮 Module 1 抓取。",
+                    flush=True,
+                )
+                continue
             if decision == "FRONT":
                 wait_for_right_servo_idle(
                     right_servo_active, stop_event, "左臂正面 ICP 重抓动作"
@@ -1249,6 +1276,25 @@ def left_worker(
                     )
                 if stop_event.is_set():
                     return
+                if decision == "UNCERTAIN":
+                    complete_workpiece_timer(
+                        active_workpiece_id,
+                        outcome="TABLE_OBJECT_LOST",
+                        detail="正面重抓后 Buffer Check 重试耗尽仍未识别到桌面工件",
+                    )
+                    report_module_status(
+                        "module_4_head_judge",
+                        ResultStatus.RETRY,
+                        "Buffer Check 多次观察仍不确定；视为工件已掉落，"
+                        "保持 Buffer 空并从 Module 1 重新抓取",
+                        reason_code="BUFFER_OBJECT_LOST",
+                    )
+                    print(
+                        "[left] Buffer Check 重试耗尽仍未看到工件；判定工件已掉落，"
+                        "直接开始下一轮 Module 1 抓取。",
+                        flush=True,
+                    )
+                    continue
                 if front_recovered:
                     left_observation_ready.clear()
                     publish_buffer_workpiece(runtime_dir, active_workpiece_id, "BRANCH_1_FRONT")
@@ -1276,6 +1322,7 @@ def left_worker(
             # (head RGB-D capture), withdraw to the same middle observation
             # pose used by the front regrasp recovery.
             reverse_attempt = 0
+            handoff_result_file = runtime_dir / "reverse_handoff_left_ready.json"
             while not stop_event.is_set():
                 reverse_attempt += 1
                 exit_code = run_command(
@@ -1287,18 +1334,69 @@ def left_worker(
                     arm_host=args.arm_host, label="左臂反抓",
                     recoverable_exit_codes=frozenset({NO_GRASP_EXIT_CODE}),
                 )
-                if exit_code == 0:
-                    break
-                print(
-                    f"[left][rollback] 反抓第 {reverse_attempt} 次未抓到工件；"
-                    "状态回退到 Module 5-1，重新反抓（不重跑前序模块）。",
-                    flush=True,
-                )
-                if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
+                if exit_code != 0:
+                    print(
+                        f"[left][rollback] 反抓第 {reverse_attempt} 次未抓到工件；"
+                        "状态回退到 Module 5-1，重新反抓（不重跑前序模块）。",
+                        flush=True,
+                    )
+                    if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
                         raise RuntimeError(
                             "左臂桌面反抓已连续 5 次未确认夹到工件；"
                             "已停止重试并保持现场。"
                         )
+                    move_left_to_middle_observation(
+                        args, stop_event, right_servo_active
+                    )
+                    if stop_event.wait(0.2):
+                        return
+                    continue
+
+                print("[left] 外部桌面反抓流程成功结束，开始观察位持件复检。", flush=True)
+                if handoff_result_file.exists():
+                    raise RuntimeError(
+                        f"Module 5-2交接握手文件已存在，拒绝复用旧结果："
+                        f"{handoff_result_file}"
+                    )
+                with module_timer("module_5_2_handoff_prepare", workpiece_id=active_workpiece_id):
+                    handoff_exit = run_command(
+                        [
+                            str(PYTHON),
+                            str(LEFT_HANDOFF_PREP),
+                            "--planner-host",
+                            args.planner_host,
+                            "--arm-host",
+                            args.arm_host,
+                            "--gripper-host",
+                            args.gripper_host,
+                            "--workpiece",
+                            os.environ.get("PARM_LOOP_WORKPIECE", "1"),
+                            "--handoff-result-file",
+                            str(handoff_result_file),
+                            *(
+                                ["--require-confirmation"]
+                                if args.require_confirmation
+                                else []
+                            ),
+                        ],
+                        cwd=LOOP_ROOT,
+                        stop_event=stop_event,
+                        arm_host=args.arm_host,
+                        label="Module 5-2左手交接准备",
+                        recoverable_exit_codes=frozenset({NO_GRASP_EXIT_CODE}),
+                    )
+                if handoff_exit == 0:
+                    break
+                print(
+                    f"[left][rollback] 反抓第 {reverse_attempt} 次在观察位复检时"
+                    "未确认持件；机械臂已原路返回，重新执行 Module 5-1。",
+                    flush=True,
+                )
+                if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
+                    raise RuntimeError(
+                        "左臂桌面反抓已连续 5 次未通过观察位持件复检；"
+                        "已停止重试并保持现场。"
+                    )
                 move_left_to_middle_observation(
                     args, stop_event, right_servo_active
                 )
@@ -1306,37 +1404,6 @@ def left_worker(
                     return
             if stop_event.is_set():
                 return
-            print("[left] 外部桌面反抓流程成功结束，左臂已持件等待右手交接。", flush=True)
-            handoff_result_file = runtime_dir / "reverse_handoff_left_ready.json"
-            if handoff_result_file.exists():
-                raise RuntimeError(
-                    f"Module 5-2交接握手文件已存在，拒绝复用旧结果："
-                    f"{handoff_result_file}"
-                )
-            with module_timer("module_5_2_handoff_prepare", workpiece_id=active_workpiece_id):
-                run_command(
-                    [
-                        str(PYTHON),
-                        str(LEFT_HANDOFF_PREP),
-                        "--planner-host",
-                        args.planner_host,
-                        "--arm-host",
-                        args.arm_host,
-                        "--workpiece",
-                        os.environ.get("PARM_LOOP_WORKPIECE", "1"),
-                        "--handoff-result-file",
-                        str(handoff_result_file),
-                        *(
-                            ["--require-confirmation"]
-                            if args.require_confirmation
-                            else []
-                        ),
-                    ],
-                    cwd=LOOP_ROOT,
-                    stop_event=stop_event,
-                    arm_host=args.arm_host,
-                    label="Module 5-2左手交接准备",
-                )
             print(
                 "[left] Module 5-2完成：本轮ICP结果已发布，"
                 "左手持件位于交接位。",

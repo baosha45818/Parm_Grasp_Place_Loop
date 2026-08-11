@@ -67,10 +67,11 @@ class ApartModuleContractTest(unittest.TestCase):
             [0.0, -30.0, 30.0, -60.0, 60.0],
         )
 
-    def test_module_3_mapping_is_front_reversed_only(self) -> None:
+    def test_module_3_mapping_includes_workpiece_1_direct_place(self) -> None:
         expected = {
             ("FRONT", "BRANCH_1_FRONT"): "3-1",
             ("REVERSED", "BRANCH_1_REVERSED"): "3-3",
+            ("DIRECT", "BRANCH_1_DIRECT"): "3-direct",
         }
         for arguments, module_id in expected.items():
             self.assertEqual(resolve_place_profile(*arguments).module_id, module_id)
@@ -81,21 +82,32 @@ class ApartModuleContractTest(unittest.TestCase):
         front, order, minus_x_angle, plus_x_angle = select_face_candidate_order(
             [-1.0, 0.0, 0.0], threshold_deg=40.0, workpiece="1",
         )
-        self.assertEqual((front, order), ("front_then_reversed", "front_then_reversed"))
+        self.assertEqual(
+            (front, order),
+            ("front_then_reversed", "front_then_reversed_then_direct"),
+        )
         self.assertAlmostEqual(minus_x_angle, 0.0)
         self.assertAlmostEqual(plus_x_angle, 180.0)
 
         reversed_mode, order, minus_x_angle, plus_x_angle = select_face_candidate_order(
             [1.0, 0.0, 0.0], threshold_deg=40.0, workpiece="1",
         )
-        self.assertEqual((reversed_mode, order), ("reversed_then_front", "reversed_then_front"))
+        self.assertEqual(
+            (reversed_mode, order),
+            ("reversed_then_front", "reversed_then_direct"),
+        )
         self.assertAlmostEqual(minus_x_angle, 180.0)
         self.assertAlmostEqual(plus_x_angle, 0.0)
 
         alternating, order, _, _ = select_face_candidate_order(
             [0.0, 1.0, 0.0], threshold_deg=40.0, workpiece="1",
         )
-        self.assertEqual((alternating, order), ("alternating", "reversed_only"))
+        self.assertEqual((alternating, order), ("alternating", "direct_only"))
+
+        alternating, order, _, _ = select_face_candidate_order(
+            [0.0, 1.0, 0.0], threshold_deg=40.0, workpiece="2",
+        )
+        self.assertEqual((alternating, order), ("alternating", "alternating"))
 
     def test_original_candidate_cli_aliases_are_supported(self) -> None:
         argv = [
@@ -108,7 +120,7 @@ class ApartModuleContractTest(unittest.TestCase):
             args = parse_left_place_args()
         self.assertEqual(args.front_target_z_candidates_m, [-0.42, -0.41])
         self.assertEqual(len(GRASPUP_ABOVE_JOINTS_DEG), 7)
-        self.assertEqual(GRASPUP_ABOVE_PLANNING_TIMEOUT_S, 10.0)
+        self.assertEqual(GRASPUP_ABOVE_PLANNING_TIMEOUT_S, 6.0)
 
     def test_wrapper_forwards_weight_and_place_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

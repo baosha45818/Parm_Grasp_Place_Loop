@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from concurrent.futures import ThreadPoolExecutor
 import json
 import math
 import os
@@ -42,6 +43,8 @@ DEFAULT_Q1_XY_TOLERANCE_M = 0.0005
 DEFAULT_Q1_Z_TOLERANCE_M = 0.0005
 DEFAULT_Q1_PITCH_TOLERANCE_RAD = math.radians(0.1)
 DEFAULT_Q1_POST_GRASP_LIFT_M = (0.050, 0.040, 0.030, 0.020, 0.010)
+DEFAULT_SERVO_COLLISION_PRECHECK_STEP_M = 0.010
+SERVO_COLLISION_PRECHECK_PARALLELISM = 3
 RRTSTAR_TIMEOUT_S = 30.0
 Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE = 20
 POSE_OUTPUT_ROOT = MODULE_ROOT.parents[2] / "output/module_4_2"
@@ -470,6 +473,68 @@ def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo
     )
 
 
+def precheck_servo_line_collision(
+    sdk: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str,
+    tcp_offset: list[float], start_tcp: list[float], target_tcp: list[float],
+    args: argparse.Namespace, stage: str,
+) -> None:
+    """Reject a servo line when any sampled TCP pose is not collision-plannable.
+
+    ServoPose does not use the planner's collision checker.  Sampling its
+    intended Cartesian line makes every sampled pose a collision-checked
+    RRTstar goal before the open-gripper approach is allowed to start.  Up to
+    three independent Planner clients check a batch concurrently. This is
+    deliberately conservative: an inconclusive sample is treated as unsafe
+    and the closed-loop controller can choose Module 7 reorientation instead.
+    """
+    linear_distance = math.sqrt(sum(
+        (target_tcp[axis] - start_tcp[axis]) ** 2 for axis in range(3)
+    ))
+    segments = max(1, math.ceil(linear_distance / DEFAULT_SERVO_COLLISION_PRECHECK_STEP_M))
+    print(
+        f"{stage}：servo 碰撞预检，线长={linear_distance * 1000.0:.1f} mm，"
+        f"{segments} 个 10 mm 以内的 TCP 采样终点，最多并发 3 个 RRTstar 目标。"
+    )
+    samples = [
+        (index, [
+            start_tcp[axis] + (index / segments) * (target_tcp[axis] - start_tcp[axis])
+            for axis in range(6)
+        ])
+        for index in range(1, segments + 1)
+    ]
+
+    def check_sample(item: tuple[int, list[float]]) -> tuple[int, bool, str]:
+        index, sample = item
+        worker_planner = None
+        try:
+            worker_planner = sdk.Planner(host=args.planner_host)
+            feasible, detail = can_plan_target(
+                worker_planner, arm_id=arm_id, group=group, frame_id=frame_id,
+                ik_frame=ik_frame, tcp_offset=tcp_offset, target=sample,
+                target_is_tcp=True, planner_kind=args.planner,
+                max_vel=args.max_vel, max_acc=args.max_acc,
+            )
+            return index, feasible, detail
+        except Exception as exc:
+            return index, False, f"{type(exc).__name__}: {exc}"
+        finally:
+            if worker_planner is not None:
+                try:
+                    worker_planner.close()
+                except Exception:
+                    pass
+
+    for batch_start in range(0, len(samples), SERVO_COLLISION_PRECHECK_PARALLELISM):
+        batch = samples[batch_start:batch_start + SERVO_COLLISION_PRECHECK_PARALLELISM]
+        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+            outcomes = list(executor.map(check_sample, batch))
+        for index, feasible, detail in outcomes:
+            if not feasible:
+                raise Q1DirectPathUnavailableError(
+                    f"{stage}：servo 线段采样 {index}/{segments} 不可无碰撞规划；{detail}"
+                )
+
+
 def recover_target_tcp_pose(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, xy_tolerance_m: float, z_tolerance_m: float, orientation_tolerance_rad: float, correction_attempts: int, stage: str, execution_speed_scale: float) -> None:
     """Verify the complete TCP pose and correct it with RRTstar if needed."""
     target_rpy = rotvec_to_rpy(target[3:])
@@ -709,6 +774,12 @@ def main() -> int:
         # plus the optional final-only body-base Z calibration.
         grasp_target = grasp_xyz + orientation
         if args.final_approach_mode == "servo":
+            precheck_servo_line_collision(
+                sdk, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
+                ik_frame=ik_frame, tcp_offset=tcp_offset,
+                start_tcp=alignment_target, target_tcp=grasp_target,
+                args=args, stage="沿 TCP +X 从后方延长线推进至抓取点",
+            )
             servo_follow_tcp(
                 arm, arm_id=args.arm_id, tcp_target=grasp_target,
                 servo_eef_offset=servo_eef_offset, args=args,
@@ -734,6 +805,17 @@ def main() -> int:
                     gripper, arm_id=args.arm_id, target_open=True,
                     timeout_s=args.gripper_timeout_s,
                     tolerance=args.gripper_position_tolerance,
+                )
+                current_tcp = compose_pose(
+                    pose_from_lookup_transform(
+                        planner.lookup_transform(args.frame_id, ik_frame).get("data")
+                    ), tcp_offset,
+                )
+                precheck_servo_line_collision(
+                    sdk, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
+                    ik_frame=ik_frame, tcp_offset=tcp_offset,
+                    start_tcp=current_tcp, target_tcp=attempt_target,
+                    args=args, stage=label,
                 )
                 servo_follow_tcp(
                     arm, arm_id=args.arm_id, tcp_target=attempt_target,

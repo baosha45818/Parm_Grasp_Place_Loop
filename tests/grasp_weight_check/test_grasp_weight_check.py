@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests.grasp_weight_check import (
     ForceDataError,
@@ -131,6 +132,38 @@ class ForceCollectionTests(unittest.TestCase):
             sleep=lambda _: None,
         )
         self.assertEqual(result.grasp_class, GraspClass.SINGLE)
+
+
+class ReverseGraspMassGateTests(unittest.TestCase):
+    def test_workpiece_one_40g_gate_rejects_lower_weight(self):
+        """工件 1 反抓可覆盖共享 50g 抓空配置，使用专用的 40g 门限。"""
+        from modules.module_5_left_pick import reverse_grasp_weight_check as reverse
+
+        baseline, loaded = window_for_mass(39.9)
+        with patch.object(reverse, "_thresholds", return_value=(THRESHOLDS, 3, 0.1, 0.0)), patch.object(
+            reverse, "_collect_window", return_value=loaded
+        ):
+            result = reverse.verify_object_after_lift(
+                baseline, minimum_held_mass_g=40.0
+            )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual(result["classification"], "EMPTY")
+        self.assertEqual(result["minimum_held_mass_g"], 40.0)
+
+    def test_workpiece_one_40g_gate_accepts_equal_or_higher_weight(self):
+        from modules.module_5_left_pick import reverse_grasp_weight_check as reverse
+
+        baseline, loaded = window_for_mass(40.0)
+        with patch.object(reverse, "_thresholds", return_value=(THRESHOLDS, 3, 0.1, 0.0)), patch.object(
+            reverse, "_collect_window", return_value=loaded
+        ):
+            result = reverse.verify_object_after_lift(
+                baseline, minimum_held_mass_g=40.0
+            )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(result["classification"], "HELD")
 
 
 if __name__ == "__main__":

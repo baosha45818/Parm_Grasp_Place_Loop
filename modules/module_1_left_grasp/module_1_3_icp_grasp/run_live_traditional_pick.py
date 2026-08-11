@@ -302,6 +302,10 @@ def parallel_jaw_variants(plan: dict) -> list[tuple[float, dict]]:
     return variants
 
 
+class PairedTrajectoryUnavailable(RuntimeError):
+    """A candidate cannot form a fresh, branch-consistent pregrasp/LIN pair."""
+
+
 def paired_pregrasp_and_descent(pa: argparse.Namespace, candidate: dict, *, attempts: int = 3):
     """Plan hover and descent as one IK-branch-consistent pair.
 
@@ -336,7 +340,7 @@ def paired_pregrasp_and_descent(pa: argparse.Namespace, candidate: dict, *, atte
                 return pregrasp, descent, attempt, failures
             except Exception as exc:
                 failures.append(str(exc))
-    raise RuntimeError(
+    raise PairedTrajectoryUnavailable(
         f"candidate rank {candidate['rank']} has no branch-consistent pregrasp/LIN pair after {attempts} attempts: "
         + " | ".join(failures)
     )
@@ -472,7 +476,7 @@ def execute_paired_plan(
     pregrasp, descent, attempt, _ = paired_pregrasp_and_descent(pa, candidate)
     print(f"-> executing branch-consistent pair from planning attempt {attempt}")
     # Start fully open, then reduce only to the validated silhouette width
-    # (two side margins plus the operator-requested extra 16 mm) before motion.
+    # (two side margins plus the operator-requested extra 12 mm) before motion.
     with force_sensor(weight_config) as sensor:
         pe.move_gripper(pa, float(candidate["plan"]["opening_percent"]), "set validated predicted jaw opening")
         pe.execute_trajectory(pa, pregrasp, "pregrasp")
@@ -524,7 +528,7 @@ def execute_paired_plan(
 
 def prepare_traditional_candidate(
     args: argparse.Namespace, pa: argparse.Namespace, *, attempt_index: int,
-) -> tuple[Path, dict]:
+) -> tuple[Path, dict, list[dict]]:
     """Capture, run SAM/STL/ICP, and return one Planner-preflighted candidate."""
     base_suffix = "" if attempt_index == 0 else f"_weight_retry_{attempt_index:02d}"
     run: Path | None = None
@@ -618,7 +622,18 @@ def prepare_traditional_candidate(
         f"-> traditional plan rank {selected['rank']} selected by {selection_policy}; "
         f"Planner preflight succeeded: {run}"
     )
-    return run, next(item for item in candidates if item["rank"] == selected["rank"])
+    selected_candidate = next(
+        item for item in candidates if item["rank"] == selected["rank"]
+    )
+    # The initial preflight proves a candidate was possible at that instant,
+    # but a fresh planner request may choose another IK branch. Preserve the
+    # remaining legal candidates so that one fresh paired-LIN failure does not
+    # discard this RGB-D/ICP observation.
+    execution_candidates = [selected_candidate] + [
+        candidate for candidate in reachable
+        if candidate["rank"] != selected_candidate["rank"]
+    ]
+    return run, selected_candidate, execution_candidates
 
 
 def run_traditional_cycles(
@@ -649,9 +664,43 @@ def run_traditional_cycles(
                 [sys.executable, str(TOOL / "go_graspnet.py"), "--arm-host", args.arm_host],
                 input="y\n", text=True, check=True,
             )
+        weight_failure: Exception | None = None
+        handoff = None
         for planner_retry in range(int(args.max_planner_unreachable_retries) + 1):
             try:
-                run, chosen = prepare_traditional_candidate(args, pa, attempt_index=weight_retry)
+                run, chosen, execution_candidates = prepare_traditional_candidate(
+                    args, pa, attempt_index=weight_retry,
+                )
+                if not args.execute:
+                    print("-> plan-only: add --execute --confirm-real-grasp only after reviewing artifacts")
+                    return
+                wait_for_execution_permit()
+                pair_failures: list[str] = []
+                for execution_index, candidate in enumerate(execution_candidates, 1):
+                    try:
+                        if candidate["rank"] != chosen["rank"]:
+                            mark_planner_selected_grasp(run, candidate)
+                            print(
+                                "-> fresh paired planning failed for an earlier candidate; "
+                                f"trying preflight-legal candidate rank {candidate['rank']} "
+                                f"({execution_index}/{len(execution_candidates)})",
+                                flush=True,
+                            )
+                        handoff = execute_paired_plan(pa, candidate, weight_config)
+                        break
+                    except PairedTrajectoryUnavailable as exc:
+                        pair_failures.append(str(exc))
+                        print(
+                            "-> candidate rank "
+                            f"{candidate['rank']} cannot form a fresh RRTStar/LIN pair; "
+                            "trying the next preflight-legal candidate.",
+                            flush=True,
+                        )
+                if handoff is None:
+                    raise TraditionalPlannerUnreachable(
+                        "all preflight-legal ICP candidates lost their fresh "
+                        "RRTStar/LIN pair: " + " | ".join(pair_failures)
+                    )
                 break
             except TraditionalPlannerUnreachable as exc:
                 if planner_retry >= int(args.max_planner_unreachable_retries):
@@ -664,15 +713,16 @@ def run_traditional_cycles(
                     f"{args.max_planner_unreachable_retries}",
                     flush=True,
                 )
+            except (WeightQualityRejected, pe.RetryGrasp) as exc:
+                # A physical grasp/weight failure must preserve the existing
+                # fresh-observation retry path rather than consume a planner
+                # reachability retry.
+                weight_failure = exc
+                break
         else:
             raise RuntimeError("traditional ICP internal error: planner retry loop exhausted")
-        if not args.execute:
-            print("-> plan-only: add --execute --confirm-real-grasp only after reviewing artifacts")
-            return
-        try:
-            wait_for_execution_permit()
-            handoff = execute_paired_plan(pa, chosen, weight_config)
-        except (WeightQualityRejected, pe.RetryGrasp) as exc:
+        if weight_failure is not None:
+            exc = weight_failure
             grasp_class = getattr(exc, "grasp_class", "EMPTY")
             retry_record = {
                 "weight_retry_index": weight_retry,
@@ -697,6 +747,8 @@ def run_traditional_cycles(
                 flush=True,
             )
             continue
+        if handoff is None:
+            raise RuntimeError("traditional ICP internal error: no verified grasp handoff")
         handoff_path = args.weight_handoff_file or run / "weight_handoff.json"
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
         handoff_path.write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")

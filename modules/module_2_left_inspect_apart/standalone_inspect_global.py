@@ -294,6 +294,27 @@ def parse_args() -> argparse.Namespace:
         help="最多把多少个被拒绝候选作为额外 SAM2 负点（默认 8）",
     )
     parser.add_argument(
+        "--pc1-negative-depth-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "PC1 的负点若靠近可信工件支持区且深度相近则取消，"
+            "避免固定坐标落到工件上（默认开启）"
+        ),
+    )
+    parser.add_argument(
+        "--pc1-negative-depth-guard-margin-m", type=float, default=0.020,
+        help="PC1 负点与正点支持深度分位区间的安全余量（默认 20mm）",
+    )
+    parser.add_argument(
+        "--pc1-negative-depth-guard-distance-px", type=float, default=60.0,
+        help="PC1 负点距可信工件支持区不超过该距离时才启用深度取消（默认 60px）",
+    )
+    parser.add_argument(
+        "--pc1-negative-depth-guard-positive-radius-px", type=int, default=31,
+        help="PC1 负点深度保护统计每个正点周围的半径（默认 31px）",
+    )
+    parser.add_argument(
         "--global-close-fragment-depth-diff-m", type=float, default=0.035,
         help="近距离碎片相对工件主体深度四分位区间的最大距离（默认 35mm）",
     )
@@ -2067,6 +2088,71 @@ def _auto_rgbd_prompt(
         if len(extra_negatives) >= int(args.global_rejected_negative_count):
             break
     negatives = negatives + extra_negatives
+    negative_depth_guard: dict[str, object] = {
+        "operation": "skipped_not_pc1",
+        "input_negative_count": len(negatives),
+        "kept_negative_count": len(negatives),
+        "removed_negative_points": [],
+    }
+    if view == "pc1" and bool(args.pc1_negative_depth_guard):
+        # PC1's legacy fixed negatives are image coordinates.  A changed grasp
+        # can put one on a dark hole or shadow of the held workpiece.  Use the
+        # already-associated prompt support (rather than individual positive
+        # pixels) to reject only nearby negatives whose measured depth belongs
+        # to the same robust depth interval as the prospective object.
+        positive_neighborhood = np.zeros_like(prompt_support, dtype=np.uint8)
+        for x, y in positives:
+            cv2.circle(
+                positive_neighborhood,
+                (int(x), int(y)),
+                int(args.pc1_negative_depth_guard_positive_radius_px),
+                1,
+                -1,
+            )
+        # Do not pool the complete support: an accepted remote lobe can have
+        # a very different depth and make the protection interval uselessly
+        # wide.  Only use support local to an actual positive prompt.
+        support_neighborhood = prompt_support & (positive_neighborhood > 0)
+        support_depths = measured[
+            support_neighborhood & np.isfinite(measured) & (measured > 0)
+        ]
+        negative_depth_guard["operation"] = (
+            "remove_nearby_negative_within_prompt_support_depth_interval"
+        )
+        if len(support_depths) >= 20:
+            depth_low_m, depth_high_m = np.quantile(support_depths, [0.05, 0.95])
+            margin_m = float(args.pc1_negative_depth_guard_margin_m)
+            max_distance_px = float(args.pc1_negative_depth_guard_distance_px)
+            kept_negatives: list[list[int]] = []
+            removed_negative_points: list[dict[str, float | int | list[int]]] = []
+            for x, y in negatives:
+                depth_m = float(measured[y, x])
+                distance_px = float(distance_to_prompt_support[y, x])
+                same_depth = (
+                    np.isfinite(depth_m)
+                    and depth_m > 0.0
+                    and float(depth_low_m) - margin_m <= depth_m
+                    <= float(depth_high_m) + margin_m
+                )
+                if same_depth and distance_px <= max_distance_px:
+                    removed_negative_points.append({
+                        "point": [int(x), int(y)],
+                        "depth_m": depth_m,
+                        "distance_to_prompt_support_px": distance_px,
+                    })
+                else:
+                    kept_negatives.append([int(x), int(y)])
+            negatives = kept_negatives
+            negative_depth_guard.update({
+                "support_depth_q05_m": float(depth_low_m),
+                "support_depth_q95_m": float(depth_high_m),
+                "margin_m": margin_m,
+                "max_distance_px": max_distance_px,
+                "removed_negative_points": removed_negative_points,
+                "kept_negative_count": len(negatives),
+            })
+        else:
+            negative_depth_guard["reason"] = "insufficient_valid_prompt_support_depth"
     plausible_contact_labels = contact_ids or object_ids
     plausible_contact_support = np.isin(labels, plausible_contact_labels)
     quality_support = prompt_support
@@ -2080,6 +2166,7 @@ def _auto_rgbd_prompt(
         "hypothesis": hypothesis,
         "extended_depth": extended_depth,
         "positive_to_nearest_urdf_depth_gaps_m": positive_to_urdf_depth_gaps_m,
+        "negative_depth_guard": negative_depth_guard,
         "component_selection": {
             "anchor_label": int(anchor_label),
             "candidate_component_count": len(ids),

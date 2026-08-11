@@ -409,7 +409,7 @@ def jaw_contacts_in_instance_mask(
 
 def parallel_jaw_bracket_from_mask(
     T_camera_object: np.ndarray, local_center: np.ndarray, mask: np.ndarray, K: np.ndarray,
-    *, finger_margin_m: float = .004, extra_opening_m: float = .016, max_opening_m: float = .078,
+    *, finger_margin_m: float = .004, extra_opening_m: float = .012, max_opening_m: float = .078,
 ) -> tuple[dict, bool]:
     """Predict fingers outside the two opposite SAM silhouette boundaries."""
     # SAM holes (bolt/shaft holes in this workpiece) are not free space for a

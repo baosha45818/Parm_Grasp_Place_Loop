@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests.reversed_head_observation.check_plan import (
     GOAL_JOINTS_DEG,
@@ -17,6 +18,9 @@ from tests.reversed_head_observation.execute_plan import (
     confirmed,
     execute_trajectory,
     head_target_reached,
+    left_gripper_holds_object,
+    open_left_gripper_after_failed_hold,
+    reverse_executed_phase,
 )
 
 
@@ -73,6 +77,79 @@ class PlanValidationTests(unittest.TestCase):
 
     def test_task_busy_error_is_runtime_error(self):
         self.assertTrue(issubclass(TaskBusyError, RuntimeError))
+
+    def test_observation_hold_gate_requires_gripping_and_opening(self):
+        self.assertTrue(
+            left_gripper_holds_object(
+                {"motion_state": "gripping", "position": 20.1}, 20.0
+            )
+        )
+        self.assertFalse(
+            left_gripper_holds_object(
+                {"motion_state": "arrived", "position": 55.0}, 20.0
+            )
+        )
+        self.assertFalse(
+            left_gripper_holds_object(
+                {"motion_state": "gripping", "position": 20.0}, 20.0
+            )
+        )
+        self.assertFalse(left_gripper_holds_object(None, 20.0))
+
+    def test_failed_observation_replays_exact_trajectory_in_reverse(self):
+        payload = {
+            "arm_id": 1,
+            "trajectory": [[0.0] * 7, [1.0] * 7, [2.0] * 7],
+            "sample_frequency": 10.0,
+        }
+        with patch(
+            "tests.reversed_head_observation.execute_plan.execute_trajectory"
+        ) as execute, patch(
+            "tests.reversed_head_observation.execute_plan.wait_for_left_joint_target"
+        ) as wait:
+            reverse_executed_phase(
+                "arm", payload, tolerance_deg=0.5, label="test"
+            )
+
+        reversed_payload = execute.call_args.args[1]
+        self.assertEqual(
+            reversed_payload["trajectory"],
+            [[2.0] * 7, [1.0] * 7, [0.0] * 7],
+        )
+        wait.assert_called_once_with("arm", [0.0] * 7, tolerance_deg=0.5)
+        self.assertEqual(payload["trajectory"][0], [0.0] * 7)
+
+    def test_failed_observation_opens_gripper_after_rollback(self):
+        class FakeGripper:
+            calls = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return None
+
+            def move(self, *args, **kwargs):
+                self.calls.append((args, kwargs))
+                return {
+                    "status": "success",
+                    "data": {
+                        "devices": {
+                            "left_gripper": {"device_state": "arrived"}
+                        }
+                    },
+                }
+
+        with patch("parm_sdk.Gripper", FakeGripper):
+            response = open_left_gripper_after_failed_hold("gripper")
+
+        self.assertEqual(response["status"], "success")
+        args, kwargs = FakeGripper.calls[-1]
+        self.assertEqual(args, (1, 100.0))
+        self.assertEqual(kwargs["mode"], "sync")
 
     def test_first_phase_accepts_any_current_start_and_reaches_middle(self):
         result = analyze_target_response(

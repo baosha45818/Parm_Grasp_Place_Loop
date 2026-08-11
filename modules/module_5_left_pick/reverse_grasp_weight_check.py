@@ -70,24 +70,43 @@ def capture_open_gripper_baseline(force_sensor_host: str = "127.0.0.1"):
 def verify_object_after_lift(
     baseline: Any,
     force_sensor_host: str = "127.0.0.1",
+    *,
+    minimum_held_mass_g: float | None = None,
 ) -> dict[str, Any]:
     """上提 3 cm 且到位后判断是否有工件，不区分单件或多件。"""
     from tests.grasp_weight_check import classify_grasp_weight
 
     thresholds, _, _, _ = _thresholds()
+    minimum_mass_g = (
+        thresholds.empty_max_g
+        if minimum_held_mass_g is None
+        else float(minimum_held_mass_g)
+    )
+    if minimum_mass_g <= 0.0:
+        raise ValueError("minimum_held_mass_g 必须为正数")
     try:
         loaded = _collect_window(force_sensor_host)
         result = classify_grasp_weight(baseline, loaded, thresholds)
         # 反抓只关心“抓空”与“有工件”：不再使用 SINGLE/MULTIPLE 的边界。
         stable = max(result.baseline.max_axis_mad_n, result.loaded.max_axis_mad_n) <= thresholds.max_axis_mad_n
-        accepted = stable and result.mass_g > thresholds.empty_max_g
+        # ``minimum_mass_g`` 可为某条抓取流程设置比全局“抓空”阈值更
+        # 贴合工件的二值门限。例如工件 1 的反抓要求重量至少为 40 g。
+        accepted = stable and result.mass_g >= minimum_mass_g
+        if stable and not accepted:
+            reason = (
+                f"估算重量 {result.mass_g:.1f} g 小于持件下限 "
+                f"{minimum_mass_g:.1f} g"
+            )
+        else:
+            reason = result.reason
         payload = {
             "classification": "HELD" if accepted else ("EMPTY" if stable else "UNKNOWN"),
             "accepted": accepted,
             "mass_g": float(result.mass_g),
             "raw_weight_class": result.grasp_class.value,
-            "reason": result.reason,
+            "reason": reason,
             "empty_max_g": thresholds.empty_max_g,
+            "minimum_held_mass_g": minimum_mass_g,
             "check_lift_m": POST_CLOSE_CHECK_LIFT_M,
         }
     except Exception as exc:

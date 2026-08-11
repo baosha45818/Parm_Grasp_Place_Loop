@@ -3,15 +3,16 @@
 ## 左臂
 
 1. Module 1 完成左手抓取。
-2. Module 2 判断夹爪内工件为 `FRONT`、`SIDE` 或 `REVERSED`。
-3. Module 3 严格按分类选择 3-1、3-2 或 3-3 完成放置。
+2. Module 2 输出工件相对左臂的 ICP 位姿，不再输出放置分类。
+3. Module 3 按工件 `+Z` 相对 `left_eef -X/+X` 的夹角选择放置候选。
 4. 桌面状态判断属于新增 Module 4 Head Judge。
 5. 桌面工件重新抓取属于 Module 5 Left Pick。
 6. 无任务时进入 Module 6 Left Idle。
 
-模块化总控在 `REVERSED` 分支中先调用 Module 4 Head Judge，确认桌面上为
-单个 `BACK` 工件后再进入 Module 5-1；随后 Module 5-2 把左手持件送到
-交接准备位。
+模块化总控在 `BRANCH_1_REVERSED` 或工件1的 `BRANCH_1_DIRECT` 分支中，先调用
+Module 4 Head Judge 确认桌面朝向；确认单个 `BACK` 工件后再进入 Module 5-1，随后
+Module 5-2 把左手持件送到交接准备位。若 Buffer Check 判断为正面，则重抓并回正面
+Buffer 位。
 
 ## 右臂
 
@@ -29,10 +30,11 @@
 | 模块 | 分类 | 兼容分支名 |
 |---|---|---|
 | 3-1 正面放 | `FRONT` | `BRANCH_1_FRONT` |
-| 3-2 侧面放 | `SIDE` | `BRANCH_2_SIDE` |
 | 3-3 反面放 | `REVERSED` | `BRANCH_1_REVERSED` |
+| 3-direct 工件1直接放 | `DIRECT` | `BRANCH_1_DIRECT` |
 
-分类与分支名不一致时必须停止，不能猜测或跨分支执行。
+Module 3 内部生成分类与分支名；两者不一致时必须停止，不能猜测或跨分支执行。
+工件1在 `left_eef -X/+X` 轴向候选全部无解后也会回退到 `3-direct`；两轴均不接近时则直接进入该分支。
 
 ## 共享状态
 

@@ -683,7 +683,7 @@ def jaw_contacts_in_instance_mask(
 
 def parallel_jaw_bracket_from_mask(
     T_camera_object: np.ndarray, local_center: np.ndarray, mask: np.ndarray, K: np.ndarray,
-    *, finger_margin_m: float = .004, extra_opening_m: float = .016, max_opening_m: float = .078,
+    *, finger_margin_m: float = .004, extra_opening_m: float = .012, max_opening_m: float = .078,
 ) -> tuple[dict, bool]:
     """Predict fingers outside the two opposite SAM silhouette boundaries."""
     # SAM holes (bolt/shaft holes in this workpiece) are not free space for a
@@ -1133,7 +1133,7 @@ def run(argv: list[str] | None = None, *, keep_icp_workers_alive: bool = False) 
                 continue
             area0 = int(mask.sum()); x0, x1, y0, y1 = int(xs0.min()), int(xs0.max()), int(ys0.min()), int(ys0.max())
             area_ok = (1200 <= area0 <= 30000) if relaxed else (2000 <= area0 <= 24000)
-            if (area_ok and x0 > 10 and y0 > 10 and x1 < image.shape[1] - 11 and y1 < image.shape[0] - 11
+            if (area_ok and x0 >= 0 and y0 >= 0 and x1 < image.shape[1] and y1 < image.shape[0]
                     and float(saturation_image[mask].mean()) <= 130.0):
                 selected.append(index)
         return selected

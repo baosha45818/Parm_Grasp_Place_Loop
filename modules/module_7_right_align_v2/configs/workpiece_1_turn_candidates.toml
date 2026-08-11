@@ -1,0 +1,226 @@
+# Module 7 工件 1 的唯一可编辑配置。参数严格按实际运动顺序排列。
+# 数组的书写顺序就是候选搜索优先级；单位 m、deg、s、Hz 已写在参数名或注释中。
+#
+# ===== 坐标系与姿态约定（所有五个阶段共用） =====
+# 所有世界位姿均在 body_base 中表达。工件语义坐标系记为 W：
+#   W +X：从窄尾指向宽头；W +Y：从正面看向左；W +Z：正面外法向。
+# 视觉给出 T_body_base_W；本文件中所有 grasp_point_semantic_offset_m 都是 W 中的点。
+#
+# 预抓取的工具坐标系为物理夹爪中心 right_eef（不是驱动器的 transfer_end）：
+#   TCP +X 始终对齐 W -Z，切换对称夹爪方向时不变；
+#   TCP +Y 对齐 W +Y 或 -Y（两种对称夹爪方向）；切换 +Y 的同时，
+#   TCP +Z 必须同步从 W +X 切到 W -X（或反向），以保持右手坐标系。
+# 预抓取 R/P/Y 候选是在该初始工具/工件对应关系上，绕 TCP 自身局部轴增加的偏移。
+#
+# 闭爪成功的瞬间程序读取 right_hand_transfer_end，并记录
+# T_right_hand_transfer_end_workpiece_centre。此后抬起、摆正和下放均通过该实时刚性
+# 关系反算 right_eef 目标；不会把“工件中心目标”误当作“TCP 目标”。
+
+[meta]
+# 此文件所属工件；必须与命令行 --workpiece 一致。
+workpiece = "workpiece_1"
+
+
+# 1. 运动到预抓取点位
+[pregrasp]
+# 语义工件坐标系中的抓取点 [x,y,z] 候选；第一个点同时定义预抓取位置。
+# 这些点以 W 为参考，运行时用 T_body_base_W 转为 body_base 位置。
+grasp_point_semantic_offset_m = [[0.0, 0.0, 0.02830022645], [-0.015, 0.0, 0.02830022645], [-0.03, 0.0, 0.02830022645]]
+
+# 所有抓取点共用的预抓取位置偏移候选；每个抓取点都沿自身工件局部 X/Y/Z 应用这些值。
+pregrasp_positive_workpiece_x_m = [0.0]
+
+# 所有抓取点沿工件局部 +Y 的预抓取偏移候选。
+pregrasp_positive_workpiece_y_m = [0.0]
+
+# 所有抓取点沿工件局部 +Z 的预抓取偏移候选。
+pregrasp_positive_workpiece_z_m = [0.06]
+
+# 到达预抓取后沿实际 TCP 局部 X/Y/Z 的 Servo 微调 [x,y,z]；全零表示不微调。
+# （当前不使用：值为全零，因此不会调用 ServoPose。）
+pregrasp_position_tolerance_m = [0.0, 0.0, 0.0]
+
+# 预抓取姿态中 TCP 局部 roll 候选。
+# 阶段 1 有 3(抓取点) × 1(X) × 1(Y) × 1(Z) × 3(roll) × 5(pitch) × 5(yaw) = 225 组。
+# 每组都会同时规划两种对称夹爪方向：+Y/+Z 与 -Y/-Z 同步成对切换（TCP +X 不变），
+# 再按规划轨迹的关节总运动量选择较小的一种；两种都不可达才换下一组。
+pregrasp_roll_candidates_deg = [0.0, 15.0, -15.0]
+
+# 预抓取姿态中 TCP 局部 pitch 候选。
+pregrasp_pitch_candidates_deg = [0.0, 15.0, -15.0, 30.0, -30.0]
+
+# 预抓取姿态中 TCP 局部 yaw 候选。
+pregrasp_yaw_candidates_deg = [0.0, 15.0, -15.0, 30.0, -30.0]
+
+# 阶段 1 预抓取主路径规划器：RRTstar；goal-tolerance 由下方开关控制。
+pregrasp_rrtstar_goal_tolerance = false
+planner = "rrtstar"
+
+# 统一的规划速度比例。
+max_vel = 0.08
+
+# 统一的规划加速度比例。
+max_acc = 0.08
+
+# 单次规划 RPC 的超时。
+planning_timeout_s = 5.0
+
+# 已规划轨迹的执行速度倍率。
+trajectory_execution_speed_scale = 2.5
+
+# Servo 线速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_linear_speed_mps = 0.05
+
+# Servo 角速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_angular_speed_radps = 0.3
+
+# Servo 最大线加速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_max_linear_accel_mps2 = 0.1
+
+# Servo 最大角加速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_max_angular_accel_radps2 = 0.6
+
+# Servo 控制频率。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_hz = 50.0
+
+# Servo 到点位置容差。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_position_tolerance_m = 0.0005
+
+# Servo 到点姿态容差。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_orientation_tolerance_rad = 0.035
+
+# Servo 等待稳定到点的最长时间。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
+servo_settle_timeout_s = 8.0
+
+
+# 2. 从预抓取点位下探到抓取位，并闭抓
+[grasp]
+# 各抓取点沿工件局部 -Z 的额外下探量；与抓取点数组逐项对应。
+final_extra_descent_negative_workpiece_z_m = [0.01, 0.01, 0.01]
+
+# 阶段 2 下探规划器：RRTstar；goal-tolerance 由下方开关控制。
+grasp_rrtstar_goal_tolerance = false
+# 各抓取点的 TCP 局部 RPY 候选；外层逐项对应抓取点，内层按优先级尝试。
+# 阶段 2 遍历数 = Σ每个抓取点的姿态数 = 1 + 1 + 3 = 5；按抓取点 1→2→3、
+# 每点内部 RPY 左→右的顺序，选第一个无容差 RRTstar 可达目标。
+grasp_point_tcp_local_rpy_candidates_deg = [
+  [
+    [0.0], # grasp point 1：roll
+    [0.0], # grasp point 1：pitch
+    [0.0], # grasp point 1：yaw
+  ],
+  [
+    [0.0], # grasp point 2：roll
+    [0.0], # grasp point 2：pitch
+    [0.0], # grasp point 2：yaw
+  ],
+  [
+    [0.0],              # grasp point 3：roll
+    [0.0, -15.0, +15.0,-30.0, +30.0], # grasp point 3：pitch
+    [0.0],              # grasp point 3：yaw
+  ],
+]
+
+# 夹爪开闭并读取状态的超时。
+gripper_timeout_s = 5.0
+
+# 判定夹爪到达开/闭目标的位置容差。
+gripper_position_tolerance = 5.0
+
+# 闭爪时至少需要产生的行程；小于此值视为未可靠接触工件。
+grasp_minimum_close_travel = 5.0
+
+# 闭爪接触后用于稳定确认的等待时间。
+grasp_contact_settle_s = 0.5
+
+
+# 3. 闭抓后抬起
+[lift]
+# 阶段 3 抬起规划器：RRTstar；启用 goal-tolerance。
+# 闭爪后保持 XY/姿态的 RRTstar 抬起高度候选；按从左到右顺序尝试。
+# 阶段 3 遍历数 = len(lift_height_m) = 4；选第一个可规划且执行成功的高度。
+lift_height_m = [0.05, 0.03, 0.01]
+
+# 闭抓后抬起 RRTstar 是否启用 goal-tolerance。
+lift_rrtstar_goal_tolerance = true
+
+
+# 4. 摆正到 Q1
+[turn]
+# 阶段 4 摆正实际使用的规划器；goal-tolerance 由下方开关控制。
+turn_rrtstar_goal_tolerance = true
+planner = "rrtstar"
+
+# 旋转和下放共用的固定桌面参考点，body_base XY（m）。
+# 由 module_4_2/workpiece_1/285/rgb.png 中标记红点的原图像素约 [756, 472]
+# 结合该帧 RGB-D 深度和 T_body_base_head_camera 投影得到。
+# 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
+# place_x/place_y_offset_candidates_m 均相对此点解释。
+fixed_reference_body_base_xy_m = [0.502045, -0.045800]
+
+# 工件正面在 body_base 下的基准局部 RPY。
+front_base_rpy_deg = [0.0, 0.0, 0.0]
+
+# 旋转后工件中心相对固定 body_base 参考点的 X 偏移候选。
+x_offset_candidates_m = [0.0, 0.1]
+
+# 旋转后工件中心相对固定 body_base 参考点的 Y 偏移候选。
+y_offset_candidates_m = [-0.25, -0.2, -0.1]
+
+# 闭爪抬起后工件中心的 body_base Z 偏移候选。
+z_offset_candidates_m = [0.0, 0.1]
+
+# 工件局部 roll 摆正候选。
+# 阶段 4 原始遍历数 = len(x) × len(y) × len(z) × len(roll) × len(pitch) × len(yaw)
+# = 2 × 3 × 2 × 7 × 5 × 6 = 2520；组合循环顺序为 x→y→z→roll→pitch→yaw，
+# yaw 变化最快。每批最多并行 3 条 RRTConnect 规划，选优先级最高的可达候选。
+roll_candidates_deg = [ 0.0, 20.0, -20.0]
+
+# 工件局部 pitch 摆正候选。
+pitch_candidates_deg = [ 0.0, -20.0, 20.0]
+
+# 工件局部 yaw 摆正候选，优先落在 Q1。
+yaw_candidates_deg = [35.0, 30.0, 45.0, 60.0, 75.0, 0.0]
+
+# 旧搜索兼容参数：摆正姿态搜索步长。
+turn_attitude_search_step_deg = 15.0
+
+# 旧搜索兼容参数：摆正区域网格步长。
+turn_search_grid_step_m = 0.05
+
+# 旧搜索兼容参数：摆正区域正 X 最小距离。
+turn_positive_x_min_m = 0.0
+
+# 旧搜索兼容参数：摆正区域正 X 最大距离。
+turn_positive_x_max_m = 0.2
+
+# 并行 RRTConnect 摆正规划的最大 worker 数。
+rrt_turn_parallelism = 3
+
+# 5. 安全下放、松爪和撤离
+[place]
+# 阶段 5 安全下放规划器：RRTstar；启用 goal-tolerance。
+# 正常下放候选的 RRTstar goal-tolerance 开关。
+place_rrtstar_goal_tolerance = true
+
+# 下放后工件中心相对固定 body_base 参考点的 X 偏移候选。
+# 阶段 6 按 clearance→Y→X 顺序遍历，不做相机 ROI 过滤。
+place_x_offset_candidates_m = [0.050, 0.025, 0.00]
+
+# 下放后工件中心相对固定 body_base 参考点的 Y 偏移候选。
+place_y_offset_candidates_m = [-0.150, -0.120, -0.100]
+
+# 松爪时 TCP 相对抓取高度的额外安全余量候选；按左到右顺序规划。
+# 每个余量都会与全部 XY 候选组合；均不可达则保留工件并报错，不自动生成更高的余量。
+place_tcp_extra_clearance_m = [0.01, 0.02, 0.03]
+
+# 并行 RRTConnect 下放规划的最大 worker 数。
+rrt_place_parallelism = 3
+
+
+[release]
+# 松爪后撤离抬起的 RRTstar goal-tolerance 开关。
+release_rrtstar_goal_tolerance = true
+
+# 松爪后保持 XY/姿态沿 body_base +Z 的撤离抬起距离。
+post_release_lift_height_m = [0.05, 0.04, 0.03, 0.02, 0.01, 0.00]

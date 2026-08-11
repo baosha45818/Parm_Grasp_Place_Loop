@@ -66,7 +66,7 @@ max_acc = 0.08
 planning_timeout_s = 5.0
 
 # 已规划轨迹的执行速度倍率。
-trajectory_execution_speed_scale = 2.0
+trajectory_execution_speed_scale = 2.5
 
 # Servo 线速度。（当前不使用：仅在上方 ServoPose 微调非零时使用。）
 servo_linear_speed_mps = 0.05
@@ -116,7 +116,7 @@ grasp_point_tcp_local_rpy_candidates_deg = [
   ],
   [
     [0.0],              # grasp point 3：roll
-    [0.0, -15.0, +15.0,-30.0, +30.0], # grasp point 3：pitch
+    [0.0, -10.0, +10.0,-15.0, +15.0], # grasp point 3：pitch
     [0.0],              # grasp point 3：yaw
   ],
 ]
@@ -139,7 +139,7 @@ grasp_contact_settle_s = 0.5
 # 阶段 3 抬起规划器：RRTstar；启用 goal-tolerance。
 # 闭爪后保持 XY/姿态的 RRTstar 抬起高度候选；按从左到右顺序尝试。
 # 阶段 3 遍历数 = len(lift_height_m) = 4；选第一个可规划且执行成功的高度。
-lift_height_m = [0.14, 0.12, 0.10, 0.08]
+lift_height_m = [0.05, 0.03, 0.01]
 
 # 闭抓后抬起 RRTstar 是否启用 goal-tolerance。
 lift_rrtstar_goal_tolerance = true
@@ -151,14 +151,21 @@ lift_rrtstar_goal_tolerance = true
 turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
 
+# 旋转和下放共用的固定桌面参考点，body_base XY（m）。
+# 由 module_4_2/workpiece_1/285/rgb.png 中标记红点的原图像素约 [756, 472]
+# 结合该帧 RGB-D 深度和 T_body_base_head_camera 投影得到。
+# 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
+# place_x/place_y_offset_candidates_m 均相对此点解释。
+fixed_reference_body_base_xy_m = [0.502045, -0.045800]
+
 # 工件正面在 body_base 下的基准局部 RPY。
 front_base_rpy_deg = [0.0, 0.0, 0.0]
 
-# 闭爪抬起后工件中心的 body_base X 偏移候选。
+# 旋转后工件中心相对固定 body_base 参考点的 X 偏移候选。
 x_offset_candidates_m = [0.0, 0.1]
 
-# 闭爪抬起后工件中心的 body_base Y 偏移候选。
-y_offset_candidates_m = [-0.3, -0.2, -0.1]
+# 旋转后工件中心相对固定 body_base 参考点的 Y 偏移候选。
+y_offset_candidates_m = [-0.25, -0.2, -0.1]
 
 # 闭爪抬起后工件中心的 body_base Z 偏移候选。
 z_offset_candidates_m = [0.0, 0.1]
@@ -196,16 +203,16 @@ rrt_turn_parallelism = 3
 # 正常下放候选的 RRTstar goal-tolerance 开关。
 place_rrtstar_goal_tolerance = true
 
-# 下放后工件中心相对最终选中抓取 TCP 的 X 偏移候选。
-# 阶段 5 按 clearance→Y→X 顺序遍历，不做相机 ROI 过滤。
+# 下放后工件中心相对固定 body_base 参考点的 X 偏移候选。
+# 阶段 6 按 clearance→Y→X 顺序遍历，不做相机 ROI 过滤。
 place_x_offset_candidates_m = [0.050, 0.025, 0.00]
 
-# 下放后工件中心相对最终选中抓取 TCP 的 Y 偏移候选。
-place_y_offset_candidates_m = [-0.200, -0.150, -0.100, -0.050, 0.000]
+# 下放后工件中心相对固定 body_base 参考点的 Y 偏移候选。
+place_y_offset_candidates_m = [-0.150, -0.120, -0.100]
 
 # 松爪时 TCP 相对抓取高度的额外安全余量候选；按左到右顺序规划。
 # 每个余量都会与全部 XY 候选组合；均不可达则保留工件并报错，不自动生成更高的余量。
-place_tcp_extra_clearance_m = [0.02, 0.03, 0.04]
+place_tcp_extra_clearance_m = [0.01, 0.02, 0.03]
 
 # 并行 RRTConnect 下放规划的最大 worker 数。
 rrt_place_parallelism = 3

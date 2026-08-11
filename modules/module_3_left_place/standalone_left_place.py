@@ -39,6 +39,7 @@ from modules.module_3_left_place.placement_parameters import (
     GRASPUP_LIFT_M,
     GRASPUP_JOINTS_DEG,
 )
+from modules.module_3_left_place.branch_profile import PlaceBranchProfile
 from modules.module_3_left_place.placement_config import load_workpiece_parameters
 from modules.stage_result import (
     read_stage_result,
@@ -58,6 +59,16 @@ PLACE_PROFILES = {
     FRONT_PROFILE.classification: FRONT_PROFILE,
     REVERSED_PROFILE.classification: REVERSED_PROFILE,
 }
+DIRECT_PROFILE = PlaceBranchProfile(
+    module_id="3-direct",
+    classification="DIRECT",
+    placement_branch="BRANCH_1_DIRECT",
+    target_argument="direct_place_target_object_xyz",
+    default_target_xyz_m=(0.0, 0.0, 0.0),
+    target_z_candidates_m=(),
+    release_z_candidates_m=(),
+)
+PLACE_PROFILES[DIRECT_PROFILE.classification] = DIRECT_PROFILE
 GRIPPER_HOLD_STABLE_S = 0.5
 GRIPPER_HOLD_POLL_S = 0.1
 GRIPPER_HOLD_TIMEOUT_S = 2.0
@@ -72,8 +83,9 @@ def select_face_candidate_order(
     """Classify the held object's +Z against left_eef -X/+X.
 
     ``front_then_reversed`` is the current branch convention for object +Z
-    aligned with left_eef -X; the opposite alignment selects the reversed
-    branch first.  Keep the existing workpiece-1 alternating policy intact.
+    aligned with left_eef -X. For workpiece1, every axis-selection path has
+    direct place as the final fallback after its normal candidates are
+    exhausted; non-axial poses enter direct place immediately.
     """
     object_z = np.asarray(object_z_in_left_eef, dtype=float)
     if object_z.shape != (3,) or not np.all(np.isfinite(object_z)):
@@ -90,11 +102,14 @@ def select_face_candidate_order(
         face_branch_mode = "reversed_then_front"
     else:
         face_branch_mode = "alternating"
-    candidate_order = (
-        "reversed_only"
-        if face_branch_mode == "alternating" and str(workpiece) == "1"
-        else face_branch_mode
-    )
+    if str(workpiece) == "1" and face_branch_mode == "front_then_reversed":
+        candidate_order = "front_then_reversed_then_direct"
+    elif str(workpiece) == "1" and face_branch_mode == "reversed_then_front":
+        candidate_order = "reversed_then_direct"
+    elif str(workpiece) == "1" and face_branch_mode == "alternating":
+        candidate_order = "direct_only"
+    else:
+        candidate_order = face_branch_mode
     return face_branch_mode, candidate_order, minus_x_angle, plus_x_angle
 
 
@@ -534,7 +549,8 @@ def main() -> int:
         "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
         "face_priority_policy": (
             "object_plus_z_vs_left_eef_x_selects_face_candidate_order; "
-            "workpiece1_alternating_uses_reversed_only"
+            "workpiece1_axis_candidates_fall_back_to_direct_place; "
+            "workpiece1_non_axial_uses_direct_place"
         ),
     }
     tool_z_rejected_count = 0
@@ -766,14 +782,51 @@ def main() -> int:
                 "pitch": list(workpiece_parameters.REVERSED_PITCH_CANDIDATES_DEG),
             },
         ]
+        direct_spec = None
+        if str(args.workpiece) == "1":
+            direct_xyz = workpiece_parameters.DIRECT_PLACE_TARGET_OBJECT_XYZ_M
+            direct_target_z = workpiece_parameters.DIRECT_PLACE_TARGET_Z_CANDIDATES_M
+            direct_release_z = workpiece_parameters.DIRECT_PLACE_RELEASE_Z_CANDIDATES_M
+            if direct_xyz is None or direct_target_z is None or direct_release_z is None:
+                raise RuntimeError("工件1 direct place 参数不完整")
+            direct_spec = {
+                "classification": "DIRECT",
+                "branch": "BRANCH_1_DIRECT",
+                "profile": DIRECT_PROFILE,
+                "center": np.asarray(direct_xyz, dtype=float),
+                "target_z": validate_increasing_candidates(
+                    "[direct place].target_z_candidates_m", direct_target_z,
+                ),
+                "release_z": validate_optional_increasing_candidates(
+                    "[direct place].release_z_candidates_m", direct_release_z,
+                ),
+                # DIRECT 保持 graspup_top 的末端 RPY，不使用工件局部 RPY 候选。
+                "yaw": [0.0],
+                "roll": [0.0],
+                "pitch": [0.0],
+                "keep_graspup_top_tool_rpy": True,
+            }
+            if candidate_order == "direct_only":
+                face_specs = [direct_spec]
+        direct_fallback_needed = candidate_order in {
+            "front_then_reversed_then_direct",
+            "reversed_then_direct",
+        }
         if any(spec["center"].shape != (3,) or not np.all(np.isfinite(spec["center"])) for spec in face_specs):
             raise ValueError("目标工件 XYZ 必须包含三个有限米制数值")
         print(
             f"[工件{args.workpiece}候选] +Z->left_eef-X={minus_x_angle:.1f}deg, "
             f"+Z->left_eef+X={plus_x_angle:.1f}deg, "
             f"姿态判定={face_branch_mode}, 实际遍历={candidate_order}; "
-            + ("仅反面候选会纳入规划。" if candidate_order == "reversed_only"
-               else "正反面均会纳入规划。"),
+            + (
+                "直接保持 graspup_top 末端 RPY 并移动工件中心。"
+                if candidate_order == "direct_only"
+                else "先正面、反面候选；全部无解后再直接放置。"
+                if candidate_order == "front_then_reversed_then_direct"
+                else "先反面候选；全部无解后再直接放置。"
+                if candidate_order == "reversed_then_direct"
+                else "正反面均会纳入规划。"
+            ),
             flush=True,
         )
         planning_attempts: list[dict] = []
@@ -787,6 +840,7 @@ def main() -> int:
         plan_found = threading.Event()
         planning_finished = threading.Event()
         planning_timed_out = threading.Event()
+        normal_candidates_timed_out = threading.Event()
 
         if not args.skip_motion:
             confirm_motion(
@@ -895,9 +949,19 @@ def main() -> int:
                     plan_found.wait(timeout=min(0.05, remaining))
                 if plan_found.is_set():
                     return
+                if direct_fallback_needed:
+                    normal_candidates_timed_out.set()
+                    print(
+                        "[正反候选超时] 到达 graspup 上方后"
+                        f"{GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s仍无可行正反候选；"
+                        "停止继续提交正反候选，改进入 DIRECT 回退。",
+                        flush=True,
+                    )
+                    return
                 planning_timed_out.set()
                 print(
-                    "[规划超时] 到达 graspup 上方后10.0s仍无可行解；"
+                    "[规划超时] 到达 graspup 上方后"
+                    f"{GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s仍无可行解；"
                     "正在执行原版丢弃恢复",
                     flush=True,
                 )
@@ -978,7 +1042,39 @@ def main() -> int:
             flush=True,
         )
 
-        def plan_offline_candidate(target_tool: np.ndarray) -> dict:
+        direct_tool_rotation = None
+        if candidate_order == "direct_only":
+            # 直接放置的姿态必须来自真正到达 graspup_top 后的实时末端，而不是
+            # Inspect 时的姿态或假定的 FK。这样末端 RPY 在整段直接放置中不变。
+            if not args.skip_motion:
+                while not approach_reached.wait(timeout=0.05):
+                    if approach_finished.is_set():
+                        if approach_errors:
+                            raise RuntimeError(
+                                f"到达 graspup_top 失败: {approach_errors[0]}"
+                            ) from approach_errors[0]
+                        raise RuntimeError("到达 graspup_top 前运动线程已结束")
+            response = planner.lookup_transform("body_base", "left_hand_transfer_end")
+            if response is None:
+                raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
+            direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
+            planning_scheduler_log["direct_orientation_source"] = (
+                "body_base_T_left_hand_transfer_end_at_graspup_top"
+            )
+            planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
+                direct_tool_rotation
+            ).as_euler("xyz", degrees=True).tolist()
+            print(
+                "[直接放置] 保持 graspup_top left_hand_transfer_end RPY="
+                f"{np.round(planning_scheduler_log['direct_tool_rpy_deg'], 3).tolist()}",
+                flush=True,
+            )
+
+        def plan_offline_candidate(
+            target_tool: np.ndarray,
+            *,
+            use_left_eef_collision_box: bool,
+        ) -> dict:
             # Separate SDK connections are required: one PlannerRuntime would
             # serialize requests behind the SDK client's internal lock.
             candidate_planner = PlannerRuntime(planner_cfg)
@@ -992,6 +1088,7 @@ def main() -> int:
                     planner=post_graspup_planner,
                     start_joints_deg=GRASPUP_ABOVE_JOINTS_DEG,
                     rrtstar_goal_tolerance=(post_graspup_planner == "rrtstar"),
+                    use_left_eef_collision_box=use_left_eef_collision_box,
                 )
                 if response is None:
                     raise RuntimeError("离线规划返回空结果")
@@ -1052,19 +1149,28 @@ def main() -> int:
                         )
                     )
                     ordered_by_branch.append(branch_candidates)
-                front_candidates, reversed_candidates = ordered_by_branch
-                if candidate_order == "front_then_reversed":
-                    candidates = front_candidates + reversed_candidates
-                elif candidate_order == "reversed_then_front":
-                    candidates = reversed_candidates + front_candidates
-                elif candidate_order == "reversed_only":
-                    candidates = reversed_candidates
+                if candidate_order == "direct_only":
+                    candidates = ordered_by_branch[0]
                 else:
-                    for index in range(max(len(front_candidates), len(reversed_candidates))):
-                        if index < len(front_candidates):
-                            candidates.append(front_candidates[index])
-                        if index < len(reversed_candidates):
-                            candidates.append(reversed_candidates[index])
+                    front_candidates, reversed_candidates = ordered_by_branch
+                    if candidate_order in {
+                        "front_then_reversed",
+                        "front_then_reversed_then_direct",
+                    }:
+                        candidates = front_candidates + reversed_candidates
+                    elif candidate_order == "reversed_then_front":
+                        candidates = reversed_candidates + front_candidates
+                    elif candidate_order == "reversed_then_direct":
+                        candidates = reversed_candidates
+                    elif candidate_order == "reversed_only":
+                        candidates = reversed_candidates
+                    else:
+                        candidates = []
+                        for index in range(max(len(front_candidates), len(reversed_candidates))):
+                            if index < len(front_candidates):
+                                candidates.append(front_candidates[index])
+                            if index < len(reversed_candidates):
+                                candidates.append(reversed_candidates[index])
                 print(
                     f"[候选层] radius={radius:.3f}m，共{len(candidates)}项",
                     flush=True,
@@ -1082,16 +1188,21 @@ def main() -> int:
                             and len(in_flight) < int(args.placement_planning_inflight)
                             and next_candidate_index < len(candidates)
                             and not planning_timed_out.is_set()
+                            and not normal_candidates_timed_out.is_set()
                             and not object_dropped.is_set()
                         ):
                             candidate = candidates[next_candidate_index]
                             (spec, sample, z_index, target_z, yaw_index,
                              roll_index, pitch_index, roll, pitch, yaw) = candidate
                             rotation_index = roll_index
-                            base_rpy_deg = list(
-                                workpiece_parameters.REVERSED_BASE_RPY_DEG
-                                if spec["classification"] == "REVERSED"
-                                else workpiece_parameters.FRONT_BASE_RPY_DEG
+                            base_rpy_deg = (
+                                "graspup_top_tool_rpy"
+                                if spec.get("keep_graspup_top_tool_rpy")
+                                else list(
+                                    workpiece_parameters.REVERSED_BASE_RPY_DEG
+                                    if spec["classification"] == "REVERSED"
+                                    else workpiece_parameters.FRONT_BASE_RPY_DEG
+                                )
                             )
                             candidate_classification = str(spec["classification"])
                             candidate_branch = str(spec["branch"])
@@ -1101,15 +1212,27 @@ def main() -> int:
                                 [sample["xy"][0], sample["xy"][1], target_z],
                                 dtype=float,
                             )
-                            target_object = workpiece_object_target(
-                                workpiece_parameters,
-                                xyz,
-                                candidate_classification,
-                                roll,
-                                pitch,
-                                yaw,
-                            )
-                            target_tool = target_object @ np.linalg.inv(T_tool_object)
+                            if spec.get("keep_graspup_top_tool_rpy"):
+                                if direct_tool_rotation is None:
+                                    raise RuntimeError("direct place 缺少 graspup_top 末端旋转")
+                                target_tool = np.eye(4)
+                                target_tool[:3, :3] = direct_tool_rotation
+                                # p_object = p_tool + R_tool * t_tool_object；补偿后配置
+                                # 的 xyz 精确表示工件中心，而不是末端原点。
+                                target_tool[:3, 3] = (
+                                    xyz - direct_tool_rotation @ T_tool_object[:3, 3]
+                                )
+                                target_object = target_tool @ T_tool_object
+                            else:
+                                target_object = workpiece_object_target(
+                                    workpiece_parameters,
+                                    xyz,
+                                    candidate_classification,
+                                    roll,
+                                    pitch,
+                                    yaw,
+                                )
+                                target_tool = target_object @ np.linalg.inv(T_tool_object)
                             attempt = {
                                 "place_module": candidate_profile.module_id,
                                 "classification": candidate_classification,
@@ -1138,10 +1261,14 @@ def main() -> int:
                                 "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
                                 "planning_submission_order": planning_submission_count + 1,
                                 "planning_inflight_after_submit": len(in_flight) + 1,
+                                # 正面工件运输时，用请求级左端方块近似已夹持工件。
+                                "use_left_eef_collision_box": (
+                                    candidate_classification == "FRONT"
+                                ),
                                 "target_object": target_object,
                                 "target_tool": target_tool,
                             }
-                            # 不论候选顺序如何（包括工件1的 reversed_only），每个
+                            # 不论候选顺序如何（包括工件1的 direct_only），每个
                             # 末端目标都必须先通过 +Z 朝 body_base -Z 的硬约束。
                             if not tool_positive_z_points_toward_body_base_negative_z(
                                 target_tool
@@ -1181,7 +1308,11 @@ def main() -> int:
                                 next_candidate_index += 1
                                 continue
                             future = planning_executor.submit(
-                                plan_offline_candidate, target_tool
+                                plan_offline_candidate,
+                                target_tool,
+                                use_left_eef_collision_box=bool(
+                                    attempt["use_left_eef_collision_box"]
+                                ),
                             )
                             in_flight[future] = attempt
                             planning_submission_count += 1
@@ -1215,6 +1346,28 @@ def main() -> int:
                             })
                             planning_attempts.append(failed_attempt)
                             append_placement_trace(failed_attempt)
+                            continue
+
+                        if (
+                            direct_fallback_needed
+                            and normal_candidates_timed_out.is_set()
+                        ):
+                            timed_out_attempt = {
+                                key: value for key, value in attempt.items()
+                                if key not in {"target_object", "target_tool"}
+                            }
+                            timed_out_attempt.update({
+                                "planned": False,
+                                "ignored_after_normal_candidate_timeout": True,
+                                "error": (
+                                    "正反候选阶段超过6秒；"
+                                    "结果不再选用，转入DIRECT回退"
+                                ),
+                                "planning_completion_order": planning_completion_count,
+                                "planning_inflight_after_complete": len(in_flight),
+                            })
+                            planning_attempts.append(timed_out_attempt)
+                            append_placement_trace(timed_out_attempt)
                             continue
 
                         successful = {
@@ -1271,7 +1424,192 @@ def main() -> int:
                     branch = str(selected["placement_branch"])
                     profile = resolve_place_profile(classification, branch)
                     release_z_candidates = list(selected["release_z_candidates_m"])
-                if selected is not None or planning_timed_out.is_set():
+                if (
+                    selected is not None
+                    or planning_timed_out.is_set()
+                    or normal_candidates_timed_out.is_set()
+                ):
+                    break
+
+            # 工件1的轴向正反候选均无解，或正反候选阶段超过6秒后，才进入
+            # DIRECT。此阶段刻意不与前面的滑动窗口并发，保证回退优先级明确。
+            if (
+                selected is None
+                and direct_fallback_needed
+                and not planning_timed_out.is_set()
+                and not object_dropped.is_set()
+            ):
+                if direct_spec is None:
+                    raise RuntimeError("工件1 direct place 回退参数不完整")
+                print(
+                    "[直接放置回退] "
+                    + (
+                        "正反候选阶段已超时；"
+                        if normal_candidates_timed_out.is_set()
+                        else "正反候选已全部无解；"
+                    )
+                    + "开始保持 graspup_top 末端 RPY 的 DIRECT 规划。",
+                    flush=True,
+                )
+                if not args.skip_motion:
+                    while not approach_reached.wait(timeout=0.05):
+                        if approach_finished.is_set():
+                            if approach_errors:
+                                raise RuntimeError(
+                                    f"到达 graspup_top 失败: {approach_errors[0]}"
+                                ) from approach_errors[0]
+                            raise RuntimeError("到达 graspup_top 前运动线程已结束")
+                response = planner.lookup_transform(
+                    "body_base", "left_hand_transfer_end"
+                )
+                if response is None:
+                    raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
+                direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
+                planning_scheduler_log["direct_orientation_source"] = (
+                    "body_base_T_left_hand_transfer_end_at_graspup_top"
+                )
+                planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
+                    direct_tool_rotation
+                ).as_euler("xyz", degrees=True).tolist()
+                direct_target_z = validate_increasing_candidates(
+                    "[direct place].target_z_candidates_m",
+                    direct_spec["target_z"],
+                )
+                direct_release_z = list(direct_spec["release_z"])
+                for direct_z_index, target_z in enumerate(direct_target_z):
+                    if planning_timed_out.is_set() or object_dropped.is_set():
+                        break
+                    xyz = np.array(
+                        [direct_spec["center"][0], direct_spec["center"][1], target_z],
+                        dtype=float,
+                    )
+                    target_tool = np.eye(4)
+                    target_tool[:3, :3] = direct_tool_rotation
+                    target_tool[:3, 3] = (
+                        xyz - direct_tool_rotation @ T_tool_object[:3, 3]
+                    )
+                    target_object = target_tool @ T_tool_object
+                    attempt = {
+                        "place_module": DIRECT_PROFILE.module_id,
+                        "classification": "DIRECT",
+                        "placement_branch": "BRANCH_1_DIRECT",
+                        "release_z_candidates_m": direct_release_z,
+                        "priority_index": planning_submission_count,
+                        "xy_layer": "direct_center",
+                        "xy_radius_m": 0.0,
+                        "xy_direction_deg": None,
+                        "z_index": direct_z_index,
+                        "object_z_m": float(target_z),
+                        "yaw_deg": 0.0,
+                        "rotation_index": 0,
+                        "object_base_rpy_deg": "graspup_top_tool_rpy",
+                        "object_local_roll_deg": 0.0,
+                        "object_local_roll_index": 0,
+                        "object_local_pitch_deg": 0.0,
+                        "object_local_pitch_index": 0,
+                        "target_object_xyz": xyz.tolist(),
+                        "target_tool_xyz": target_tool[:3, 3].tolist(),
+                        "placement_point": {
+                            "frame_id": "body_base",
+                            "object_xyz_m": xyz.tolist(),
+                            "tool_xyz_m": target_tool[:3, 3].tolist(),
+                        },
+                        "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
+                        "planning_submission_order": planning_submission_count + 1,
+                        "planning_inflight_after_submit": 1,
+                        "target_object": target_object,
+                        "target_tool": target_tool,
+                    }
+                    if not tool_positive_z_points_toward_body_base_negative_z(
+                        target_tool
+                    ):
+                        tool_z_rejected_count += 1
+                        rejected_attempt = {
+                            key: value for key, value in attempt.items()
+                            if key not in {"target_object", "target_tool"}
+                        }
+                        rejected_attempt.update({
+                            "planned": False,
+                            "rejected_before_planning": True,
+                            "planning_inflight_at_rejection": 0,
+                            "error": (
+                                "目标末端约束不满足：left_hand_transfer_end +Z "
+                                "在 body_base 的 Z 投影必须为负"
+                            ),
+                            "target_tool_positive_z_in_body_base": (
+                                target_tool[:3, 2].tolist()
+                            ),
+                            "target_tool_positive_z_body_base_z_component": (
+                                float(target_tool[2, 2])
+                            ),
+                        })
+                        planning_attempts.append(rejected_attempt)
+                        append_placement_trace(rejected_attempt)
+                        continue
+                    planning_submission_count += 1
+                    print(
+                        "[提交 DIRECT] "
+                        f"z={target_z:.3f}m, 保持 graspup_top RPY="
+                        f"{np.round(planning_scheduler_log['direct_tool_rpy_deg'], 3).tolist()}",
+                        flush=True,
+                    )
+                    try:
+                        response = plan_offline_candidate(target_tool)
+                    except Exception as exc:
+                        planning_completion_count += 1
+                        failed_attempt = {
+                            key: value for key, value in attempt.items()
+                            if key not in {"target_object", "target_tool"}
+                        }
+                        failed_attempt.update({
+                            "planned": False,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "planning_completion_order": planning_completion_count,
+                            "planning_inflight_after_complete": 0,
+                        })
+                        planning_attempts.append(failed_attempt)
+                        append_placement_trace(failed_attempt)
+                        continue
+                    planning_completion_count += 1
+                    data = response.get("data") or {}
+                    trajectory = data.get("trajectory") or []
+                    selected = {
+                        key: value for key, value in attempt.items()
+                        if key not in {"target_object", "target_tool"}
+                    }
+                    selected.update({
+                        "planned": True,
+                        "planning_completion_order": planning_completion_count,
+                        "planning_inflight_after_complete": 0,
+                        "radius_layer_index": "direct_fallback",
+                        "target_object_pose": {
+                            "position": target_object[:3, 3].tolist(),
+                            "orientation_xyzw": Rotation.from_matrix(
+                                target_object[:3, :3]
+                            ).as_quat().tolist(),
+                        },
+                        "target_tool_pose": {
+                            "position": target_tool[:3, 3].tolist(),
+                            "orientation_xyzw": Rotation.from_matrix(
+                                target_tool[:3, :3]
+                            ).as_quat().tolist(),
+                        },
+                        "planned_trajectory_joint_deg": trajectory,
+                        "planned_start_joints_deg": (
+                            trajectory[0] if trajectory else GRASPUP_ABOVE_JOINTS_DEG
+                        ),
+                        "planned_end_joints_deg": trajectory[-1] if trajectory else None,
+                        "sample_frequency_hz": data.get("sample_frequency"),
+                    })
+                    planning_attempts.append(selected)
+                    append_placement_trace(selected)
+                    selected_plan = response
+                    classification = "DIRECT"
+                    branch = "BRANCH_1_DIRECT"
+                    profile = DIRECT_PROFILE
+                    release_z_candidates = direct_release_z
+                    plan_found.set()
+                    print("[DIRECT 可行] 正反候选无解后已找到直接放置轨迹。", flush=True)
                     break
         finally:
             planning_finished.set()
@@ -1350,6 +1688,7 @@ def main() -> int:
                     matrix_pose(target_tool),
                     planner=post_graspup_planner,
                     rrtstar_goal_tolerance=(post_graspup_planner == "rrtstar"),
+                    use_left_eef_collision_box=(classification == "FRONT"),
                 )
                 if selected_plan is None:
                     raise RuntimeError("在线重规划结果为空")
@@ -1373,7 +1712,9 @@ def main() -> int:
                 f"确认最终 {args.post_graspup_planner.upper()} 轨迹安全，"
                 "按回车执行...",
             )
-            if not gripper_holds_object("移动到最终目标工件位姿"):
+            # Keep this check directly adjacent to execution: after it passes,
+            # no permit wait or replanning may occur before the held-object move.
+            if not gripper_holds_object("从graspup_top移动到最终目标工件位姿"):
                 finish_dropped_cycle()
                 return 0
             planner.execute_planned_result(selected_plan)
@@ -1493,13 +1834,35 @@ def main() -> int:
                 max_velocity=float(args.preset_speed),
                 max_acceleration=float(args.preset_speed),
             )
-            planner.set_next_plan_context(
-                "left_place_position", "left_graspup"
-            )
-            planner.move_left_joints(
-                GRASPUP_JOINTS_DEG,
-                planner=post_graspup_planner,
-            )
+            if classification == "FRONT":
+                # 正面工件（含 front_buffer_regrasp 的恢复抓取）先带着临时
+                # left_eef 方块撤到 graspup_top，随后再按原路径回 graspup。
+                planner.set_next_plan_context(
+                    "left_place_position", "left_graspup_top"
+                )
+                planner.move_left_joints(
+                    GRASPUP_ABOVE_JOINTS_DEG,
+                    planner=post_graspup_planner,
+                    use_left_eef_collision_box=True,
+                )
+                wait_for_left_joint_target(
+                    args.arm_host,
+                    GRASPUP_ABOVE_JOINTS_DEG,
+                    label="graspup_top",
+                )
+                planner.set_next_plan_context("left_graspup_top", "left_graspup")
+                planner.move_left_joints(
+                    GRASPUP_JOINTS_DEG,
+                    planner=post_graspup_planner,
+                )
+            else:
+                planner.set_next_plan_context(
+                    "left_place_position", "left_graspup"
+                )
+                planner.move_left_joints(
+                    GRASPUP_JOINTS_DEG,
+                    planner=post_graspup_planner,
+                )
             wait_for_left_graspup(args.arm_host)
 
         if not release_succeeded:

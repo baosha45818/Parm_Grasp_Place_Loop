@@ -39,8 +39,8 @@ def parse_args() -> argparse.Namespace:
         default=0.1 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0")),
     )
     parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=[90.0, 15.0, -15.0])
-    # 工件 1 反面抓取：将名义抓取点上调 1.5 cm，实际仅下探 0.5 cm。
-    parser.add_argument("--body-z-down-m", type=float, default=0.005)
+    # 工件 1 反面抓取：相对预测抓取目标沿 body_base Z 方向下探 7 mm。
+    parser.add_argument("--body-z-down-m", type=float, default=0.007)
     return parser.parse_args()
 
 
