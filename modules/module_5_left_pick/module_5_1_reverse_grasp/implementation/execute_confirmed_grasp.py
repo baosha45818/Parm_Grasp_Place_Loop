@@ -14,10 +14,6 @@ from planner_runtime import PlannerRuntime
 from loop_config import LoopConfig
 from loop_types import ObjectPose
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
-from modules.module_5_left_pick.reverse_grasp_weight_check import (
-    capture_open_gripper_baseline,
-    verify_object_after_lift,
-)
 from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
 from parm_sdk.api.exceptions import ParmAPIError
 from execution_timing import ExecutionTiming
@@ -25,11 +21,8 @@ from execution_timing import ExecutionTiming
 NO_GRASP_EXIT_CODE=20
 REVERSE_GRASP_CONFIG=load_workpiece_handoff_profile('1')['left_reverse_grasp']
 POST_CLOSE_LIFT_M=0.03
-MIN_HELD_MASS_G=40.0
-REVERSE_GRASP_CLOSE_SPEED_PERCENT=80.0
-POST_LIFT_JUDGEMENT_DELAY_S=1.0
-# 反抓到工件后，新左夹爪必须保持至少 20% 的开度；接近全闭合不视为可靠持件。
-LEFT_GRIPPER_HELD_POSITION_MIN=20.0
+# 反抓到工件后，新左夹爪必须保持至少 35% 的开度；接近全闭合不视为可靠持件。
+LEFT_GRIPPER_HELD_POSITION_MIN=35.0
 
 def pose(T):
  q=Rotation.from_matrix(T[:3,:3]).as_quat() # x,y,z,w
@@ -37,13 +30,12 @@ def pose(T):
 def pose_debug(T):
  r=Rotation.from_matrix(T[:3,:3]); return {'position_m':np.asarray(T[:3,3]).round(7).tolist(),'rpy_xyz_deg':r.as_euler('xyz',degrees=True).round(3).tolist(),'quaternion_xyzw':r.as_quat().round(8).tolist(),'rotation_matrix':np.asarray(T[:3,:3]).round(8).tolist()}
 def targets_for_grasp(Tg, Tb, above_m, body_z_down_m):
- """Build grasp and body-Z-above baseline targets for one orientation."""
+ """Build direct ``left_eef`` Planner targets for one grasp orientation."""
  target=Tb@Tg
- target[2,3]-=body_z_down_m
- # The open-gripper force baseline and the post-close load measurement must
- # use the exact same body-frame pose: grasp target directly above on +Z.
- above=target.copy(); above[2,3]+=float(above_m)
- Tg_above=np.linalg.inv(Tb)@above
+ Tg_above=Tg.copy(); Tg_above[:3,3]-=Tg[:3,0]*float(above_m)
+ above=Tb@Tg_above
+ # Keep the 3 cm pregrasp separation while applying the requested physical-Z bias.
+ target[2,3]-=body_z_down_m; above[2,3]-=body_z_down_m
  return target, above, Tg_above
 
 def tilt_from_table_angle_deg(angle_deg):
@@ -67,9 +59,9 @@ def wait_for_left_joint_target(arm_host,target_deg,label,tolerance_deg=.5,timeou
    time.sleep(.05)
  raise RuntimeError(f'{label} did not arrive within {timeout_s:.1f}s; max joint error={last:.3f}deg')
 def main():
- p=argparse.ArgumentParser();p.add_argument('--grasp-json',type=Path,required=True);p.add_argument('--body-head',type=Path,default=MODULE_ROOT/'config/body_head_calibration.json',help='body_base <- head camera calibration');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--speed',type=float,default=.20);p.add_argument('--above-m',type=float,default=.03,help='固定为 0.03m：抓取点正上方的空载基线/预抓位');p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.020,help='additional body_z_down_m');p.add_argument('--lift-m',type=float,default=float(REVERSE_GRASP_CONFIG['post_close_lift_m']),help='固定为 0.03m：闭夹爪后上提3cm');p.add_argument('--gripper-host',default='127.0.0.1');p.add_argument('--force-sensor-host',default='127.0.0.1');p.add_argument('--planner-host',default='127.0.0.1');p.add_argument('--arm-host',default='192.168.88.1');p.add_argument('--execute-url',default='http://127.0.0.1:5667/middle/waypoint/execute');p.add_argument('--timing-file',type=Path,default=None);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--grasp-json',type=Path,required=True);p.add_argument('--body-head',type=Path,default=MODULE_ROOT/'config/body_head_calibration.json',help='body_base <- head camera calibration');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--speed',type=float,default=.20);p.add_argument('--above-m',type=float,default=.03);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.005,help='additional body_z_down_m');p.add_argument('--lift-m',type=float,default=float(REVERSE_GRASP_CONFIG['post_close_lift_m']),help='固定为 0.03m：闭夹爪后上提3cm');p.add_argument('--gripper-host',default='127.0.0.1');p.add_argument('--planner-host',default='127.0.0.1');p.add_argument('--arm-host',default='192.168.88.1');p.add_argument('--execute-url',default='http://127.0.0.1:5667/middle/waypoint/execute');p.add_argument('--timing-file',type=Path,default=None);a=p.parse_args()
  if a.execute and a.preflight_only: p.error('--execute and --preflight-only are mutually exclusive')
- if abs(a.above_m-POST_CLOSE_LIFT_M)>1e-9 or abs(a.lift_m-POST_CLOSE_LIFT_M)>1e-9 or a.body_z_down_m<0 or not a.approach_angles_deg or any(not 0<abs(x)<=90 for x in a.approach_angles_deg): p.error(f'--above-m 和 --lift-m 必须固定为 {POST_CLOSE_LIFT_M:.2f}m；--body-z-down-m 必须非负；每个 --approach-angles-deg 必须在 [-90,90] 且非0')
+ if a.above_m<=0 or abs(a.lift_m-POST_CLOSE_LIFT_M)>1e-9 or a.body_z_down_m<0 or not a.approach_angles_deg or any(not 0<abs(x)<=90 for x in a.approach_angles_deg): p.error(f'--above-m 必须为正，--lift-m 必须固定为 {POST_CLOSE_LIFT_M:.2f}m；--body-z-down-m 必须非负；每个 --approach-angles-deg 必须在 [-90,90] 且非0')
  records=json.loads(a.grasp_json.read_text());
  if len(records) != 1:
   raise RuntimeError(f'execution blocked: expected exactly one reverse-side grasp candidate, got {len(records)}; inspect grasp_overlay.png')
@@ -148,9 +140,6 @@ def main():
   planner.execute_planned_result(pregrasp_plan)
   wait_for_left_joint_target(a.arm_host,(pregrasp_plan.get('data') or {}).get('trajectory',[])[-1],'left pregrasp')
   timing.finish('pregrasp_motion')
-  # 在抓取目标正上方 3 cm、夹爪仍为空置时采集基线。抓取后的载荷窗口
-  # 会回到同一个 body_base 位姿采集，避免位置变化混入力差。
-  weight_baseline=capture_open_gripper_baseline(a.force_sensor_host)
   print('At pregrasp; automatically descending with RRTstar.')
   timing.start('grasp_descent_plan_and_motion')
   grasp_plan=planner.plan_cartesian_pose('left',pose(target),planner='rrtstar')
@@ -164,7 +153,7 @@ def main():
   with Gripper(host=a.gripper_host,status_port=7702) as gripper:
    state=gripper.get_state().get(1)
    if not is_gripper_usable(state): raise RuntimeError('left gripper hand=1 is unavailable or not initialized')
-   response=gripper.move(1,0.0,force=100.0,speed=REVERSE_GRASP_CLOSE_SPEED_PERCENT,mode='sync',preempt=False,timeout=60.0)
+   response=gripper.move(1,0.0,force=100.0,speed=80.0,mode='sync',preempt=False,timeout=60.0)
   # 新 driver 的 sync 返回包已包含本次命令的权威终态；7702 PUB 帧可能仍是
   # 上一时刻的 executing，不能立刻用它否定已成功的同步响应。
   payload=response.get('data') or response
@@ -173,9 +162,9 @@ def main():
   if response.get('status') != 'success' or device_state not in {'arrived','gripping'}:
    raise RuntimeError(f'left gripper close sync response is invalid: {response}')
   timing.finish('gripper_close')
-  # ``arrived`` only confirms that the close command completed.  After the
-  # 3 cm lift, gripper state is only a first contact screen; the final hold
-  # decision below additionally requires the force-derived >=40 g load.
+  # ``arrived`` only confirms that the close command completed.  The actual
+  # hold decision is deliberately deferred until after the 3 cm lift and must
+  # come from the subscribed gripper state: only ``gripping`` is a contact.
   print('Gripper close complete; automatically lifting along body_base +Z by 3 cm before checking gripper hold state.')
   timing.start('post_grasp_lift_and_hold_check')
   check_lift=target.copy();check_lift[2,3]+=POST_CLOSE_LIFT_M
@@ -184,8 +173,6 @@ def main():
   if lift_plan is None: raise RuntimeError('post-grasp lift planner returned no trajectory')
   planner.execute_planned_result(lift_plan)
   wait_for_left_joint_target(a.arm_host,(lift_plan.get('data') or {}).get('trajectory',[])[-1],'left 3cm post-grasp lift')
-  print(f'上提3cm已到位；等待 {POST_LIFT_JUDGEMENT_DELAY_S:.1f}s 后开始夹爪和力传感器持件判定。',flush=True)
-  time.sleep(POST_LIFT_JUDGEMENT_DELAY_S)
   with Gripper(host=a.gripper_host,status_port=7702) as gripper:
    hold_state=gripper.get_state().get(1) or {}
   motion_state=str(hold_state.get('motion_state','')).strip().lower()
@@ -194,23 +181,13 @@ def main():
   except (TypeError,ValueError): position=None
   held=motion_state=='gripping' and position is not None and position>LEFT_GRIPPER_HELD_POSITION_MIN
   print(f'[反抓夹爪] 上提3cm后状态: motion_state={motion_state!r} position={position}; held={held} (要求 gripping 且 position > {LEFT_GRIPPER_HELD_POSITION_MIN:.1f}%)',flush=True)
-  force_check=verify_object_after_lift(
-   weight_baseline, a.force_sensor_host, minimum_held_mass_g=MIN_HELD_MASS_G,
-  )
-  hold_check={
-   'gripper': {'motion_state': motion_state, 'position_percent': position, 'accepted': held},
-   'force': force_check,
-   'accepted': bool(held and force_check['accepted']),
-  }
-  hold_check_path=a.grasp_json.parent/'reverse_grasp_hold_check.json'
-  hold_check_path.write_text(json.dumps(hold_check,indent=2)+'\n')
   timing.finish('post_grasp_lift_and_hold_check')
-  if not hold_check['accepted']:
+  if not held:
    with Gripper(host=a.gripper_host,status_port=7702) as gripper:
     gripper.move(1,100.0,force=100.0,speed=80.0,mode='sync',preempt=False,timeout=60.0)
-   print('NO_GRASP: 上提3cm后夹爪或力传感器未确认持件（重量须 >= 40g）；已打开左夹爪，返回预备位后重拍。',flush=True)
+   print('NO_GRASP: 上提3cm后左夹爪未报告 gripping 或闭合位置不满足；已打开左夹爪，返回预备位后重拍。',flush=True)
    raise SystemExit(NO_GRASP_EXIT_CODE)
-  print(f'grasp-and-lift complete (gripper and force confirmed; mass={force_check["mass_g"]}g, threshold={MIN_HELD_MASS_G}g)');outcome='SUCCESS'
+  print('grasp-and-lift complete (held confirmed by post-lift left gripper state)');outcome='SUCCESS'
  finally:
   planner.close();timing.write(timing_path,outcome);print(f'REVERSE_GRASP_EXECUTION_TIMING={timing_path}',flush=True)
 if __name__=='__main__':main()

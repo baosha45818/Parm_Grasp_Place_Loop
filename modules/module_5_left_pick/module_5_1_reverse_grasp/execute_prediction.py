@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=[90.0, 15.0, -15.0])
     # 工件 1 反面抓取：相对预测抓取目标沿 body_base Z 方向下探 7 mm。
-    parser.add_argument("--body-z-down-m", type=float, default=0.007)
+    parser.add_argument("--body-z-down-m", type=float, default=0.005)
     return parser.parse_args()
 
 

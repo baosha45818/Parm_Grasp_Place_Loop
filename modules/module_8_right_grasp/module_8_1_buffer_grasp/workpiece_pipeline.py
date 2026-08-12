@@ -291,22 +291,36 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
                 f"[planner] 关节 RRTstar 规划至 {pose_path.name} "
                 f"({attempt}/{SAVED_POSE_PLAN_RETRIES})。"
             )
-            result = planner._trajectory.send_payload({
-                "waypoints": [{
-                    "name": f"module_8_1_saved_pose_{number}",
-                    "type": "joint",
-                    "group": "right_arm",
-                    "planner": "rrtstar",
-                    "max_velocity_scaling_factor": speed_scale,
-                    "max_acceleration_scaling_factor": speed_scale,
-                    "joint_names": RIGHT_ARM_JOINT_NAMES,
-                    "joint_values": target,
-                }],
-                "topp": {
-                    "max_vel_factor": speed_scale,
-                    "max_acc_factor": speed_scale,
-                },
-            }, timeout=30.0)
+            try:
+                result = planner._trajectory.send_payload({
+                    "waypoints": [{
+                        "name": f"module_8_1_saved_pose_{number}",
+                        "type": "joint",
+                        "group": "right_arm",
+                        "planner": "rrtstar",
+                        "max_velocity_scaling_factor": speed_scale,
+                        "max_acceleration_scaling_factor": speed_scale,
+                        "joint_names": RIGHT_ARM_JOINT_NAMES,
+                        "joint_values": target,
+                    }],
+                    "topp": {
+                        "max_vel_factor": speed_scale,
+                        "max_acc_factor": speed_scale,
+                    },
+                }, timeout=30.0)
+            except Exception as exc:
+                if attempt == SAVED_POSE_PLAN_RETRIES:
+                    raise RuntimeError(
+                        f"规划至 {pose_path.name} 连续 "
+                        f"{SAVED_POSE_PLAN_RETRIES} 次失败: {exc}"
+                    ) from exc
+                print(
+                    f"[planner] 规划至 {pose_path.name} 未找到可行轨迹；"
+                    "未执行机械臂运动，重新读取场景后重试。",
+                    flush=True,
+                )
+                time.sleep(0.2)
+                continue
             data = result.get("data") or {}
             trajectory = data.get("trajectory")
             planned_arm_id = data.get("arm_id")

@@ -1834,35 +1834,28 @@ def main() -> int:
                 max_velocity=float(args.preset_speed),
                 max_acceleration=float(args.preset_speed),
             )
-            if classification == "FRONT":
-                # 正面工件（含 front_buffer_regrasp 的恢复抓取）先带着临时
-                # left_eef 方块撤到 graspup_top，随后再按原路径回 graspup。
-                planner.set_next_plan_context(
-                    "left_place_position", "left_graspup_top"
-                )
-                planner.move_left_joints(
-                    GRASPUP_ABOVE_JOINTS_DEG,
-                    planner=post_graspup_planner,
-                    use_left_eef_collision_box=True,
-                )
-                wait_for_left_joint_target(
-                    args.arm_host,
-                    GRASPUP_ABOVE_JOINTS_DEG,
-                    label="graspup_top",
-                )
-                planner.set_next_plan_context("left_graspup_top", "left_graspup")
-                planner.move_left_joints(
-                    GRASPUP_JOINTS_DEG,
-                    planner=post_graspup_planner,
-                )
-            else:
-                planner.set_next_plan_context(
-                    "left_place_position", "left_graspup"
-                )
-                planner.move_left_joints(
-                    GRASPUP_JOINTS_DEG,
-                    planner=post_graspup_planner,
-                )
+            # If a release LIN was configured, the successful path above first
+            # returns to ``target_tool``.  Both faces then withdraw through the
+            # same high clearance pose instead of planning directly from the
+            # low placement pose to graspup.
+            planner.set_next_plan_context(
+                "left_place_position", "left_graspup_top"
+            )
+            planner.move_left_joints(
+                GRASPUP_ABOVE_JOINTS_DEG,
+                planner=post_graspup_planner,
+                use_left_eef_collision_box=(classification == "FRONT"),
+            )
+            wait_for_left_joint_target(
+                args.arm_host,
+                GRASPUP_ABOVE_JOINTS_DEG,
+                label="graspup_top",
+            )
+            planner.set_next_plan_context("left_graspup_top", "left_graspup")
+            planner.move_left_joints(
+                GRASPUP_JOINTS_DEG,
+                planner=post_graspup_planner,
+            )
             wait_for_left_graspup(args.arm_host)
 
         if not release_succeeded:

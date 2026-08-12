@@ -24,8 +24,8 @@ def build_parser(description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--arm-host",
-        default="192.168.88.1",
-        help="PARM Arm SDK 主机，默认 192.168.88.1",
+        default="192.168.3.11",
+        help="PARM Arm SDK 主机，默认 192.168.3.11",
     )
     parser.add_argument(
         "--speed",
@@ -64,8 +64,8 @@ def plan_and_execute(
         raise ValueError("arm 必须是 'left' 或 'right'")
     from parm_sdk import Planner
 
-    if planner_name != "rrtstar":
-        raise ValueError("planner_name 必须是 'rrtstar'")
+    if planner_name not in {"ompl", "rrtstar"}:
+        raise ValueError("planner_name 必须是 'ompl' 或 'rrtstar'")
     print(
         f"目标：{group} 关节空间 {planner_name.upper()} 规划，"
         "关节单位为度（deg）"
@@ -81,7 +81,7 @@ def plan_and_execute(
                     "name": f"{arm}_joint_target",
                     "type": "joint",
                     "group": group,
-                    "planner": "rrtstar",
+                    "planner": planner_name,
                     "max_velocity_scaling_factor": float(args.speed),
                     "max_acceleration_scaling_factor": float(args.speed),
                     "joint_names": joint_names,
