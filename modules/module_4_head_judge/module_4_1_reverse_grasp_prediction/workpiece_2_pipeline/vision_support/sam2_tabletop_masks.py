@@ -108,11 +108,42 @@ def retain_supported_workpiece_components(mask, valid, gray, height, positives):
     return kept if int(np.count_nonzero(kept)) >= 350 else mask.astype(np.uint8)
 
 
-def save_prompt_visualization(image, roi_xywh, box_xyxy, positives, negatives, path, candidate_index):
+def tabletop_roi_mask(workspace, shape_hw, roi_xywh=None):
+    """Build the configured tabletop quadrilateral at the current RGB size.
+
+    A rectangular ``--roi`` remains available as a deliberate debugging
+    override, but production calls use the calibrated tabletop polygon.  The
+    same mask gates seed generation, SAM2 output, and negative prompts.
+    """
+    height, width = shape_hw
+    if roi_xywh is not None:
+        x, y, roi_width, roi_height = roi_xywh
+        polygon = np.asarray(((x, y), (x + roi_width - 1, y),
+                              (x + roi_width - 1, y + roi_height - 1),
+                              (x, y + roi_height - 1)), dtype=np.int32)
+        source = "cli_rectangle"
+    else:
+        try:
+            reference_width, reference_height = workspace["reference_color_size_wh"]
+            reference_polygon = np.asarray(workspace["safe_roi_polygon_px"], dtype=np.float32)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("tabletop_workspace.json 缺少有效的 reference_color_size_wh 或 safe_roi_polygon_px") from exc
+        if reference_polygon.ndim != 2 or reference_polygon.shape[0] < 3 or reference_polygon.shape[1] != 2 or reference_width <= 0 or reference_height <= 0:
+            raise ValueError("tabletop_workspace.json 的桌面 ROI 必须至少包含三个有效顶点")
+        scale = np.asarray((width / float(reference_width), height / float(reference_height)))
+        polygon = np.rint(reference_polygon * scale).astype(np.int32)
+        source = "workspace_polygon"
+    polygon[:, 0] = np.clip(polygon[:, 0], 0, width - 1)
+    polygon[:, 1] = np.clip(polygon[:, 1], 0, height - 1)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, polygon, 1, lineType=cv2.LINE_8)
+    return mask, polygon, source
+
+
+def save_prompt_visualization(image, roi_polygon, box_xyxy, positives, negatives, path, candidate_index):
     """Save the exact positive/negative prompts passed to one SAM2 request."""
     overlay = image.copy()
-    rx, ry, rw, rh = roi_xywh
-    cv2.rectangle(overlay, (rx, ry), (rx + rw - 1, ry + rh - 1), (255, 255, 0), 2)
+    cv2.polylines(overlay, [roi_polygon], True, (255, 255, 0), 2, cv2.LINE_AA)
     bx0, by0, bx1, by1 = box_xyxy
     cv2.rectangle(overlay, (bx0, by0), (bx1, by1), (0, 255, 255), 2)
     for point_index, (x, y) in enumerate(positives, start=1):
@@ -123,7 +154,7 @@ def save_prompt_visualization(image, roi_xywh, box_xyxy, positives, negatives, p
         cv2.drawMarker(overlay, (x, y), (0, 0, 0), cv2.MARKER_TILTED_CROSS, 14, 4, cv2.LINE_AA)
         cv2.drawMarker(overlay, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 12, 2, cv2.LINE_AA)
         cv2.putText(overlay, f"-{point_index}", (x + 9, y - 8), cv2.FONT_HERSHEY_SIMPLEX, .45, (0, 0, 255), 2, cv2.LINE_AA)
-    caption = f"SAM2 prompt {candidate_index}: green=positive, red=negative, yellow=box, cyan=ROI"
+    caption = f"SAM2 prompt {candidate_index}: green=positive, red=negative, yellow=box, cyan=table ROI"
     cv2.putText(overlay, caption, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, .55, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(overlay, caption, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, .55, (255, 255, 255), 1, cv2.LINE_AA)
     if not cv2.imwrite(str(path), overlay):
@@ -131,7 +162,7 @@ def save_prompt_visualization(image, roi_xywh, box_xyxy, positives, negatives, p
 
 def main():
  workspace=json.loads((MODULE_ROOT/'config/tabletop_workspace.json').read_text())
- p=argparse.ArgumentParser(); p.add_argument('--capture-dir',type=Path,required=True); p.add_argument('--socket',default='unix:///tmp/sam2-service.sock'); p.add_argument('--height-mm',type=float,default=3.0); p.add_argument('--max-gray',type=int,default=105); p.add_argument('--min-seed-area',type=int,default=90); p.add_argument('--positive-interior-margin-px',type=int,default=12); p.add_argument('--positive-core-distance-fraction',type=float,default=.70); p.add_argument('--positive-min-separation-px',type=int,default=18); p.add_argument('--roi',nargs=4,type=int,default=workspace['safe_roi_xywh'],metavar=('X','Y','W','H')); p.add_argument('--out',type=Path,default=None); a=p.parse_args()
+ p=argparse.ArgumentParser(); p.add_argument('--capture-dir',type=Path,required=True); p.add_argument('--socket',default='unix:///tmp/sam2-service.sock'); p.add_argument('--height-mm',type=float,default=3.0); p.add_argument('--max-gray',type=int,default=105); p.add_argument('--min-seed-area',type=int,default=90); p.add_argument('--positive-interior-margin-px',type=int,default=12); p.add_argument('--positive-core-distance-fraction',type=float,default=.70); p.add_argument('--positive-min-separation-px',type=int,default=18); p.add_argument('--roi',nargs=4,type=int,default=None,metavar=('X','Y','W','H'),help='debug-only rectangular override; production uses tabletop_workspace.json polygon'); p.add_argument('--out',type=Path,default=None); a=p.parse_args()
  if a.positive_interior_margin_px < 0:
   raise ValueError('--positive-interior-margin-px 必须 >= 0')
  if not 0 < a.positive_core_distance_fraction <= 1:
@@ -141,10 +172,7 @@ def main():
  meta=json.loads((a.capture_dir/'metadata.json').read_text()); rgb=cv2.imread(str(a.capture_dir/'rgb_000.png')); d=cv2.imread(str(a.capture_dir/'depth_aligned_000.png'),cv2.IMREAD_UNCHANGED)
  if rgb is None or d is None:
   raise RuntimeError("无法读取头部 RGB 或对齐深度图")
- expected_size=workspace.get('reference_color_size_wh')
  actual_size=[int(rgb.shape[1]),int(rgb.shape[0])]
- if expected_size is not None and actual_size != [int(v) for v in expected_size]:
-  raise RuntimeError(f"头部 RGB 分辨率与工作区配置不一致: capture={actual_size}, expected={expected_size}")
  k=meta['color_intrinsics']; K=np.array([[k['fx'],0,k['ppx']],[0,k['fy'],k['ppy']],[0,0,1.]])
  xyz=depth_to_xyz(d,K,float(meta['depth_scale_m'])); valid=(d>0)&(d<65535); pts=xyz[valid]
  import open3d as o3d
@@ -154,7 +182,7 @@ def main():
  # Depth supplies conservative foreground hints. Dark-metal RGB support
  # suppresses tabletop height ripple before SAM2 grows a complete object.
  seeds=((h>=a.height_mm/1000)&valid&(gray<=a.max_gray)).astype(np.uint8)
- roi=np.zeros_like(seeds); rx,ry,rw,rh=a.roi; roi[max(0,ry):min(seeds.shape[0],ry+rh),max(0,rx):min(seeds.shape[1],rx+rw)]=1; seeds*=roi
+ roi, roi_polygon, roi_source = tabletop_roi_mask(workspace, seeds.shape, a.roi); seeds*=roi
  seeds=cv2.morphologyEx(seeds,cv2.MORPH_OPEN,np.ones((3,3),np.uint8)); seeds=cv2.dilate(seeds,np.ones((5,5),np.uint8),iterations=1)
  count,lab,stats,centers=cv2.connectedComponentsWithStats(seeds)
  out=a.out or a.capture_dir/'sam2_masks'; out.mkdir(parents=True,exist_ok=True); overlay=rgb.copy(); index=0; masks=[]
@@ -182,7 +210,7 @@ def main():
   table_negative=in_box & roi.astype(bool) & valid & (np.abs(h)<=.0015) & (gray>=125) & ~seed_footprint & ~envelope
   negatives=distributed_binary_points(table_negative, count=6)
   prompt_path=prompt_dir/f'sam2_prompt_{candidate_index:03d}.png'
-  save_prompt_visualization(rgb, a.roi, box, positives, negatives, prompt_path, candidate_index)
+  save_prompt_visualization(rgb, roi_polygon, box, positives, negatives, prompt_path, candidate_index)
   prompt_visualizations.append(str(prompt_path))
   mask=prompt_segment(rgb,box,positives,negatives,a.socket)
   # A SAM2 prompt is allowed to grow only inside the declared tabletop work
@@ -206,7 +234,7 @@ def main():
   refine_prompt_path=prompt_dir/f'sam2_refine_prompt_{candidate_index:03d}.png'
   first_mask_footprint=cv2.dilate(first_mask.astype(np.uint8),np.ones((25,25),np.uint8)).astype(bool)
   refine_negative=distributed_binary_points(table_negative & ~first_mask_footprint, count=6)
-  save_prompt_visualization(rgb, a.roi, box, core_positives, refine_negative, refine_prompt_path, candidate_index)
+  save_prompt_visualization(rgb, roi_polygon, box, core_positives, refine_negative, refine_prompt_path, candidate_index)
   prompt_visualizations.append(str(refine_prompt_path))
   refined_mask=prompt_segment(rgb,box,core_positives,refine_negative,a.socket)
   refined_mask=(refined_mask.astype(np.uint8)*roi)
@@ -221,7 +249,7 @@ def main():
   if np.count_nonzero(mask)<350: continue
   color=tuple(map(int,np.random.default_rng(index).integers(60,255,3))); overlay[mask>0]=(.55*overlay[mask>0]+.45*np.array(color)).astype(np.uint8); masks.append(mask); index+=1
   prompt_groups.append({'seed_labels':members,'initial_positives_xy':positives,'core_positives_xy':core_positives,'positive_interior_margin_px':a.positive_interior_margin_px,'positive_core_distance_fraction':a.positive_core_distance_fraction,'positive_min_separation_px':a.positive_min_separation_px,'initial_negatives_xy':negatives,'refine_negatives_xy':refine_negative,'box_xyxy':box,'auto_negatives':True,'initial_prompt_visualization':str(prompt_path),'core_prompt_visualization':str(refine_prompt_path),'first_sam_mask_pixels':int(np.count_nonzero(first_mask)),'sam_mask_pixels':raw_mask_pixels,'mask_pixels_after_rgbd_refine':int(np.count_nonzero(mask))})
- cv2.imwrite(str(out/'sam2_masks_overlay.png'),overlay); np.savez_compressed(out/'masks.npz',masks=np.asarray(masks,dtype=np.uint8)); (out/'meta.json').write_text(json.dumps({'masks':index,'plane':plane.tolist(),'prompt_groups':prompt_groups,'prompt_visualizations':prompt_visualizations,'image_size_wh':actual_size,'roi_xywh':[int(v) for v in a.roi],'seed_pixels':int(np.count_nonzero(seeds)),'seed_components_above_min_area':len(kept)},indent=2)); print(out); print(f'SAM2_PROMPT_VISUALIZATIONS={prompt_dir}')
+ cv2.imwrite(str(out/'sam2_masks_overlay.png'),overlay); np.savez_compressed(out/'masks.npz',masks=np.asarray(masks,dtype=np.uint8)); (out/'meta.json').write_text(json.dumps({'masks':index,'plane':plane.tolist(),'prompt_groups':prompt_groups,'prompt_visualizations':prompt_visualizations,'image_size_wh':actual_size,'roi_polygon_px':roi_polygon.tolist(),'roi_source':roi_source,'seed_pixels':int(np.count_nonzero(seeds)),'seed_components_above_min_area':len(kept)},indent=2)); print(out); print(f'SAM2_PROMPT_VISUALIZATIONS={prompt_dir}')
  if not masks:
   raise RuntimeError(
    "SAM2 未生成任何工件掩码；请查看 "

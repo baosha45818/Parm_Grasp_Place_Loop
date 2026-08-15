@@ -113,6 +113,25 @@ class HeadD435PoseTests(unittest.TestCase):
             self.assertEqual(frame, "body_base")
             self.assertEqual(info["status"], "calibrated_fixed_head_pose")
 
+    def test_body_output_propagates_charuco_schema_to_runtime_head_pose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "charuco.json"
+            path.write_text(json.dumps({
+                "T_base_head_camera": np.eye(4).tolist(),
+                "head_pose_deg": {"pitch": 0.0, "yaw": 0.0},
+            }))
+            output, frame, info = choose_output_transform(
+                "body_base", np.eye(4), {"pitch": 25.0, "yaw": 35.0},
+                path, 1.0, propagate_head_extrinsic=True,
+            )
+            self.assertEqual(frame, "body_base")
+            self.assertEqual(info["status"], "kinematically_propagated_head_extrinsic")
+            np.testing.assert_allclose(
+                output,
+                propagate_extrinsic(np.eye(4), 0.0, 0.0, 25.0, 35.0),
+                atol=1e-10,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

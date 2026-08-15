@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -221,7 +222,10 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--approach-angles-deg", type=float, nargs="+", default=[90., 15., -15.],
                    help="相对桌面的接近角；90 为竖直，15/-15 为绕两指轴侧向接近")
-    p.add_argument("--speed", type=float, default=.15)
+    p.add_argument(
+        "--speed", type=float,
+        default=float(os.environ.get("PARM_LEFT_ARM_SPEED", "0.1")),
+    )
     p.add_argument(
         "--planning-inflight",
         type=int,
@@ -229,10 +233,10 @@ def parse_args() -> argparse.Namespace:
         help="并发离线规划请求数；每个请求使用独立 Planner 客户端",
     )
     p.add_argument("--close-force", type=float, default=100.)
-    p.add_argument("--planner-host", default="127.0.0.1")
-    p.add_argument("--gripper-host", default="127.0.0.1")
-    p.add_argument("--head-host", default="127.0.0.1")
-    p.add_argument("--arm-host", default="192.168.88.1")
+    p.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    p.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    p.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"))
+    p.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     return p.parse_args()
 
 

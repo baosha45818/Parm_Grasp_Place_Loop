@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+import sys
 from typing import Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -22,20 +23,24 @@ from urllib.request import Request, urlopen
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+LOOP_ROOT = Path(__file__).resolve().parents[3]
+if str(LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOOP_ROOT))
+
+from tool.planner_task_retry import retry_task_creation
+
 
 DEFAULT_PLANNER_HOST = "127.0.0.1"
-# GraspNet uses its own calibrated Planner instance.  Keep all three SDK
-# sub-services together; changing only trajectory_port would mix TF/waypoints
-# from the normal Planner with the calibrated robot model.
-DEFAULT_TRAJECTORY_PORT = 5605
-DEFAULT_TF_PORT = 5614
-DEFAULT_WAYPOINT_PORT = 5615
+# 祥鑫现场只保留一个常规 Planner；三个端口必须来自同一实例。
+DEFAULT_TRAJECTORY_PORT = 5604
+DEFAULT_TF_PORT = 5609
+DEFAULT_WAYPOINT_PORT = 5610
 DEFAULT_EXECUTE_URL = "http://127.0.0.1:5667/middle/waypoint/execute"
 LEFT_GROUP = "left_arm"
 LEFT_ARM_ID = 1
 LEFT_JOINT_NAMES = [f"left_arm_joint{index}" for index in range(1, 8)]
 DEFAULT_BASE_FRAME = "body_base"
-DEFAULT_LEFT_TOOL_FRAME = "left_hand_tool_end_link"
+DEFAULT_LEFT_TOOL_FRAME = "left_hand_transfer_end"
 DEFAULT_LEGACY_ARM1_TF_BRIDGE = Path(
     "/home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/planner_tf_bridge.json"
 )
@@ -207,19 +212,22 @@ def plan_joint_rrtstar(
         host=str(planner_host), trajectory_port=int(trajectory_port),
         tf_port=int(tf_port), waypoint_port=int(waypoint_port),
     ) as planner:
-        response = planner._trajectory.send_payload({
-            "waypoints": [{
-                "name": "graspnet_joint_rrtstar",
-                "type": "joint",
-                "group": LEFT_GROUP,
-                "planner": "rrtstar",
-                "max_velocity_scaling_factor": speed,
-                "max_acceleration_scaling_factor": speed,
-                "joint_names": LEFT_JOINT_NAMES,
-                "joint_values": target,
-            }],
-            "topp": {"max_vel_factor": speed, "max_acc_factor": speed},
-        }, timeout=30.0)
+        response = retry_task_creation(
+            lambda: planner._trajectory.send_payload({
+                "waypoints": [{
+                    "name": "graspnet_joint_rrtstar",
+                    "type": "joint",
+                    "group": LEFT_GROUP,
+                    "planner": "rrtstar",
+                    "max_velocity_scaling_factor": speed,
+                    "max_acceleration_scaling_factor": speed,
+                    "joint_names": LEFT_JOINT_NAMES,
+                    "joint_values": target,
+                }],
+                "topp": {"max_vel_factor": speed, "max_acc_factor": speed},
+            }, timeout=30.0),
+            label="GraspNet 左臂 RRTSTAR 关节规划",
+        )
     trajectory, arm_id, sample_frequency = _planned_trajectory(response)
     print(f"-> planner joint RRTStar: {len(trajectory)} points at {sample_frequency:.2f} Hz")
     print("   final joints(deg):", [round(value, 3) for value in trajectory[-1]])
@@ -261,25 +269,31 @@ def plan_cartesian(
         )
         print(f"-> Planner TF: {source_frame} -> {base_frame}")
         if planner_type == "rrtstar":
-            response = planner._trajectory.send_payload({
-                "waypoints": [{
-                    "name": "graspnet_cartesian_rrtstar",
-                    "type": "cart",
-                    "group": LEFT_GROUP,
-                    "planner": "rrtstar",
-                    "max_velocity_scaling_factor": speed,
-                    "max_acceleration_scaling_factor": speed,
-                    "frame_id": str(base_frame),
-                    "ik_frame": str(tool_frame),
-                    "position": position,
-                    "orientation": orientation,
-                }],
-                "topp": {"max_vel_factor": speed, "max_acc_factor": speed},
-            }, timeout=30.0)
+            response = retry_task_creation(
+                lambda: planner._trajectory.send_payload({
+                    "waypoints": [{
+                        "name": "graspnet_cartesian_rrtstar",
+                        "type": "cart",
+                        "group": LEFT_GROUP,
+                        "planner": "rrtstar",
+                        "max_velocity_scaling_factor": speed,
+                        "max_acceleration_scaling_factor": speed,
+                        "frame_id": str(base_frame),
+                        "ik_frame": str(tool_frame),
+                        "position": position,
+                        "orientation": orientation,
+                    }],
+                    "topp": {"max_vel_factor": speed, "max_acc_factor": speed},
+                }, timeout=30.0),
+                label="GraspNet 左臂 RRTSTAR 笛卡尔规划",
+            )
         else:
-            response = planner.plan_cart_trajectory(
-                group=LEFT_GROUP, planner="lin", frame_id=str(base_frame), ik_frame=str(tool_frame),
-                position=position, orientation=orientation, max_vel=speed, max_acc=speed,
+            response = retry_task_creation(
+                lambda: planner.plan_cart_trajectory(
+                    group=LEFT_GROUP, planner="lin", frame_id=str(base_frame), ik_frame=str(tool_frame),
+                    position=position, orientation=orientation, max_vel=speed, max_acc=speed,
+                ),
+                label="GraspNet 左臂 LIN 笛卡尔规划",
             )
     trajectory, arm_id, sample_frequency = _planned_trajectory(response)
     print(

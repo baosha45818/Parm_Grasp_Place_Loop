@@ -22,7 +22,7 @@ SDK_WHEEL = next(iter(sorted((Path(__file__).resolve().parents[1] / "runtime/par
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--distance-m", type=float, default=0.05,
                         help="沿 SDK world +Z 的目标上升距离，默认 0.05 m")
     parser.add_argument("--frequency-hz", type=float, default=20.0,

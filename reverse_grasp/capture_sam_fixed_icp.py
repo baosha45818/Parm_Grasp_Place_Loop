@@ -103,7 +103,7 @@ def fuse_static_capture(raw: Path, capture_dir: Path, frame_count: int) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--head-host", default="127.0.0.1")
-    parser.add_argument("--serial", default="261222076212")
+    parser.add_argument("--serial", default="261722072445")
     parser.add_argument("--run-dir", type=Path, default=None)
     parser.add_argument("--capture-snapshots", type=int, default=5,
                         help="固定观察位连续采集并叠加的 RGB-D 快照数（默认 5）")

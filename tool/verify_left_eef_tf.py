@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="只读拟合 T_sdk_eef_left_arm_end_link；不会发送任何运动指令。"
     )
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--trajectory-port", type=int, default=5605)
     parser.add_argument("--tf-port", type=int, default=5614)

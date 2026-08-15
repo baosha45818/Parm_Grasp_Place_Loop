@@ -44,12 +44,13 @@ LEFT_FLOW_SCRIPTS = {
 }
 LEFT_PICK = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/main.py"
 FRONT_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/front_buffer_regrasp.py"
+REVERSE_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/reverse_buffer_regrasp.py"
 LEFT_PLACE = LOOP_ROOT / "modules/module_3_left_place/standalone_left_place.py"
 HEAD_MOTION = LOOP_ROOT / "tool/move_head_gimbal.py"
-HEAD_CALIBRATION = (
-    LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/"
-    "config/body_head_calibration.json"
-)
+# Buffer 落桌后的正反面复检专用观察角；不要复用 Module 5 反抓标定角，
+# 后者仍由各自模块管理。
+BUFFER_FACE_CHECK_HEAD_PITCH_DEG = 45.0
+BUFFER_FACE_CHECK_HEAD_YAW_DEG = 0.0
 BUFFER_FACE_CHECK = Path("/home/dainanjun/qiuguolin/graspnet/buffer_check/check_buffer_face.py")
 LEFT_HANDOFF_PREP = (
     LOOP_ROOT
@@ -73,6 +74,7 @@ MODULAR_RIGHT_BUFFER_PIPELINE = (
 RIGHT_PLACE_WIGGLE = (
     LOOP_ROOT / "modules/module_9_right_place/place_hole_a_wiggle.py"
 )
+RIGHT_SERVO_TALL_CONTACT_FILE = "right_servo_tall_contact"
 LEFT_GRASPUP_JOINTS_DEG = [-4.081, -52.722, 3.637, 100.478, -10.051, 53.969, 8.843]
 LEFT_GRASPUP_APPROACH_JOINTS_DEG = [
     14.281,
@@ -86,16 +88,17 @@ LEFT_GRASPUP_APPROACH_JOINTS_DEG = [
 # 反抓头部观察链的 ``left_handoff.prepare_joints_deg``。它是桌面区域
 # 撤离后的中间观察位；Buffer Check 重拍只需要到这里，不需要继续回 graspup。
 LEFT_MIDDLE_OBSERVATION_JOINTS_DEG = LEFT_GRASPUP_APPROACH_JOINTS_DEG
-# 工件1正面/侧面经缓冲区后的既有放置准备位；工件2从自己的
-# workpiece_2_handoff_profile读取目标，两个配置源保持独立。
+# 工件1正面 Buffer 路径抓取后的放置准备位。它必须与
+# ``workpiece_1.right_handoff.place_ready_joints_deg`` 一致；工件2仍从自己的
+# workpiece_2_handoff_profile 读取独立目标。
 RIGHT_PLACE_READY_JOINTS_DEG = [
-    30.4353,
-    23.8637,
-    0.5905,
-    66.3409,
-    -62.0439,
-    -64.3304,
-    25.7149,
+    22.1484,
+    10.9122,
+    42.3263,
+    107.9434,
+    -97.3484,
+    -25.6449,
+    -24.1054,
 ]
 RIGHT_REVERSE_HANDOFF_PREP_JOINTS_DEG = [
     161.36, 19.07, -107.979, 71.451, -55.833, -14.896, 88.2,
@@ -177,10 +180,10 @@ _apply_modular_entries_for_spawned_worker()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--head-host", default="127.0.0.1",
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"),
                         help="兼容参数；云台动作由对应业务模块自行管理")
     parser.add_argument("--right-idle-pose", type=Path,
                         default=Path("/home/dainanjun/zhuyiming/push_T/saved_poses/3.json"))
@@ -207,14 +210,20 @@ def parse_args() -> argparse.Namespace:
         help="正面桌面重抓预抓位相对 ICP 的 body_base +Z 高度，默认0.05m",
     )
     parser.add_argument(
-        "--front-regrasp-descent-distance-m", type=float, default=0.022,
+        "--front-regrasp-descent-distance-m", type=float, default=0.025,
         help="正面桌面重抓从预抓位 LIN 下移距离，默认0.02m",
     )
     parser.add_argument("--require-confirmation", action="store_true",
                         help="右臂交接及最终放置也逐步要求输入 y；默认沿用现有自动交接")
     parser.add_argument("--runtime-dir", type=Path,
                         help="本次跨进程握手文件目录；默认写入 loop/output")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not 0.0 < args.front_regrasp_descent_distance_m <= args.front_regrasp_pregrasp_height_m:
+        parser.error(
+            "--front-regrasp-descent-distance-m 必须在 "
+            "(0, --front-regrasp-pregrasp-height-m] m 内"
+        )
+    return args
 
 
 def status_label(value: int) -> str:
@@ -269,43 +278,26 @@ def clear_buffer_workpiece(runtime_dir: Path, workpiece_id: str) -> None:
     path.unlink()
 
 
-def right_servo_is_active(right_servo_active: mp.Value) -> bool:
-    """左臂只读右臂 ServoPose 会话状态，右臂 worker 是唯一写入方。"""
-    with right_servo_active.get_lock():
-        return bool(right_servo_active.value)
-
-
 def set_right_servo_active(right_servo_active: mp.Value, active: bool) -> None:
-    """记录右臂 ServoPose 状态，仅用于日志，不再作为运动互斥锁。"""
+    """发布右臂 ServoPose 状态，供监控、恢复和左臂避让使用。"""
     with right_servo_active.get_lock():
         right_servo_active.value = bool(active)
     print(
-        f"[right-servo] {'ACTIVE：左臂 Planner 运动允许并行' if active else 'IDLE'}",
+        f"[right-servo] {'ACTIVE' if active else 'IDLE'}",
         flush=True,
     )
 
 
-def right_is_waiting_for_observation(right_waiting_for_observation: mp.Value) -> bool:
-    """左臂只读：右臂是否已完成前置动作、正在等下一轮观察位通知。"""
-    with right_waiting_for_observation.get_lock():
-        return bool(right_waiting_for_observation.value)
-
-
-def set_right_waiting_for_observation(
-    right_waiting_for_observation: mp.Value, waiting: bool,
-) -> None:
-    """仅由右臂 worker 写入，避免首轮右臂 Idle 时出现观察事件死锁。"""
-    with right_waiting_for_observation.get_lock():
-        right_waiting_for_observation.value = bool(waiting)
-
-
-def wait_for_right_servo_idle(
-    right_servo_active: mp.Value, stop_event: mp.Event, label: str,
-) -> None:
-    """兼容旧调用：左臂动作不再等待右臂 ServoPose。"""
-    del right_servo_active, label
-    if stop_event.is_set():
-        raise InterruptedError("左臂动作前收到停止请求")
+def set_right_servo_tall_contact(marker_file: Path, active: bool) -> None:
+    """Publish Module 9's narrow expected-contact window to left planners."""
+    if active:
+        temporary = marker_file.with_name(f".{marker_file.name}.{os.getpid()}.tmp")
+        temporary.write_text("active\n", encoding="utf-8")
+        temporary.replace(marker_file)
+        print(f"[right-servo] tall 接触许可已发布: {marker_file}", flush=True)
+        return
+    marker_file.unlink(missing_ok=True)
+    print("[right-servo] tall 接触许可已清理", flush=True)
 
 
 def publish_allow_file(path: Path) -> None:
@@ -638,12 +630,11 @@ def check_reversed_workpiece_on_table(
     args: argparse.Namespace, stop_event: mp.Event, cycle_dir: Path,
 ) -> tuple[str, Path]:
     """在反面放桌后复用 Module 5 的 ICP，返回可靠 FRONT/BACK 判定。"""
-    calibration = json.loads(HEAD_CALIBRATION.read_text(encoding="utf-8"))
-    pose = calibration["head_pose_deg"]
     run_command(
         [
-            str(PYTHON), str(HEAD_MOTION), "--execute", "--host", "127.0.0.1",
-            "--pitch", str(pose["pitch"]), "--yaw", str(pose["yaw"]),
+            str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
+            "--pitch", str(BUFFER_FACE_CHECK_HEAD_PITCH_DEG),
+            "--yaw", str(BUFFER_FACE_CHECK_HEAD_YAW_DEG),
         ],
         cwd=LOOP_ROOT, stop_event=stop_event, arm_host=args.arm_host,
         label="Buffer Check 头部观察位",
@@ -681,7 +672,7 @@ def check_reversed_workpiece_on_table(
 def regrasp_front_and_place_to_left_buffer(
     args: argparse.Namespace, stop_event: mp.Event, cycle_dir: Path,
 ) -> bool:
-    """正面拨正后重抓，并让 Module 3 回到既有正面左侧放置位。"""
+    """正面拨正后重抓，经反抓中间位到 graspup_top 后正面放置。"""
     face_result = cycle_dir / "buffer_face_check.json"
     regrasp_result = cycle_dir / "front_buffer_regrasp_result.json"
     place_result = cycle_dir / "front_buffer_replacement_place_result.json"
@@ -711,9 +702,11 @@ def regrasp_front_and_place_to_left_buffer(
             "--planner-host", args.planner_host, "--arm-host", args.arm_host,
             "--gripper-host", args.gripper_host, "--preset-speed", str(args.prepare_speed),
             "--motion-speed", str(args.prepare_speed), "--auto-confirm-motion",
+            "--pre-place-middle-joints-deg",
+            *[str(value) for value in LEFT_MIDDLE_OBSERVATION_JOINTS_DEG],
         ],
         cwd=LOOP_ROOT, stop_event=stop_event, arm_host=args.arm_host,
-        label="Module 3 回原左手正面放置位",
+        label="Module 3 正面重抓后经 graspup_top 放置",
     )
     placement = json.loads(place_result.read_text(encoding="utf-8"))
     if placement.get("placement_branch") != "BRANCH_1_FRONT":
@@ -726,48 +719,24 @@ def regrasp_front_and_place_to_left_buffer(
 
 def wait_for_module2_ready(
     ready_file: Path, permit_file: Path, grasp_permit_file: Path,
-    observation_ready_file: Path, left_observation_ready: mp.Event,
-    buffer_state: mp.Value, right_servo_active: mp.Value,
-    right_waiting_for_observation: mp.Value,
+    buffer_state: mp.Value,
     stop_event: mp.Event, arm_host: str, process: subprocess.Popen[object],
 ) -> str:
-    """右臂非 ServoPose 时放行真实抓取；最终放置仍须确认 buffer=0。"""
+    """放行真实抓取；最终放置仍须确认 buffer=0。"""
     branch: str | None = None
     grasp_permitted = False
-    observation_published = False
     while process.poll() is None:
         if stop_event.wait(0.2):
             cancel_both_arms(arm_host, "停止左臂 inspect")
             terminate_process_group(process, "左臂 inspect")
             raise InterruptedError("左臂 inspect 被停止请求中断")
-        if not observation_published and observation_ready_file.is_file():
-            content = observation_ready_file.read_text(encoding="utf-8").strip().lower()
-            if content != "ready":
-                raise RuntimeError(
-                    f"左臂 GraspNet 观察位标记内容无效: {content!r}"
-                )
-            left_observation_ready.set()
-            observation_published = True
+        if not grasp_permitted:
+            publish_allow_file(grasp_permit_file)
+            grasp_permitted = True
             print(
-                "[left] 已确认左臂到达 GraspNet 观察位；右臂 ServoPose 可以启动。",
+                "[left] 已允许传统 ICP 执行预测出的真实抓取。",
                 flush=True,
             )
-        # The observation pose is the last left-arm action allowed before
-        # right ServoPose starts.  After it is published, only the right
-        # worker's ServoPose flag gates the next real GraspNet motion.
-        if not grasp_permitted and observation_published:
-            # Only later cycles have a right worker waiting for this marker.
-            # In the first cycle right is idle, so no consumer exists and the
-            # grasp permit must not wait for the marker to be cleared.
-            observation_consumed = not left_observation_ready.is_set()
-            right_waiting = right_is_waiting_for_observation(right_waiting_for_observation)
-            if not right_waiting or observation_consumed:
-                publish_allow_file(grasp_permit_file)
-                grasp_permitted = True
-                print(
-                    "[left] 右臂未处于 ServoPose，已允许 GraspNet 执行预测出的真实抓取。",
-                    flush=True,
-                )
         if branch is None and ready_file.is_file():
             payload = json.loads(ready_file.read_text(encoding="utf-8"))
             if payload.get("outcome") == "insufficient_point_cloud_discarded":
@@ -880,8 +849,7 @@ class NoGraspPredicted(RuntimeError):
 
 def run_left_grasp_inspect_place_cycle(
     args: argparse.Namespace, buffer_state: mp.Value, stop_event: mp.Event,
-    cycle_dir: Path, left_observation_ready: mp.Event, right_servo_active: mp.Value,
-    right_waiting_for_observation: mp.Value, workpiece_id: str,
+    cycle_dir: Path, workpiece_id: str,
 ) -> str | None:
     report_module_status(
         "module_1_to_3_left_pipeline",
@@ -891,31 +859,30 @@ def run_left_grasp_inspect_place_cycle(
     ready_file = cycle_dir / "module2_ready.json"
     permit_file = cycle_dir / "module2_permit"
     grasp_permit_file = cycle_dir / "grasp_execution_permit"
-    observation_ready_file = cycle_dir / "grasp_observation_ready"
     environment = os.environ.copy()
     environment["LOOP_AUTO_CONFIRM_MOTION"] = "1"
     environment["GRASPNET_V7_ARM_HOST"] = args.arm_host
     environment["PARM_PLANNER_HOST"] = args.planner_host
     environment["PARM_GRIPPER_HOST"] = args.gripper_host
     environment["LOOP_GRASPNET_EXECUTION_PERMIT_FILE"] = str(grasp_permit_file)
-    environment["PARM_LOOP_ROOT"] = str(LOOP_ROOT)
-    environment["LOOP_GRASPNET_OBSERVATION_READY_FILE"] = str(
-        observation_ready_file
+    environment["PARM_RIGHT_SERVO_TALL_CONTACT_FILE"] = str(
+        cycle_dir.parent / RIGHT_SERVO_TALL_CONTACT_FILE
     )
+    environment["PARM_LOOP_ROOT"] = str(LOOP_ROOT)
     environment["MODULE2_PLACEMENT_READY_FILE"] = str(ready_file)
     environment["MODULE2_PLACEMENT_PERMIT_FILE"] = str(permit_file)
     environment["MODULE2_SCRIPT"] = str(LEFT_FLOW_SCRIPTS[args.left_flow])
+    # The production loop intentionally bypasses chest PC1/PC2 Inspect after
+    # a verified grasp. Module 3 receives an explicit DIRECT-only handoff.
+    environment["PARM_LOOP_SKIP_INSPECT_DIRECT"] = "1"
     environment[WORKPIECE_ENV] = workpiece_id
-    wait_for_right_servo_idle(right_servo_active, stop_event, "左臂下一轮 GraspNet 观察动作")
     command = ["bash", str(GRASPNET_FLOW)]
     print("\n[run] " + " ".join(command), flush=True)
     process = subprocess.Popen(command, cwd=GRASPNET_FLOW_WORKDIR, env=environment,
                                start_new_session=True)
     try:
         branch = wait_for_module2_ready(
-            ready_file, permit_file, grasp_permit_file, observation_ready_file,
-            left_observation_ready, buffer_state, right_servo_active,
-            right_waiting_for_observation,
+            ready_file, permit_file, grasp_permit_file, buffer_state,
             stop_event, args.arm_host, process,
         )
         while process.poll() is None:
@@ -957,13 +924,11 @@ def run_left_grasp_inspect_place_cycle(
 
 
 def move_left_to_middle_observation(
-    args: argparse.Namespace, stop_event: mp.Event, right_servo_active: mp.Value,
+    args: argparse.Namespace, stop_event: mp.Event,
 ) -> None:
     """撤离桌面并到反抓链已标定的中间观察位，确认后才允许头部采集。"""
     if stop_event.is_set():
         raise InterruptedError("停止请求已到达，跳过左臂回中间观察位")
-    wait_for_right_servo_idle(right_servo_active, stop_event, "左臂回中间观察位")
-
     config = LoopConfig(
         planner_host=args.planner_host,
         execute_url="http://127.0.0.1:5667/middle/waypoint/execute",
@@ -1001,7 +966,7 @@ def move_left_to_middle_observation(
 
 
 def move_left_to_graspup(
-    args: argparse.Namespace, stop_event: mp.Event, right_servo_active: mp.Value,
+    args: argparse.Namespace, stop_event: mp.Event,
 ) -> None:
     """交接结束后先经中间观察位，再送左臂回 graspup。"""
     error_deg = current_joint_target_error_deg(
@@ -1013,7 +978,7 @@ def move_left_to_graspup(
             flush=True,
         )
         return
-    move_left_to_middle_observation(args, stop_event, right_servo_active)
+    move_left_to_middle_observation(args, stop_event)
     if stop_event.is_set():
         raise InterruptedError("左臂到达中间观察位后收到停止请求")
     config = LoopConfig(
@@ -1090,8 +1055,6 @@ def left_worker(
     args: argparse.Namespace, buffer_state: mp.Value, stop_event: mp.Event,
     fault_queue: mp.Queue, runtime_dir: Path, left_done: mp.Event,
     handoff_left_clear: mp.Event, left_needs_graspup: mp.Event,
-    left_observation_ready: mp.Event, right_servo_active: mp.Value,
-    right_waiting_for_observation: mp.Value,
 ) -> None:
     try:
         completed = 0
@@ -1103,7 +1066,7 @@ def left_worker(
                 if stop_event.wait(0.2):
                     return
             if left_needs_graspup.is_set():
-                move_left_to_graspup(args, stop_event, right_servo_active)
+                move_left_to_graspup(args, stop_event)
                 left_needs_graspup.clear()
             completed += 1
             if args.left_cycle_limit and completed > args.left_cycle_limit:
@@ -1118,11 +1081,9 @@ def left_worker(
                 metadata={"left_cycle": completed, "cycle_dir": str(cycle_dir)},
             )
             os.environ[WORKPIECE_ENV] = active_workpiece_id
-            left_observation_ready.clear()
             print(f"\n[left] 开始循环 {completed}", flush=True)
             branch = run_left_grasp_inspect_place_cycle(
-                args, buffer_state, stop_event, cycle_dir, left_observation_ready,
-                right_servo_active, right_waiting_for_observation, active_workpiece_id,
+                args, buffer_state, stop_event, cycle_dir, active_workpiece_id,
             )
 
             if branch is None:
@@ -1191,7 +1152,6 @@ def left_worker(
                 continue
 
             if branch == "BRANCH_1_FRONT":
-                left_observation_ready.clear()
                 publish_buffer_workpiece(runtime_dir, active_workpiece_id, branch)
                 set_status(buffer_state, BUFFER_TABLE_READY, f"左臂 {branch} 已放置并回 graspup")
                 if bool(getattr(args, "left_only", False)):
@@ -1235,9 +1195,6 @@ def left_worker(
                 )
                 continue
             if decision == "FRONT":
-                wait_for_right_servo_idle(
-                    right_servo_active, stop_event, "左臂正面 ICP 重抓动作"
-                )
                 front_regrasp_attempt = 0
                 front_recovered = False
                 while not stop_event.is_set() and decision == "FRONT":
@@ -1263,7 +1220,7 @@ def left_worker(
                     # Return to the established middle observation pose and
                     # verify it before commanding the head or acquiring RGB-D.
                     move_left_to_middle_observation(
-                        args, stop_event, right_servo_active
+                        args, stop_event
                     )
                     print(
                         "[left][rollback] 正面 ICP 重抓未持件；已开爪，"
@@ -1296,7 +1253,6 @@ def left_worker(
                     )
                     continue
                 if front_recovered:
-                    left_observation_ready.clear()
                     publish_buffer_workpiece(runtime_dir, active_workpiece_id, "BRANCH_1_FRONT")
                     set_status(
                         buffer_state,
@@ -1316,41 +1272,68 @@ def left_worker(
             # 可靠 BACK 才由左臂在桌上重新反抓。此时不通知右臂，直到左臂持件
             # 已到交接准备状态，才把共享变量设为2。
             print("[left] Buffer Check 确认反面：开始左臂桌面反抓，右臂暂不进入任何分支。", flush=True)
-            wait_for_right_servo_idle(right_servo_active, stop_event, "左臂桌面反抓动作")
             # A reverse-grasp NO_GRASP exit occurs after its 3 cm verification
-            # lift, not at a camera-safe pose.  Before retrying its first step
-            # (head RGB-D capture), withdraw to the same middle observation
-            # pose used by the front regrasp recovery.
+            # lift, not at a camera-safe pose.  Return to the middle
+            # observation pose and rerun Buffer Check before every retry; this
+            # keeps the retry on the same 45-degree SAM2/CAD-ICP contract.
             reverse_attempt = 0
+            front_recovered_after_reverse_recheck = False
             handoff_result_file = runtime_dir / "reverse_handoff_left_ready.json"
             while not stop_event.is_set():
                 reverse_attempt += 1
+                # Buffer Check and its ICP ran at the current 45-degree head
+                # observation pose.  Always use its most recent accepted
+                # reverse registration; Module 5-1 is not a fallback here.
+                reverse_command = [
+                    str(PYTHON), str(REVERSE_BUFFER_REGRASP), "--execute",
+                    "--buffer-check-result", str(cycle_dir / "buffer_face_check.json"),
+                    "--planner-host", args.planner_host,
+                    "--arm-host", args.arm_host,
+                    "--gripper-host", args.gripper_host,
+                    "--speed", str(args.prepare_speed),
+                ]
                 exit_code = run_command(
-                    [str(PYTHON), str(LEFT_PICK), "--execute",
-                     "--planner-host", args.planner_host,
-                     "--arm-host", args.arm_host,
-                     "--gripper-host", args.gripper_host],
-                    cwd=LEFT_PICK.parent, stop_event=stop_event,
+                    reverse_command,
+                    cwd=LOOP_ROOT, stop_event=stop_event,
                     arm_host=args.arm_host, label="左臂反抓",
                     recoverable_exit_codes=frozenset({NO_GRASP_EXIT_CODE}),
                 )
                 if exit_code != 0:
                     print(
                         f"[left][rollback] 反抓第 {reverse_attempt} 次未抓到工件；"
-                        "状态回退到 Module 5-1，重新反抓（不重跑前序模块）。",
+                        "已回中间观察位并重新执行 Buffer Check。",
                         flush=True,
                     )
-                    if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
-                        raise RuntimeError(
-                            "左臂桌面反抓已连续 5 次未确认夹到工件；"
-                            "已停止重试并保持现场。"
-                        )
                     move_left_to_middle_observation(
-                        args, stop_event, right_servo_active
+                        args, stop_event
                     )
                     if stop_event.wait(0.2):
                         return
-                    continue
+                    decision, _ = check_reversed_workpiece_on_table(
+                        args, stop_event, cycle_dir
+                    )
+                    if decision == "BACK":
+                        if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
+                            raise RuntimeError(
+                                "左臂桌面反抓已连续 5 次未确认夹到工件；"
+                                "最后一次已完成 Buffer Check 复检，停止重试并保持现场。"
+                            )
+                        continue
+                    if decision == "UNCERTAIN":
+                        break
+                    # A new FRONT result must not be grasped with the stale
+                    # reverse pose.  Use the existing FRONT recovery path.
+                    front_recovered_after_reverse_recheck = (
+                        regrasp_front_and_place_to_left_buffer(
+                            args, stop_event, cycle_dir
+                        )
+                    )
+                    if not front_recovered_after_reverse_recheck:
+                        raise RuntimeError(
+                            "反抓失败后的 Buffer Check 已改判 FRONT，但正面 ICP 重抓未确认持件；"
+                            "已停止以避免使用过期反面位姿。"
+                        )
+                    break
 
                 print("[left] 外部桌面反抓流程成功结束，开始观察位持件复检。", flush=True)
                 if handoff_result_file.exists():
@@ -1369,6 +1352,10 @@ def left_worker(
                             args.arm_host,
                             "--gripper-host",
                             args.gripper_host,
+                            "--driver-host",
+                            args.head_host,
+                            "--head-host",
+                            args.head_host,
                             "--workpiece",
                             os.environ.get("PARM_LOOP_WORKPIECE", "1"),
                             "--handoff-result-file",
@@ -1389,21 +1376,64 @@ def left_worker(
                     break
                 print(
                     f"[left][rollback] 反抓第 {reverse_attempt} 次在观察位复检时"
-                    "未确认持件；机械臂已原路返回，重新执行 Module 5-1。",
+                    "未确认持件；机械臂已回中间观察位，重新执行 Buffer Check。",
                     flush=True,
                 )
-                if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
-                    raise RuntimeError(
-                        "左臂桌面反抓已连续 5 次未通过观察位持件复检；"
-                        "已停止重试并保持现场。"
-                    )
                 move_left_to_middle_observation(
-                    args, stop_event, right_servo_active
+                    args, stop_event
                 )
                 if stop_event.wait(0.2):
                     return
+                decision, _ = check_reversed_workpiece_on_table(
+                    args, stop_event, cycle_dir
+                )
+                if decision == "BACK":
+                    if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
+                        raise RuntimeError(
+                            "左臂桌面反抓已连续 5 次未通过观察位持件复检；"
+                            "最后一次已完成 Buffer Check 复检，停止重试并保持现场。"
+                        )
+                    continue
+                if decision == "UNCERTAIN":
+                    break
+                front_recovered_after_reverse_recheck = (
+                    regrasp_front_and_place_to_left_buffer(
+                        args, stop_event, cycle_dir
+                    )
+                )
+                if not front_recovered_after_reverse_recheck:
+                    raise RuntimeError(
+                        "交接复检失败后的 Buffer Check 已改判 FRONT，但正面 ICP 重抓未确认持件；"
+                        "已停止以避免使用过期反面位姿。"
+                    )
+                break
             if stop_event.is_set():
                 return
+            if decision == "UNCERTAIN":
+                complete_workpiece_timer(
+                    active_workpiece_id,
+                    outcome="TABLE_OBJECT_LOST",
+                    detail="反面 ICP 重抓失败后 Buffer Check 重试耗尽仍未识别到桌面工件",
+                )
+                report_module_status(
+                    "module_4_head_judge",
+                    ResultStatus.RETRY,
+                    "反抓失败后 Buffer Check 多次观察仍不确定；从 Module 1 重新抓取",
+                    reason_code="BUFFER_OBJECT_LOST",
+                )
+                continue
+            if front_recovered_after_reverse_recheck:
+                publish_buffer_workpiece(runtime_dir, active_workpiece_id, "BRANCH_1_FRONT")
+                set_status(buffer_state, BUFFER_TABLE_READY, "反抓失败后复检为正面；已正面重抓并放回 Buffer")
+                if bool(getattr(args, "left_only", False)):
+                    complete_workpiece_timer(
+                        active_workpiece_id,
+                        outcome="LEFT_ONLY_BUFFER_READY",
+                        detail="反抓失败后复检为正面；已正面重抓并放回 Buffer",
+                    )
+                    left_done.set()
+                    return
+                continue
             print(
                 "[left] Module 5-2完成：本轮ICP结果已发布，"
                 "左手持件位于交接位。",
@@ -1426,7 +1456,6 @@ def left_worker(
             # 让左手回中间位。
             # buffer 保持状态2，直到右手完成孔位放置并确认打开夹爪。
             handoff_left_clear.clear()
-            left_observation_ready.clear()
             publish_buffer_workpiece(runtime_dir, active_workpiece_id, branch)
             set_status(
                 buffer_state,
@@ -1579,6 +1608,7 @@ def move_right_to_place_ready_after_pusht(
 
 def run_right_place_wiggle(
     args: argparse.Namespace, stop_event: mp.Event, right_servo_active: mp.Value,
+    tall_contact_marker: Path,
 ) -> None:
     """两个右臂分支共用的持续 ServoPose 正式插孔/摆动放置模块。"""
     command = [str(PYTHON), str(RIGHT_PLACE_WIGGLE), "--live", "--confirm-live"]
@@ -1590,6 +1620,8 @@ def run_right_place_wiggle(
     command.extend([
         "--arm-host", args.arm_host, "--reset-right-task-before-servo",
     ])
+    set_right_servo_tall_contact(tall_contact_marker, True)
+    set_right_servo_active(right_servo_active, True)
     try:
         with module_timer("module_9_right_place"):
             run_command(
@@ -1598,34 +1630,7 @@ def run_right_place_wiggle(
             )
     finally:
         set_right_servo_active(right_servo_active, False)
-
-
-def wait_for_left_grasp_observation(
-    left_observation_ready: mp.Event, stop_event: mp.Event,
-    right_servo_active: mp.Value, right_waiting_for_observation: mp.Value,
-) -> None:
-    """右臂仅在下一轮左臂已到 GraspNet 观察位后启动 ServoPose。"""
-    if not left_observation_ready.is_set():
-        print(
-            "[right] 已完成 ServoPose 前的准备动作；等待左臂到达下一轮 "
-            "GraspNet 观察位。",
-            flush=True,
-        )
-    set_right_waiting_for_observation(right_waiting_for_observation, True)
-    try:
-        while not left_observation_ready.wait(0.2):
-            if stop_event.is_set():
-                raise InterruptedError("等待左臂 GraspNet 观察位时收到停止请求")
-        left_observation_ready.clear()
-        # Clear the observation handoff only after the ServoPose guard is active,
-        # so the left worker cannot race ahead into its next real motion.
-        set_right_servo_active(right_servo_active, True)
-        print(
-            "[right] 左臂已在 GraspNet 观察位；立即启动右臂 ServoPose 放置。",
-            flush=True,
-        )
-    finally:
-        set_right_waiting_for_observation(right_waiting_for_observation, False)
+        set_right_servo_tall_contact(tall_contact_marker, False)
 
 
 def validate_handoff_right_place_ready(
@@ -1808,8 +1813,7 @@ def right_worker(
     args: argparse.Namespace, buffer_state: mp.Value, stop_event: mp.Event,
     fault_queue: mp.Queue, runtime_dir: Path,
     handoff_left_clear: mp.Event, left_needs_graspup: mp.Event,
-    right_idle_event: mp.Event, left_observation_ready: mp.Event,
-    right_servo_active: mp.Value, right_waiting_for_observation: mp.Value,
+    right_idle_event: mp.Event, right_servo_active: mp.Value,
 ) -> None:
     active_workpiece_id: str | None = None
     try:
@@ -1867,7 +1871,11 @@ def right_worker(
                     active_workpiece_id,
                     "右臂已抓走缓冲区工件并到达 place_ready",
                 )
-                run_right_place_wiggle(args, stop_event, right_servo_active)
+                print("[right] 已到 right_place_ready；立即启动右臂 ServoPose 放置。", flush=True)
+                run_right_place_wiggle(
+                    args, stop_event, right_servo_active,
+                    runtime_dir / RIGHT_SERVO_TALL_CONTACT_FILE,
+                )
                 with module_timer("module_10_right_idle"):
                     run_right_idle(args, stop_event, runtime_dir)
                 complete_workpiece_timer(active_workpiece_id, outcome="SUCCESS")
@@ -1909,11 +1917,14 @@ def right_worker(
                 left_needs_graspup.set()
                 handoff_left_clear.set()
                 print(
-                    "[right] 左臂已回安全回程位，已放行其回 graspup 进入下一轮；"
-                    "右臂继续独立执行放置。",
+                    "[right] 左臂已回安全回程位，已放行其回 graspup；"
+                    "立即启动右臂 ServoPose 放置。",
                     flush=True,
                 )
-                run_right_place_wiggle(args, stop_event, right_servo_active)
+                run_right_place_wiggle(
+                    args, stop_event, right_servo_active,
+                    runtime_dir / RIGHT_SERVO_TALL_CONTACT_FILE,
+                )
                 with module_timer("module_10_right_idle"):
                     run_right_idle(args, stop_event, runtime_dir)
                 complete_workpiece_timer(active_workpiece_id, outcome="SUCCESS")
@@ -1978,8 +1989,8 @@ def main() -> None:
     os.environ["PARM_LOOP_ROOT"] = str(LOOP_ROOT)
     for path in (
                  PYTHON, GRASPNET_FLOW, selected_left_flow, LEFT_PICK,
-                 FRONT_BUFFER_REGRASP, LEFT_PLACE, HEAD_MOTION,
-                 HEAD_CALIBRATION, BUFFER_FACE_CHECK,
+                 FRONT_BUFFER_REGRASP, REVERSE_BUFFER_REGRASP, LEFT_PLACE, HEAD_MOTION,
+                 BUFFER_FACE_CHECK,
                  LEFT_HANDOFF_PREP, RIGHT_LEFT_HANDOFF,
                  RIGHT_FINISH, RIGHT_PUSH_TO_Q1, RIGHT_PLACE_WIGGLE,
                  args.right_idle_pose):
@@ -2001,6 +2012,13 @@ def main() -> None:
         datetime.now().strftime("%Y%m%d_%H%M%S")
     )
     runtime_dir.mkdir(parents=True, exist_ok=False)
+    # A new runtime directory should be empty, but make the contact permit
+    # explicitly absent before either worker is created.
+    tall_contact_marker = runtime_dir / RIGHT_SERVO_TALL_CONTACT_FILE
+    tall_contact_marker.unlink(missing_ok=True)
+    # All left subprocesses inherit this stable path. It remains absent except
+    # during Module 9's intended right-gripper/tall-box contact window.
+    os.environ["PARM_RIGHT_SERVO_TALL_CONTACT_FILE"] = str(tall_contact_marker)
     try:
         prepare_both_arms(args)
     except KeyboardInterrupt:
@@ -2020,10 +2038,7 @@ def main() -> None:
     handoff_left_clear = context.Event()
     handoff_left_clear.set()
     left_needs_graspup = context.Event()
-    left_observation_ready = context.Event()
-    # 右臂 worker 是唯一写入方；左臂只在发起下一次动作前读取/等待。
     right_servo_active = context.Value("b", False)
-    right_waiting_for_observation = context.Value("b", False)
     # 准备阶段已经验证右臂位于 Idle；仅在 --left-cycle-limit 收尾时使用，
     # 防止 buffer 已提前释放但右臂仍在放置时主进程提前退出。
     right_idle_event = context.Event()
@@ -2032,8 +2047,7 @@ def main() -> None:
         target=left_worker, name="left-loop",
         args=(
             args, buffer_state, stop_event, fault_queue, runtime_dir, left_done,
-            handoff_left_clear, left_needs_graspup, left_observation_ready,
-            right_servo_active, right_waiting_for_observation,
+            handoff_left_clear, left_needs_graspup,
         ),
     )
     right = None
@@ -2043,8 +2057,7 @@ def main() -> None:
             args=(
                 args, buffer_state, stop_event, fault_queue, runtime_dir,
                 handoff_left_clear, left_needs_graspup, right_idle_event,
-                left_observation_ready, right_servo_active,
-                right_waiting_for_observation,
+                right_servo_active,
             ),
         )
     print(f"[loop] runtime={runtime_dir}")

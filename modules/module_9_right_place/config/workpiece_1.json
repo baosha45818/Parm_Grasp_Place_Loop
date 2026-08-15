@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "workpiece_serial_number": 1,
+  "initial_right_joints_deg": [22.148400000000002, 10.9122, 42.3263, 107.94340000000001, -97.3484, -25.6449, -24.1054],
+  "search_axis": "x",
+  "search_direction": "negative",
+  "stop_conditions": {
+    "entry_resultant_pre_force_n": 3.0,
+    "entry_resultant_pre_torque_nm": 0.6,
+    "entry_resultant_force_n": 2.0,
+    "entry_resultant_torque_nm": 0.4,
+    "entry_resultant_force_drop_n": 2.0,
+    "entry_resultant_torque_drop_nm": 0.3,
+    "entry_resultant_release_frames": 4
+  }
+}

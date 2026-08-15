@@ -23,6 +23,11 @@ MODULE_DIR = Path(__file__).resolve().parent
 LOOP_ROOT = MODULE_DIR.parents[2]
 IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
 CONFIG_DIR = MODULE_DIR / "config"
+HEAD_CALIBRATION = (
+    MODULE_DIR.parents[2]
+    / "modules/module_4_head_judge/module_4_2_pose_estimation/"
+    "calibration/head_charuco_13x5_calibration_head.json"
+)
 NO_GRASP_EXIT_CODE = 20
 
 
@@ -31,8 +36,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--prediction-file", type=Path, required=True)
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument(
         "--speed",
         type=float,
@@ -52,7 +57,7 @@ def load_prediction(prediction_file: Path) -> tuple[dict, Path, Path, Path]:
         raise RuntimeError("Module 5-1 只接受唯一的反抓预测")
     capture_dir = Path(payload["capture_dir"]).resolve()
     grasp_json = Path(payload["grasp_json"]).resolve()
-    body_head = Path(payload.get("body_head_calibration", CONFIG_DIR / "body_head_calibration.json")).resolve()
+    body_head = Path(payload.get("body_head_calibration", HEAD_CALIBRATION)).resolve()
     if not (capture_dir / "metadata.json").is_file() or not grasp_json.is_file() or not body_head.is_file():
         raise RuntimeError("Module 4-1 预测引用的 RGB-D 或 grasp_poses.json 不存在")
     if len(json.loads(grasp_json.read_text(encoding="utf-8"))) != 1:

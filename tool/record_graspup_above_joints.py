@@ -98,7 +98,7 @@ def main() -> None:
         description="左臂运动到graspup上方并打印实际关节角（deg）"
     )
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument(
         "--execute-url",
         default="http://127.0.0.1:5667/middle/waypoint/execute",

@@ -36,3 +36,19 @@ yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0]
 roll_candidates_deg = [0,-10.0,-20.0,10.0]
 pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
 base_rpy_deg = [180.0, 0.0, 0.0]
+
+[direct object place]
+# 仅供保留的 Inspect/ICP DIRECT 回退使用。target_object_xyz_m 的 XY 加每个
+# target_z_candidates_m 组成工件中心目标；代码用 ICP 的 T_tool_object 换算为末端。
+# release_z_candidates_m 也是工件中心 Z：为空即到 target 后直接松爪。
+target_object_xyz_m = [0.487668, 0.338779, -0.300000]
+target_z_candidates_m = [-0.335]
+release_z_candidates_m = []
+
+[direct left eef place]
+# 仅供当前总控跳过 Inspect 的 DIRECT 使用。保持 graspup_top 的 left_eef RPY，
+# target_left_eef_xyz_m 仅读取 X/Y，Z 是名义值；实际目标高度按下方候选遍历。
+# 两个 Z 列表都按 left_eef 解释：release 为空即到 target 后直接松爪。
+target_left_eef_xyz_m = [0.487668, 0.338779, -0.335000]
+target_z_candidates_m = [-0.335000]
+release_z_candidates_m = []

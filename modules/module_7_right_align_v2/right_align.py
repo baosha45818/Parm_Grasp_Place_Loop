@@ -21,6 +21,8 @@ from __future__ import annotations
 import argparse
 import ast
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import fcntl
+import importlib
 from itertools import product
 import json
 import math
@@ -30,8 +32,7 @@ import sys
 from datetime import datetime, timezone
 import time
 import threading
-
-from scipy.spatial.transform import Rotation
+from typing import Any, Callable, TypeVar
 
 MODULE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_ROOT
@@ -39,37 +40,415 @@ project_root_string = str(PROJECT_ROOT)
 if project_root_string in sys.path:
     sys.path.remove(project_root_string)
 sys.path.insert(0, project_root_string)
-
-from move_by_eef_pose import compose_pose, inverse_pose, pose_from_lookup_transform
-from move_by_joints import current_pose, finite, import_sdk, move_l, rotvec_to_quat, rotvec_to_rpy, rpy_to_rotvec
-from grasp_motion_support import (
-    ensure_ready,
-    set_gripper_state,
-)
-from planning_log import append_event, planner_start_pose, planning_event
-
+LOOP_ROOT = MODULE_ROOT.parents[2]
+if str(LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOOP_ROOT))
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-# ``arm.get_state().state.right.eef_pose`` is the driver tool frame, while
-# Module 7 targets are the physical jaw-centre frame ``right_eef``.  This fixed
-# transform is expressed in the driver EEF's local frame; compose_pose rotates
-# it into body_base for each live arm attitude.
-RIGHT_EEF_FROM_TRANSFER_BASE = [0.274, 0.0, -0.05075, 0.0, 0.0, 0.0]
+# The SDK reports ``eef_pose`` in the planner's ``right_hand_transfer_base``
+# frame (also named ``right_arm_end_link``); Module 7 targets native
+# ``right_eef``.  The live TF relation is read from the planner for every run.
+DRIVER_EEF_FRAME = "right_hand_transfer_base"
+RIGHT_EEF_FRAME = "right_eef"
 DEFAULT_OUTPUT_DIR = MODULE_ROOT.parents[1] / "output/module_7"
 DEFAULT_CALIBRATION_RECORD_DIR = DEFAULT_OUTPUT_DIR / "reorient_q3_records"
 RRTCONNECT_PLANNER_KIND = "rrtconnect"
 RRTSTAR_PLANNER_KIND = "rrtstar"
 RRTCONNECT_TIMEOUT_S = 30.0
-# The 5604 RRTConnect profile has three verified cartesian workers.  Keep this
+# The 5604 Cartesian-planner profile has three verified workers. Keep this
 # process below that limit; a fourth client would only sit in the server queue.
 RRTCONNECT_PLACE_MAX_PARALLELISM = 3
 RRTCONNECT_INFLIGHT = threading.BoundedSemaphore(RRTCONNECT_PLACE_MAX_PARALLELISM)
 DEFAULT_RRTSTAR_GOAL_TOLERANCE = False
+# Measured on the live right gripper: empty closure settles at 0.0, while two
+# successful grasps settled at 22.9 and 37.6.  Keep a conservative margin from
+# the empty-closure baseline before treating the grasp as confirmed.
+GRASP_CONFIRMED_MIN_POSITION = 15.0
+NO_GRASP_DETECTED_EXIT_CODE = 21
 POSE_OUTPUT_ROOT = MODULE_ROOT.parents[1] / "output/module_4_2"
 TURN_CANDIDATE_CONFIGS = {
     1: MODULE_ROOT / "configs/workpiece_1_turn_candidates.toml",
     2: MODULE_ROOT / "configs/workpiece_2_turn_candidates.toml",
 }
+
+
+# The helpers below are intentionally local to this entry point.  Keeping the
+# control path self-contained avoids a runtime dependency on the neighbouring
+# movement/logging scripts while preserving their established behaviour.
+ResultT = TypeVar("ResultT")
+TASK_CREATION_ATTEMPTS = 5
+TASK_CREATION_RETRY_DELAYS_S = (1.0, 2.0, 3.0, 5.0)
+PLAN_LOG_ENV = "WORKPIECE_PIPELINE_EVENT_LOG"
+
+
+def import_sdk() -> Any:
+    try:
+        return importlib.import_module("parm_sdk")
+    except ImportError:
+        override = os.environ.get("PARM_SDK_WHEEL", "").strip()
+        candidates = [Path(override)] if override else []
+        candidates.extend(sorted(
+            Path("/home/dainanjun/Public/parm_sdk_1.0.0").glob("parm_sdk-*.whl"),
+            reverse=True,
+        ))
+        for wheel in candidates:
+            if wheel.is_file():
+                sys.path.insert(0, str(wheel))
+                try:
+                    return importlib.import_module("parm_sdk")
+                except ImportError:
+                    continue
+    raise ImportError("无法导入 parm_sdk；请安装 SDK 或设置 PARM_SDK_WHEEL。")
+
+
+def finite(values: Any, count: int, name: str) -> list[float]:
+    if not isinstance(values, (list, tuple)) or len(values) != count:
+        raise ValueError(f"{name} 必须恰好包含 {count} 个数。")
+    result = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError(f"{name} 必须全为有限数。")
+    return result
+
+
+def rpy_to_rotvec(rpy: list[float]) -> list[float]:
+    """Convert ZYX-composed roll/pitch/yaw radians to a rotation vector."""
+    roll, pitch, yaw = finite(rpy, 3, "rpy")
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rotation = (
+        (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+        (sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr),
+        (-sp, cp * sr, cp * cr),
+    )
+    cos_theta = max(-1.0, min(1.0, (rotation[0][0] + rotation[1][1] + rotation[2][2] - 1.0) / 2.0))
+    theta = math.acos(cos_theta)
+    if theta < 1e-10:
+        return [0.0, 0.0, 0.0]
+    sine = math.sin(theta)
+    if abs(sine) < 1e-8:
+        axis = [
+            math.sqrt(max(0.0, (rotation[0][0] + 1.0) / 2.0)),
+            math.sqrt(max(0.0, (rotation[1][1] + 1.0) / 2.0)),
+            math.sqrt(max(0.0, (rotation[2][2] + 1.0) / 2.0)),
+        ]
+        if rotation[2][1] - rotation[1][2] < 0:
+            axis[0] = -axis[0]
+        if rotation[0][2] - rotation[2][0] < 0:
+            axis[1] = -axis[1]
+        if rotation[1][0] - rotation[0][1] < 0:
+            axis[2] = -axis[2]
+    else:
+        axis = [
+            (rotation[2][1] - rotation[1][2]) / (2.0 * sine),
+            (rotation[0][2] - rotation[2][0]) / (2.0 * sine),
+            (rotation[1][0] - rotation[0][1]) / (2.0 * sine),
+        ]
+    norm = math.sqrt(sum(component * component for component in axis))
+    if norm < 1e-10:
+        raise ValueError("无法将 rpy 转换为旋转向量。")
+    return [component / norm * theta for component in axis]
+
+
+def rotvec_to_quat(rotvec: list[float]) -> list[float]:
+    x, y, z = finite(rotvec, 3, "rotation vector")
+    angle = math.sqrt(x * x + y * y + z * z)
+    if angle < 1e-12:
+        return [0.0, 0.0, 0.0, 1.0]
+    scale = math.sin(angle / 2.0) / angle
+    return [x * scale, y * scale, z * scale, math.cos(angle / 2.0)]
+
+
+def quat_to_rotvec(quat: list[float]) -> list[float]:
+    qx, qy, qz, qw = finite(quat, 4, "quaternion")
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm < 1e-12:
+        raise ValueError("四元数不能为零。")
+    qx, qy, qz, qw = qx / norm, qy / norm, qz / norm, qw / norm
+    if qw < 0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    sine = math.sqrt(qx * qx + qy * qy + qz * qz)
+    if sine < 1e-12:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(sine, qw)
+    return [qx / sine * angle, qy / sine * angle, qz / sine * angle]
+
+
+def rotvec_to_rpy(rotvec: list[float]) -> list[float]:
+    qx, qy, qz, qw = rotvec_to_quat(rotvec)
+    r00 = 1.0 - 2.0 * (qy * qy + qz * qz)
+    r10 = 2.0 * (qx * qy + qz * qw)
+    r20 = 2.0 * (qx * qz - qy * qw)
+    r21 = 2.0 * (qy * qz + qx * qw)
+    r22 = 1.0 - 2.0 * (qx * qx + qy * qy)
+    pitch = math.asin(max(-1.0, min(1.0, -r20)))
+    if abs(math.cos(pitch)) < 1e-8:
+        return [0.0, pitch, math.atan2(-2.0 * (qx * qy - qz * qw), r00)]
+    return [math.atan2(r21, r22), pitch, math.atan2(r10, r00)]
+
+
+def intrinsic_xyz_deg_to_rotvec(angles_deg: list[float]) -> list[float]:
+    """Convert SciPy-equivalent intrinsic ``XYZ`` Euler angles to rotvec."""
+    roll, pitch, yaw = (math.radians(value) for value in finite(angles_deg, 3, "intrinsic XYZ angles"))
+    qx = [math.sin(roll / 2.0), 0.0, 0.0, math.cos(roll / 2.0)]
+    qy = [0.0, math.sin(pitch / 2.0), 0.0, math.cos(pitch / 2.0)]
+    qz = [0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)]
+    return quat_to_rotvec(quat_multiply(quat_multiply(qx, qy), qz))
+
+
+def quat_multiply(first: list[float], second: list[float]) -> list[float]:
+    ax, ay, az, aw = first
+    bx, by, bz, bw = second
+    return [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + az * bw + ax * by - ay * bx,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+
+
+def rotate_vector(quat: list[float], vector: list[float]) -> list[float]:
+    qx, qy, qz, qw = quat
+    vx, vy, vz = vector
+    tx, ty, tz = 2.0 * (qy * vz - qz * vy), 2.0 * (qz * vx - qx * vz), 2.0 * (qx * vy - qy * vx)
+    return [
+        vx + qw * tx + qy * tz - qz * ty,
+        vy + qw * ty + qz * tx - qx * tz,
+        vz + qw * tz + qx * ty - qy * tx,
+    ]
+
+
+def compose_pose(first: list[float], second: list[float]) -> list[float]:
+    """Compose [xyz, rotvec] transforms: returned = first ∘ second."""
+    first_quat, second_quat = rotvec_to_quat(first[3:]), rotvec_to_quat(second[3:])
+    offset = rotate_vector(first_quat, second[:3])
+    return [
+        first[0] + offset[0], first[1] + offset[1], first[2] + offset[2],
+        *quat_to_rotvec(quat_multiply(first_quat, second_quat)),
+    ]
+
+
+def inverse_pose(pose: list[float]) -> list[float]:
+    quat = rotvec_to_quat(pose[3:])
+    inverse_quat = [-quat[0], -quat[1], -quat[2], quat[3]]
+    return rotate_vector(inverse_quat, [-pose[0], -pose[1], -pose[2]]) + quat_to_rotvec(inverse_quat)
+
+
+def pose_from_lookup_transform(data: object) -> list[float]:
+    if not isinstance(data, dict):
+        raise RuntimeError("规划器返回的 TF 数据无效。")
+    translation, rotation = data.get("translation"), data.get("rotation")
+    if not isinstance(translation, dict) or not isinstance(rotation, dict):
+        raise RuntimeError("规划器返回的 TF 缺少 translation 或 rotation。")
+    xyz = finite([translation.get("x"), translation.get("y"), translation.get("z")], 3, "planner TF translation")
+    quat = finite([rotation.get("x"), rotation.get("y"), rotation.get("z"), rotation.get("w")], 4, "planner TF rotation")
+    return xyz + quat_to_rotvec(quat)
+
+
+def planner_relative_pose(planner: object, frame_id: str, parent_frame: str, child_frame: str) -> list[float]:
+    parent = pose_from_lookup_transform(planner.lookup_transform(frame_id, parent_frame).get("data"))
+    child = pose_from_lookup_transform(planner.lookup_transform(frame_id, child_frame).get("data"))
+    return compose_pose(inverse_pose(parent), child)
+
+
+def pose_to_command(raw_pose: Any) -> list[float]:
+    if isinstance(raw_pose, dict):
+        xyz = finite(raw_pose.get("xyz"), 3, "eef_pose.xyz")
+        if "rpy" in raw_pose:
+            return xyz + rpy_to_rotvec(raw_pose["rpy"])
+        for key in ("rotvec", "axis_angle", "rxryrz", "rotation_vector"):
+            if key in raw_pose:
+                return xyz + finite(raw_pose[key], 3, f"eef_pose.{key}")
+        raise ValueError("eef_pose 缺少 rpy 或旋转向量字段。")
+    return finite(raw_pose, 6, "eef_pose")
+
+
+def current_pose(arm: object, arm_id: int) -> list[float]:
+    state = arm.get_state()
+    key = "left" if arm_id == 1 else "right"
+    per_arm = ((state or {}).get("state") or {}).get(key)
+    if not isinstance(per_arm, dict):
+        raise RuntimeError("当前机械臂状态不可用，无法开始笛卡尔移动。")
+    return pose_to_command(per_arm.get("eef_pose"))
+
+
+def ensure_ready(arm: object, arm_id: int, recover_timeout_s: float = 10.0) -> None:
+    state = arm.get_state()
+    if state is None:
+        raise RuntimeError("尚未收到机械臂状态。")
+    system_state = str(state.get("system_state", "")).strip().lower()
+    if system_state == "error":
+        print("检测到 ERROR，正在 clear_error() 并等待恢复...")
+        arm.clear_error()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            system_state = str((state or {}).get("system_state", "")).strip().lower()
+            if system_state == "running":
+                break
+            if system_state == "estop":
+                raise RuntimeError(f"clear_error() 后进入 ESTOP：{state.get('estop_reason')!r}")
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"clear_error() 后未能恢复 RUNNING，当前={system_state!r}")
+    if system_state == "estop":
+        raise RuntimeError(f"系统处于 ESTOP：{state.get('estop_reason')!r}")
+    if system_state != "running":
+        raise RuntimeError(f"系统尚未就绪，当前 system_state={system_state!r}")
+    key = "left" if arm_id == 1 else "right"
+    if not bool((state.get("state") or {}).get(key, {}).get("enabled", False)):
+        print("目标手臂未使能，正在 enable()...")
+        arm.enable()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            if bool(((state or {}).get("state") or {}).get(key, {}).get("enabled", False)):
+                return
+            time.sleep(0.05)
+        raise RuntimeError("enable() 后目标手臂仍未使能。")
+
+
+def _orientation_error_rad(first: list[float], second: list[float]) -> float:
+    dot = max(-1.0, min(1.0, abs(sum(a * b for a, b in zip(rotvec_to_quat(first[3:]), rotvec_to_quat(second[3:]))))))
+    return 2.0 * math.acos(dot)
+
+
+def _slerp(q0: list[float], q1: list[float], alpha: float) -> list[float]:
+    dot = sum(a * b for a, b in zip(q0, q1))
+    if dot < 0.0:
+        q1, dot = [-item for item in q1], -dot
+    dot = max(-1.0, min(1.0, dot))
+    if dot > 0.9995:
+        result = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+        norm = math.sqrt(sum(item * item for item in result))
+        return [item / norm for item in result]
+    theta = math.acos(dot)
+    sine = math.sin(theta)
+    return [math.sin((1.0 - alpha) * theta) / sine * a + math.sin(alpha * theta) / sine * b for a, b in zip(q0, q1)]
+
+
+def _smoothstep5(alpha: float) -> float:
+    alpha = max(0.0, min(1.0, alpha))
+    return alpha ** 3 * (10.0 + alpha * (-15.0 + 6.0 * alpha))
+
+
+def _minimum_scurve_duration(distance: float, max_speed: float, max_acceleration: float) -> float:
+    if distance <= 1e-12:
+        return 0.0
+    return max(1.875 * distance / max_speed, math.sqrt((10.0 / math.sqrt(3.0)) * distance / max_acceleration))
+
+
+def move_l(arm: object, arm_id: int, target: list[float], *, linear_speed_mps: float,
+           angular_speed_radps: float, max_linear_accel_mps2: float,
+           max_angular_accel_radps2: float, hz: float, position_tolerance_m: float,
+           orientation_tolerance_rad: float, settle_timeout_s: float,
+           tcp: list[float] | None = None) -> None:
+    """Stream an absolute Cartesian target and verify its final measured pose."""
+    tcp_rpy = finite(tcp if tcp is not None else [0.0] * 6, 6, "servo tcp")
+    tcp_pose = tcp_rpy[:3] + rpy_to_rotvec(tcp_rpy[3:])
+    start = compose_pose(current_pose(arm, arm_id), tcp_pose)
+    distance = math.sqrt(sum((target[axis] - start[axis]) ** 2 for axis in range(3)))
+    q0, q1 = rotvec_to_quat(start[3:]), rotvec_to_quat(target[3:])
+    angle = _orientation_error_rad(target, start)
+    if distance <= position_tolerance_m and angle <= orientation_tolerance_rad:
+        return
+    period = 1.0 / hz
+    duration = max(_minimum_scurve_duration(distance, linear_speed_mps, max_linear_accel_mps2),
+                   _minimum_scurve_duration(angle, angular_speed_radps, max_angular_accel_radps2), period)
+    steps = max(1, math.ceil(duration * hz))
+    arm.start_servo_pose(arm_id, pose_type="absolute", frame="world", tcp=tcp_rpy, input_frequency_hz=hz)
+    try:
+        deadline = time.monotonic()
+        for index in range(1, steps + 1):
+            alpha = _smoothstep5(index / float(steps))
+            waypoint = [start[axis] + alpha * (target[axis] - start[axis]) for axis in range(3)]
+            arm.push_servo_pose(arm_id, waypoint + quat_to_rotvec(_slerp(q0, q1, alpha)))
+            deadline += period
+            time.sleep(max(0.0, deadline - time.monotonic()))
+        settle_deadline = time.monotonic() + settle_timeout_s
+        while time.monotonic() < settle_deadline:
+            arm.push_servo_pose(arm_id, target)
+            final_pose = compose_pose(current_pose(arm, arm_id), tcp_pose)
+            position_error = math.sqrt(sum((target[axis] - final_pose[axis]) ** 2 for axis in range(3)))
+            orientation_error = _orientation_error_rad(target, final_pose)
+            if position_error <= position_tolerance_m and orientation_error <= orientation_tolerance_rad:
+                return
+            time.sleep(period)
+        raise RuntimeError("末端位姿未在超时内到位。")
+    finally:
+        try:
+            arm.stop_servo_pose(arm_id)
+        except Exception:
+            pass
+
+
+def set_gripper_state(gripper: object, *, arm_id: int, target_open: bool, timeout_s: float, tolerance: float) -> None:
+    target_position = 100.0 if target_open else 0.0
+    action = "打开" if target_open else "闭合"
+    gripper.move(arm_id, target_position, mode="async", preempt=True)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        state = gripper.get_state().get(arm_id)
+        if isinstance(state, dict) and state.get("position") is not None and abs(float(state["position"]) - target_position) <= tolerance:
+            print(f"右夹爪已{action}到位（position={float(state['position']):.1f}）。")
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"右夹爪{action}等待超时；机械臂不会继续运动。")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def append_event(event: dict[str, Any]) -> None:
+    destination = os.environ.get(PLAN_LOG_ENV, "").strip()
+    if not destination:
+        return
+    path = Path(destination)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            handle.write(json.dumps({"timestamp_utc": utc_now(), "pid": os.getpid(), **event}, ensure_ascii=False, separators=(",", ":")) + "\n")
+            handle.flush()
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        return
+
+
+def planner_start_pose(planner: object, frame_id: str, ik_frame: str) -> dict[str, Any] | None:
+    try:
+        data = planner.lookup_transform(frame_id, ik_frame).get("data")
+        if not isinstance(data, dict):
+            return None
+        translation, rotation = data.get("translation"), data.get("rotation")
+        if not isinstance(translation, dict) or not isinstance(rotation, dict):
+            return None
+        return {"frame_id": frame_id, "ik_frame": ik_frame,
+                "position_m": [float(translation[key]) for key in ("x", "y", "z")],
+                "orientation_xyzw": [float(rotation[key]) for key in ("x", "y", "z", "w")]}
+    except Exception:
+        return None
+
+
+def planning_event(*, stage: str, method: str, start: dict[str, Any] | None, target: dict[str, Any], started_at: float, success: bool, failure_reason: str | None = None, **details: Any) -> None:
+    append_event({"event": "planner_attempt", "stage": stage, "planning_method": method,
+                  "start": start, "target": target, "success": bool(success),
+                  "failure_reason": failure_reason,
+                  "duration_ms": round((time.perf_counter() - started_at) * 1000.0, 3), **details})
+
+
+def retry_task_creation(request: Callable[[], ResultT], *, label: str) -> ResultT:
+    for attempt in range(1, TASK_CREATION_ATTEMPTS + 1):
+        try:
+            return request()
+        except Exception as exc:
+            if "Failed to create planning task" not in str(exc) or attempt == TASK_CREATION_ATTEMPTS:
+                raise
+            delay_s = TASK_CREATION_RETRY_DELAYS_S[attempt - 1]
+            print(f"[planner] {label} 创建规划任务失败；{delay_s:.1f}s 后重试 {attempt + 1}/{TASK_CREATION_ATTEMPTS}", flush=True)
+            time.sleep(delay_s)
+    raise AssertionError("unreachable")
 
 
 def newest_workpiece_pose_file(workpiece: int) -> Path:
@@ -103,16 +482,6 @@ def validate_pose_workpiece(path: Path, workpiece: int) -> None:
 
 def normalize_deg(value: float) -> float:
     return value % 360.0
-
-
-def signed_offsets(limit_deg: float, step_deg: float) -> list[float]:
-    values = [0.0]
-    for index in range(1, int(math.floor(limit_deg / step_deg + 1e-9)) + 1):
-        values.extend((index * step_deg, -index * step_deg))
-    sampled_limit = (len(values) - 1) // 2 * step_deg
-    if limit_deg > sampled_limit + 1e-9:
-        values.extend((limit_deg, -limit_deg))
-    return values
 
 
 def finite_matrix4(value: object, name: str) -> list[list[float]]:
@@ -161,14 +530,13 @@ def normalize_vector(vector: list[float], name: str) -> list[float]:
     return [value / norm for value in vector]
 
 
-def load_workpiece(path: Path, index: int) -> tuple[list[list[float]], float, int, float, dict, Path]:
+def load_workpiece(path: Path, index: int) -> tuple[list[list[float]], float, int, dict]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"无法读取工件位姿 JSON: {path}: {exc}") from exc
     if payload.get("coordinate_frame") not in (None, "body_base"):
         raise ValueError(f"工件 JSON 坐标系不是 body_base: {payload.get('coordinate_frame')!r}")
-    plane_z = finite([payload.get("plane_z_m")], 1, "plane_z_m")[0]
     workpieces = payload.get("workpieces")
     if not isinstance(workpieces, list) or not 0 <= index < len(workpieces):
         count = len(workpieces) if isinstance(workpieces, list) else 0
@@ -186,156 +554,7 @@ def load_workpiece(path: Path, index: int) -> tuple[list[list[float]], float, in
     quadrant = item.get("head_direction_base_quadrant")
     if not isinstance(quadrant, int):
         raise ValueError("JSON 缺少整数 head_direction_base_quadrant")
-    calibration_value = payload.get("calibration")
-    if not isinstance(calibration_value, str) or not calibration_value:
-        raise ValueError("工件 JSON 缺少 calibration；无法对放置点执行 ROI 投影过滤")
-    calibration_path = Path(calibration_value)
-    if not calibration_path.is_absolute():
-        calibration_path = path.parent / calibration_path
-    return transform, normalize_deg(yaw), quadrant, plane_z, item, calibration_path
-
-
-def load_projection_calibration(path: Path) -> tuple[list[list[float]], list[float], list[list[float]], tuple[int, int]]:
-    """Load the camera model used to project a body_base placement into the RGB image."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取 ROI 投影标定文件 {path}: {exc}") from exc
-    try:
-        camera_matrix = [[float(value) for value in row] for row in payload["camera_matrix"]]
-        distortion = [float(value) for value in payload.get("distortion_coeffs", [])]
-        base_camera = [[float(value) for value in row] for row in payload["T_body_base_head_camera"]]
-        image_size = tuple(int(value) for value in payload["image_size"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError(f"ROI 投影标定文件格式无效: {path}") from exc
-    if (len(camera_matrix) != 3 or any(len(row) != 3 for row in camera_matrix)
-            or len(base_camera) != 4 or any(len(row) != 4 for row in base_camera)
-            or len(image_size) != 2):
-        raise ValueError(f"ROI 投影标定文件尺寸无效: {path}")
-    return camera_matrix, distortion, base_camera, image_size
-
-
-def mat_vec(matrix: list[list[float]], vector: list[float]) -> list[float]:
-    return [sum(value * vector[index] for index, value in enumerate(row)) for row in matrix]
-
-
-def undistort_pixel(pixel: list[float], camera_matrix: list[list[float]], distortion: list[float]) -> tuple[float, float]:
-    """Convert a distorted pixel into a normalized camera ray without OpenCV."""
-    fx, skew, cx = camera_matrix[0]
-    _, fy, cy = camera_matrix[1]
-    if abs(fx) < 1e-12 or abs(fy) < 1e-12:
-        raise ValueError("ROI 投影标定相机内参无效")
-    xd = (pixel[0] - cx - skew * (pixel[1] - cy) / fy) / fx
-    yd = (pixel[1] - cy) / fy
-    coefficients = distortion + [0.0] * max(0, 5 - len(distortion))
-    k1, k2, p1, p2, k3 = coefficients[:5]
-    xu, yu = xd, yd
-    for _ in range(8):
-        r2 = xu * xu + yu * yu
-        radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
-        if abs(radial) < 1e-12:
-            raise ValueError("ROI 投影标定畸变参数无效")
-        dx = 2.0 * p1 * xu * yu + p2 * (r2 + 2.0 * xu * xu)
-        dy = p1 * (r2 + 2.0 * yu * yu) + 2.0 * p2 * xu * yu
-        xu, yu = (xd - dx) / radial, (yd - dy) / radial
-    return xu, yu
-
-
-def distort_normalized(x: float, y: float, distortion: list[float]) -> tuple[float, float]:
-    coefficients = distortion + [0.0] * max(0, 5 - len(distortion))
-    k1, k2, p1, p2, k3 = coefficients[:5]
-    r2 = x * x + y * y
-    radial = 1.0 + k1 * r2 + k2 * r2 * r2 + k3 * r2 * r2 * r2
-    return (
-        x * radial + 2.0 * p1 * x * y + p2 * (r2 + 2.0 * x * x),
-        y * radial + p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * x * y,
-    )
-
-
-def footprint_local_base_xy(
-    item: dict,
-    grasp_centre_xy: list[float],
-    plane_z: float,
-    camera_matrix: list[list[float]],
-    distortion: list[float],
-    base_camera: list[list[float]],
-) -> list[list[float]]:
-    """Return the mask rotated-box footprint relative to its grasp centre in body_base."""
-    corners = item.get("rotated_box_pixel_corners_xy")
-    if not isinstance(corners, list) or len(corners) != 4:
-        raise ValueError("工件 JSON 缺少有效 rotated_box_pixel_corners_xy；无法进行 ROI 放置过滤")
-    rotation = [row[:3] for row in base_camera[:3]]
-    camera_origin = [row[3] for row in base_camera[:3]]
-    local: list[list[float]] = []
-    for corner in corners:
-        if not isinstance(corner, list) or len(corner) != 2:
-            raise ValueError("工件 JSON 的 rotated_box_pixel_corners_xy 格式无效")
-        x, y = undistort_pixel([float(corner[0]), float(corner[1])], camera_matrix, distortion)
-        ray = mat_vec(rotation, [x, y, 1.0])
-        if abs(ray[2]) < 1e-9:
-            raise ValueError("ROI 投影失败：工件角点射线与台面平行")
-        distance = (plane_z - camera_origin[2]) / ray[2]
-        if distance <= 0.0:
-            raise ValueError("ROI 投影失败：工件角点位于相机后方")
-        local.append([
-            camera_origin[0] + distance * ray[0] - grasp_centre_xy[0],
-            camera_origin[1] + distance * ray[1] - grasp_centre_xy[1],
-        ])
-    return local
-
-
-def project_placement_footprint(
-    place_xy: list[float],
-    local_footprint_xy: list[list[float]],
-    yaw_delta_deg: float,
-    plane_z: float,
-    camera_matrix: list[list[float]],
-    distortion: list[float],
-    base_camera: list[list[float]],
-) -> list[list[float]]:
-    """Project the reoriented workpiece footprint at a candidate placement centre."""
-    angle = math.radians(yaw_delta_deg)
-    cos_angle, sin_angle = math.cos(angle), math.sin(angle)
-    base_rotation = [row[:3] for row in base_camera[:3]]
-    camera_origin = [row[3] for row in base_camera[:3]]
-    pixels: list[list[float]] = []
-    for local_x, local_y in local_footprint_xy:
-        point_base = [
-            place_xy[0] + cos_angle * local_x - sin_angle * local_y,
-            place_xy[1] + sin_angle * local_x + cos_angle * local_y,
-            plane_z,
-        ]
-        relative = [point_base[index] - camera_origin[index] for index in range(3)]
-        # The inverse of a rigid camera-to-base rotation is its transpose.
-        point_camera = [sum(base_rotation[row][column] * relative[row] for row in range(3)) for column in range(3)]
-        if point_camera[2] <= 0.0:
-            raise ValueError("ROI 投影失败：放置候选位于相机后方")
-        xd, yd = distort_normalized(point_camera[0] / point_camera[2], point_camera[1] / point_camera[2], distortion)
-        pixels.append([
-            camera_matrix[0][0] * xd + camera_matrix[0][1] * yd + camera_matrix[0][2],
-            camera_matrix[1][1] * yd + camera_matrix[1][2],
-        ])
-    return pixels
-
-
-def normalized_roi_bounds(roi: list[float], width: int, height: int) -> tuple[int, int, int, int]:
-    if len(roi) != 4 or any(value < 0.0 or value > 1.0 for value in roi):
-        raise ValueError("--placement-visibility-roi 必须是 [0, 1] 内四个值")
-    x0, y0, x1, y1 = roi
-    if x0 >= x1 or y0 >= y1:
-        raise ValueError("--placement-visibility-roi 必须满足 X0 < X1 且 Y0 < Y1")
-    return int(math.floor(x0 * width)), int(math.floor(y0 * height)), int(math.ceil(x1 * width)), int(math.ceil(y1 * height))
-
-
-def footprint_is_inside_roi(
-    pixels: list[list[float]], roi_bounds: tuple[int, int, int, int], margin_px: float
-) -> bool:
-    left, top, right, bottom = roi_bounds
-    return all(
-        left + margin_px <= x <= right - 1 - margin_px
-        and top + margin_px <= y <= bottom - 1 - margin_px
-        for x, y in pixels
-    )
+    return transform, normalize_deg(yaw), quadrant, item
 
 
 def cross(left: list[float], right: list[float]) -> list[float]:
@@ -374,11 +593,6 @@ def rotation_matrix_from_rotvec(rotvec: list[float]) -> list[list[float]]:
         [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
         [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
     ]
-
-
-def angle_between_vectors_deg(left: list[float], right: list[float]) -> float:
-    dot = sum(left[index] * right[index] for index in range(3))
-    return math.degrees(math.acos(max(-1.0, min(1.0, dot))))
 
 
 def nominal_tcp_orientation(
@@ -507,11 +721,15 @@ def require_driver_right_eef_at_target(
     )
 
 
+class NoGraspDetectedError(RuntimeError):
+    """The gripper closed, but its opening matches an empty grasp."""
+
+
 def close_gripper_for_grasp(
     gripper: object, *, arm_id: int, timeout_s: float, fully_closed_tolerance: float,
     minimum_close_travel: float, settle_s: float,
-) -> None:
-    """Close on a workpiece: accept full closure or a stable contact position."""
+) -> tuple[float, str]:
+    """Close the gripper and return its stable terminal opening and state."""
     initial_position: float | None = None
     try:
         states = gripper.get_state()
@@ -520,7 +738,7 @@ def close_gripper_for_grasp(
             initial_position = float(state["position"])
     except Exception:
         pass
-    gripper.move(arm_id, 0.0, mode="async", preempt=True)
+    gripper.move(arm_id, 0.0, speed=100.0, mode="async", preempt=True)
     print("已下发右夹爪闭合命令，等待完全闭合或稳定接触工件...")
     deadline = time.monotonic() + timeout_s
     last_position: float | None = None
@@ -531,10 +749,10 @@ def close_gripper_for_grasp(
         if isinstance(state, dict) and state.get("position") is not None:
             position = float(state["position"])
             now = time.monotonic()
-            motion_state = state.get("motion_state")
+            motion_state = str(state.get("motion_state", "")).lower()
             if motion_state == "gripping":
-                print(f"右夹爪状态为 gripping，已夹住工件（position={position:.1f}）。")
-                return
+                print(f"右夹爪状态为 gripping（position={position:.1f}）。")
+                return position, motion_state
             if initial_position is None:
                 initial_position = position
             if last_position is None or abs(position - last_position) > 0.5:
@@ -542,11 +760,11 @@ def close_gripper_for_grasp(
                 last_change_time = now
             if position <= fully_closed_tolerance:
                 print(f"右夹爪已完全闭合（position={position:.1f}）。")
-                return
+                return position, motion_state
             travelled = initial_position - position
             if travelled >= minimum_close_travel and now - last_change_time >= settle_s:
-                print(f"右夹爪已接触并稳定夹住工件（position={position:.1f}，闭合行程={travelled:.1f}）。")
-                return
+                print(f"右夹爪闭合位置已稳定（position={position:.1f}，闭合行程={travelled:.1f}）。")
+                return position, motion_state
         time.sleep(0.05)
     observed = "无有效状态" if last_position is None else f"position={last_position:.1f}"
     raise RuntimeError(f"右夹爪闭合等待超时（{observed}）；机械臂不会继续运动。")
@@ -588,7 +806,12 @@ def rrtconnect_plan_tcp_trajectory(
         },
     }
     try:
-        result = planner._trajectory.send_payload(payload, timeout=max(timeout_s, RRTCONNECT_TIMEOUT_S))
+        result = retry_task_creation(
+            lambda: planner._trajectory.send_payload(
+                payload, timeout=max(timeout_s, RRTCONNECT_TIMEOUT_S)
+            ),
+            label="右臂 Module 7 RRTConnect",
+        )
         data = result.get("data") or {}
         trajectory, planned_arm_id = data.get("trajectory"), data.get("arm_id")
         frequency = data.get("sample_frequency", 10.0)
@@ -642,7 +865,10 @@ def preplan_tcp_trajectory(
                                   if rrtstar_goal_tolerance is None else rrtstar_goal_tolerance)
         if planner_kind == RRTSTAR_PLANNER_KIND and enabled_goal_tolerance:
             request["rrtstar_goal_tolerance"] = True
-        result = planner.plan_cart_trajectory(**request)
+        result = retry_task_creation(
+            lambda: planner.plan_cart_trajectory(**request),
+            label=f"右臂 {stage} {planner_kind.upper()} 笛卡尔规划",
+        )
         data = result.get("data") or {}
         trajectory, planned_arm_id = data.get("trajectory"), data.get("arm_id")
         frequency = data.get("sample_frequency", 10.0)
@@ -739,10 +965,7 @@ CONFIGURABLE_OPTIONS = frozenset({
     "--servo-orientation-tolerance-rad", "--servo-settle-timeout-s",
     "--place-tcp-extra-clearance-m", "--lift-height-m", "--post-release-lift-height-m",
     "--planning-timeout-s",
-    "--turn-attitude-search-step-deg",
-    "--turn-search-grid-step-m", "--turn-positive-x-min-m",
-    "--turn-positive-x-max-m", "--rrt-place-parallelism",
-    "--rrt-turn-parallelism", "--planner",
+    "--rrt-place-parallelism", "--rrt-turn-parallelism", "--planner",
     "--max-vel", "--max-acc",
     "--gripper-timeout-s", "--gripper-position-tolerance",
     "--grasp-minimum-close-travel", "--grasp-contact-settle-s",
@@ -1216,17 +1439,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--post-release-lift-height-m", type=float, nargs="+", default=(0.020,),
                         help="松爪后 TCP 沿 body_base +Z 直线抬起的距离（m）")
     parser.add_argument("--planning-timeout-s", type=float, default=5.0)
-    parser.add_argument("--turn-attitude-search-step-deg", type=float, default=5.0)
-    parser.add_argument("--turn-search-grid-step-m", type=float, default=0.050)
-    parser.add_argument("--turn-positive-x-min-m", type=float, default=0.0)
-    parser.add_argument("--turn-positive-x-max-m", type=float, default=0.200)
     parser.add_argument("--rrt-place-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--rrt-turn-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--planner", choices=("lin", "ptp", RRTCONNECT_PLANNER_KIND, RRTSTAR_PLANNER_KIND),
                         default=RRTCONNECT_PLANNER_KIND)
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
-    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
     parser.add_argument("--max-vel", type=float, default=0.08)
     parser.add_argument("--max-acc", type=float, default=0.08)
@@ -1270,8 +1489,7 @@ def main() -> int:
     if not args.workpiece_pose_file.is_file():
         print(f"错误: 工件位姿文件不存在: {args.workpiece_pose_file}", file=sys.stderr)
         return 1
-    positive = (*args.pregrasp_positive_workpiece_z_m, *args.lift_height_m,
-                args.turn_search_grid_step_m)
+    positive = (*args.pregrasp_positive_workpiece_z_m, *args.lift_height_m)
     if (any(value <= 0.0 for value in positive)
             or any(value < 0.0 for value in args.place_tcp_extra_clearance_m)):
         print("错误: 高度和步长必须大于 0，放置余量必须非负", file=sys.stderr)
@@ -1310,9 +1528,6 @@ def main() -> int:
     if args.planning_timeout_s <= 0.0:
         print("错误: 预规划超时必须大于 0", file=sys.stderr)
         return 1
-    if args.turn_attitude_search_step_deg <= 0.0:
-        print("错误: 阶段 5 姿态搜索间隔必须大于 0", file=sys.stderr)
-        return 1
     servo_positive = (
         args.servo_linear_speed_mps, args.servo_angular_speed_radps,
         args.servo_max_linear_accel_mps2, args.servo_max_angular_accel_radps2,
@@ -1334,12 +1549,8 @@ def main() -> int:
     if args.grasp_minimum_close_travel < 0.0 or args.grasp_contact_settle_s <= 0.0:
         print("错误: 夹爪接触判定参数无效", file=sys.stderr)
         return 1
-    if (args.turn_positive_x_min_m < 0.0
-            or args.turn_positive_x_max_m < args.turn_positive_x_min_m):
-        print("错误: 翻转区域距离无效", file=sys.stderr)
-        return 1
     try:
-        workpiece_transform, red_yaw_deg, quadrant, table_plane_z, workpiece_item, calibration_path = load_workpiece(
+        workpiece_transform, red_yaw_deg, quadrant, workpiece_item = load_workpiece(
             args.workpiece_pose_file, args.workpiece_index
         )
         # JSON offsets are expressed on the observed workpiece's own +X/+Y/+Z.
@@ -1369,11 +1580,10 @@ def main() -> int:
         ])
         if quadrant not in (1, 2, 3, 4):
             raise ValueError(f"工件朝向象限无效: Q{quadrant}")
-        # Planner targets are native right_eef poses.  Servo starts from the
-        # driver's eef_pose, so it needs the fixed local driver->right_eef
-        # transform above to represent exactly the same jaw-centre point.
+        # Planner targets are native right_eef poses.  The SDK state is in
+        # right_hand_transfer_base, so its live planner TF is read below once
+        # the planner connection exists.
         tcp_offset = [0.0] * 6
-        servo_eef_offset = RIGHT_EEF_FROM_TRANSFER_BASE
     except ValueError as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1
@@ -1500,7 +1710,15 @@ def main() -> int:
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         gripper = sdk.Gripper(host=args.gripper_host)
-        group, ik_frame = "right_arm", "right_eef"
+        group, ik_frame = "right_arm", RIGHT_EEF_FRAME
+        servo_eef_offset = planner_relative_pose(
+            planner, args.frame_id, DRIVER_EEF_FRAME, RIGHT_EEF_FRAME,
+        )
+        print(
+            "规划器 TF right_hand_transfer_base→right_eef="
+            f"{[round(value, 6) for value in servo_eef_offset]}；"
+            "SDK eef_pose 的到位核验与 Servo 将使用该实时变换。"
+        )
         current_ik = pose_from_lookup_transform(planner.lookup_transform(args.frame_id, ik_frame).get("data"))
         current_tcp = compose_pose(current_ik, tcp_offset)
         current_rpy = rotvec_to_rpy(current_tcp[3:])
@@ -1700,6 +1918,13 @@ def main() -> int:
         selected_descent_trajectory: list | None = None
         selected_descent_frequency: float | None = None
         descent_failures: list[str] = []
+        # Plan every exact grasp target from the unchanged live pregrasp state.
+        # Each Planner client has a serialized request stream, so independent
+        # clients are required to use all three verified Cartesian workers.
+        descent_jobs: list[tuple[
+            int, int, list[float], float, list[float], list[float], list[float], str,
+        ]] = []
+        descent_priority = 0
         for candidate_index, (
             semantic_local_grasp, semantic_grasp_point, extra_descent, candidate_final_xyz,
             local_rpy_candidates_deg,
@@ -1743,33 +1968,94 @@ def main() -> int:
                     "不启用 goal tolerance。",
                     flush=True,
                 )
-                try:
+                descent_jobs.append((
+                    descent_priority, candidate_index - 1, list(semantic_local_grasp),
+                    extra_descent, candidate_final_xyz.copy(), candidate_orientation,
+                    list(local_rpy_offset_deg), stage,
+                ))
+                descent_priority += 1
+
+        def preplan_descent_job(
+            job: tuple[int, int, list[float], float, list[float], list[float], list[float], str],
+        ) -> tuple[
+            tuple[int, int, list[float], float, list[float], list[float], list[float], str],
+            list | None, float | None, str | None,
+        ]:
+            _, _, _, _, candidate_final_xyz, candidate_orientation, _, stage = job
+            worker_planner = None
+            try:
+                with RRTCONNECT_INFLIGHT:
+                    worker_planner = sdk.Planner(host=args.planner_host)
                     trajectory, frequency = preplan_tcp_trajectory(
-                        planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                        ik_frame=ik_frame, tcp_offset=tcp_offset, target_tcp=grasp_target,
+                        worker_planner, arm_id=args.arm_id, group=group,
+                        frame_id=args.frame_id, ik_frame=ik_frame,
+                        tcp_offset=tcp_offset,
+                        target_tcp=candidate_final_xyz + candidate_orientation,
                         planner_kind=RRTSTAR_PLANNER_KIND, max_vel=args.max_vel,
                         max_acc=args.max_acc, timeout_s=args.planning_timeout_s,
-                        stage=stage, rrtstar_goal_tolerance=args.grasp_rrtstar_goal_tolerance,
+                        stage=stage,
+                        rrtstar_goal_tolerance=args.grasp_rrtstar_goal_tolerance,
                     )
-                except Exception as exc:
-                    descent_failures.append(
-                        f"抓取点 {candidate_index} 姿态 {local_rpy_offset_deg}: {exc}"
+                return job, trajectory, frequency, None
+            except Exception as exc:
+                return job, None, None, str(exc)
+            finally:
+                if worker_planner is not None:
+                    try:
+                        worker_planner.close()
+                    except Exception:
+                        pass
+
+        descent_successes: list[tuple[
+            float, int, int, list[float], float, list[float], list[float], list[float], list, float,
+        ]] = []
+        for batch_start in range(0, len(descent_jobs), RRTCONNECT_PLACE_MAX_PARALLELISM):
+            batch = descent_jobs[batch_start:batch_start + RRTCONNECT_PLACE_MAX_PARALLELISM]
+            print(
+                f"阶段 2：并行 RRTstar 预规划抓取候选 "
+                f"{batch_start + 1}--{batch_start + len(batch)}/{len(descent_jobs)}，"
+                f"并发 {len(batch)}。",
+                flush=True,
+            )
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                futures = [executor.submit(preplan_descent_job, job) for job in batch]
+                for future in as_completed(futures):
+                    (job, trajectory, frequency, failure) = future.result()
+                    (priority, grasp_index, semantic_local_grasp, extra_descent,
+                     candidate_final_xyz, candidate_orientation, local_rpy_offset_deg,
+                     stage) = job
+                    if failure is not None:
+                        descent_failures.append(
+                            f"抓取点 {grasp_index + 1} 姿态 {local_rpy_offset_deg}: {failure}"
+                        )
+                        print(f"{stage} 不可规划（{failure}）。", flush=True)
+                        continue
+                    assert trajectory is not None and frequency is not None
+                    joint_travel_deg = joint_trajectory_travel_deg(trajectory)
+                    print(
+                        f"{stage} 可规划；关节总运动量={joint_travel_deg:.2f}°；"
+                        "保留并继续比较其余抓取候选。",
+                        flush=True,
                     )
-                    print(f"{stage} 不可规划（{exc}）；继续下一个候选。", flush=True)
-                    continue
-                selected_grasp_index = candidate_index - 1
-                selected_final_grasp_xyz = candidate_final_xyz.copy()
-                selected_grasp_orientation = candidate_orientation
-                selected_grasp_local_rpy_offset_deg = list(local_rpy_offset_deg)
-                selected_descent_trajectory = trajectory
-                selected_descent_frequency = frequency
-                print(
-                    f"{stage} 可规划；采用列表中第一个可达抓取位姿，"
-                    f"保存 {len(trajectory)} 个关节路点。"
-                )
-                break
-            if selected_grasp_index is not None:
-                break
+                    descent_successes.append((
+                        joint_travel_deg, priority, grasp_index, semantic_local_grasp,
+                        extra_descent, candidate_final_xyz, candidate_orientation,
+                        local_rpy_offset_deg, trajectory, frequency,
+                    ))
+        if descent_successes:
+            (selected_descent_joint_travel_deg, _, selected_grasp_index,
+             _, _, selected_final_grasp_xyz, selected_grasp_orientation,
+             selected_grasp_local_rpy_offset_deg, selected_descent_trajectory,
+             selected_descent_frequency) = min(
+                descent_successes, key=lambda result: (result[0], result[1])
+            )
+            print(
+                "阶段 2：所有可规划抓取候选中选择关节总运动量最小者："
+                f"抓取点 {selected_grasp_index + 1}，"
+                f"TCP 局部 RPY 偏移(deg)={selected_grasp_local_rpy_offset_deg}，"
+                f"关节总运动量={selected_descent_joint_travel_deg:.2f}°；"
+                f"已保存 {len(selected_descent_trajectory)} 个关节路点。"
+            )
         if (selected_grasp_index is None or selected_final_grasp_xyz is None
                 or selected_grasp_orientation is None
                 or selected_grasp_local_rpy_offset_deg is None
@@ -1849,11 +2135,54 @@ def main() -> int:
             print(f"实际 - TCP 命令目标 xy(m)={actual_minus_target}")
             print(f"记录已写入: {output}")
             return 0
-        close_gripper_for_grasp(
+        closed_position, closed_motion_state = close_gripper_for_grasp(
             gripper, arm_id=args.arm_id, timeout_s=args.gripper_timeout_s,
             fully_closed_tolerance=args.gripper_position_tolerance,
             minimum_close_travel=args.grasp_minimum_close_travel,
             settle_s=args.grasp_contact_settle_s,
+        )
+        if closed_position < GRASP_CONFIRMED_MIN_POSITION:
+            # An empty grasp closes to position=0.0.  Do not lift or turn the
+            # workpiece unless the jaws remain sufficiently separated by it.
+            reverse_descent_trajectory = list(reversed(selected_descent_trajectory))
+            print(
+                "阶段 3：夹爪闭合度未确认抓到工件；"
+                f"motion_state={closed_motion_state!r}，position={closed_position:.1f}，"
+                f"要求 position>={GRASP_CONFIRMED_MIN_POSITION:.1f}。"
+            )
+            print(
+                "阶段 3a：按阶段 2 下探轨迹的关节路点倒序回放撤离，"
+                f"共 {len(reverse_descent_trajectory)} 个路点。"
+            )
+            try:
+                arm.follow_trajectory(
+                    arm_id=args.arm_id, trajectory=reverse_descent_trajectory,
+                    sample_frequency=(
+                        selected_descent_frequency * args.trajectory_execution_speed_scale
+                    ),
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "阶段 3a：未抓到工件后的反向撤离执行失败；禁止继续调整。"
+                ) from exc
+            try:
+                set_gripper_state(
+                    gripper, arm_id=args.arm_id, target_open=True,
+                    timeout_s=args.gripper_timeout_s,
+                    tolerance=args.gripper_position_tolerance,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "阶段 3a：未抓到工件后的右夹爪打开失败；禁止继续调整。"
+                ) from exc
+            raise NoGraspDetectedError(
+                "未抓到工件：已反向撤离并打开右夹爪；"
+                "请由上层流程进入下一轮 10.json → 4.json 观察与 10 → 6 调整准备。"
+            )
+        print(
+            "阶段 3：夹爪闭合度确认抓到工件；"
+            f"motion_state={closed_motion_state!r}，position={closed_position:.1f}，"
+            f"阈值={GRASP_CONFIRMED_MIN_POSITION:.1f}。"
         )
         # Once the jaws are closed, the object is rigid relative to the actual
         # transfer-end frame.  Record that live relation before lifting; every
@@ -2001,19 +2330,15 @@ def main() -> int:
                         for pitch_deg in turn["pitch_candidates_deg"]:
                             for yaw_deg in turn["yaw_candidates_deg"]:
                                 local_rpy_deg = [roll_deg, pitch_deg, yaw_deg]
-                                # Match Module 3 exactly: uppercase ``XYZ``
-                                # is SciPy's intrinsic local-axis convention.
-                                # The local term is therefore applied in the
-                                # already defined STL-front object frame.
-                                target_rotation = (
-                                    Rotation.from_euler(
-                                        "XYZ", turn["front_base_rpy_deg"], degrees=True
-                                    )
-                                    * Rotation.from_euler(
-                                        "XYZ", local_rpy_deg, degrees=True
-                                    )
-                                )
-                                object_target = [0.0, 0.0, 0.0, *target_rotation.as_rotvec().tolist()]
+                                # Uppercase ``XYZ`` means intrinsic local-axis
+                                # rotations.  Apply the local term in the
+                                # established STL-front object frame.
+                                front_rotation = intrinsic_xyz_deg_to_rotvec(turn["front_base_rpy_deg"])
+                                local_rotation = intrinsic_xyz_deg_to_rotvec(local_rpy_deg)
+                                object_target = [0.0, 0.0, 0.0, *compose_pose(
+                                    [0.0, 0.0, 0.0, *front_rotation],
+                                    [0.0, 0.0, 0.0, *local_rotation],
+                                )[3:]]
                                 object_target[:3] = [
                                     turn_reference_xy[0] + centre_offset[0],
                                     turn_reference_xy[1] + centre_offset[1],
@@ -2392,6 +2717,9 @@ def main() -> int:
         )
         print("工件重定向到 Q1 完成。请重新拍照、分割并生成 pose JSON，再执行后续 Q1 流程。")
         return 0
+    except NoGraspDetectedError as exc:
+        print(f"未抓到工件: {exc}", file=sys.stderr)
+        return NO_GRASP_DETECTED_EXIT_CODE
     except Exception as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1

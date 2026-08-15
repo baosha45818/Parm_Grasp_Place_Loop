@@ -119,7 +119,7 @@ def take_sample(arm, planner, args: argparse.Namespace, bridge: tuple[np.ndarray
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only SDK/Planner TF bridge diagnostic")
     parser.add_argument("--bridge", type=Path, default=DEFAULT_BRIDGE)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--arm-id", type=int, choices=(1, 2), default=1)
     parser.add_argument("--planner-host", default="localhost")
     parser.add_argument("--planner-trajectory-port", type=int, default=5605,

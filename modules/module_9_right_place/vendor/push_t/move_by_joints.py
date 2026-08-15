@@ -357,7 +357,7 @@ def move_l(
 def _legacy_main() -> int:
     parser = argparse.ArgumentParser(description="PARM 单臂 move_j / 末端位姿移动")
     parser.add_argument("--arm-id", type=int, choices=(1, 2), required=True, help="1=左臂，2=右臂")
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--joint-positions-deg", nargs=7, type=float, metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"))
     source.add_argument("--eef-pose", nargs=6, type=float, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
@@ -428,7 +428,7 @@ def main() -> int:
     """CLI entry point: move one arm only by seven joint angles."""
     parser = argparse.ArgumentParser(description="PARM 单臂基于关节角度的 move_j")
     parser.add_argument("--arm-id", type=int, choices=(1, 2), required=True, help="1=左臂，2=右臂")
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--joint-positions-deg", nargs=7, type=float,
                         metavar=("J1", "J2", "J3", "J4", "J5", "J6", "J7"))

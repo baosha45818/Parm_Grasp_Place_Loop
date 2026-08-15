@@ -44,7 +44,7 @@ GraspNet 按相机坐标系点云训练。默认模式下两台相机各自在�
 
 ## 四、机械臂和夹爪接口
 
-机械臂 SDK 来自 `/home/dainanjun/Public/data_collector` 中的 `parm_sdk`，默认控制服务器是 `192.168.88.1`，使用 arm1。
+机械臂 SDK 来自 `/home/dainanjun/Public/data_collector` 中的 `parm_sdk`，默认控制服务器是 `192.168.3.11`，使用 arm1。
 
 观察位姿通过 `Planner.plan_joint_trajectory` 规划，关节角单位是度，并将规划结果提交到 `/middle/waypoint/execute`。真实 Version5 必须从 `deploy/tools/graspnet_planner_execute.py` 启动（`command.txt` 已使用该入口）；该入口将 GraspNet 的旧 `arm1_base/eef_pose` 目标按已验收的 `planner_tf_bridge.json` 转成 Planner 的真实 TCP 目标。
 

@@ -13,6 +13,7 @@ from typing import Any
 
 from loop_config import LoopConfig
 from loop_types import ObjectPose
+from tool.planner_task_retry import retry_task_creation
 
 
 class TaskBusyError(RuntimeError):
@@ -30,7 +31,6 @@ class PlannerRuntime:
         ("left_place_position", "left_graspup_top"),
         ("left_place_position", "left_graspup"),
     }
-
     def __init__(self, config: LoopConfig) -> None:
         self.config = config
         self._planner: Any = None
@@ -234,7 +234,7 @@ class PlannerRuntime:
         try:
             from parm_sdk import Arm
 
-            with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1")) as sdk_arm:
+            with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.3.11")) as sdk_arm:
                 state = sdk_arm.get_state() or {}
             values = ((state.get("state") or {}).get(arm) or {}).get("position")
             if (
@@ -284,6 +284,12 @@ class PlannerRuntime:
             print(f"[planner][dry-run] TF: {source_frame} -> {target_frame}")
             return None
         return self._planner.lookup_transform(source_frame, target_frame)
+
+    @staticmethod
+    def _allow_right_hand_tall_contact(arm: str) -> bool:
+        """Limit the Module 9 contact exception to live left-arm requests."""
+        marker = os.environ.get("PARM_RIGHT_SERVO_TALL_CONTACT_FILE")
+        return arm == "left" and bool(marker) and Path(marker).is_file()
 
     def move_left_joints(
         self,
@@ -335,7 +341,7 @@ class PlannerRuntime:
             raise ValueError(f"unknown arm: {arm!r}")
         if len(joints_deg) != 7 or not all(math.isfinite(value) for value in joints_deg):
             raise ValueError(f"{arm} joint target must contain seven finite degree values")
-        if planner not in {"lin", "ompl", "rrtstar"}:
+        if planner not in {"ptp", "lin", "ompl", "rrtstar"}:
             raise ValueError(f"unsupported joint planner: {planner!r}")
         if self._planner is None:
             print(f"[planner][dry-run] {arm} {planner.upper()} joints(deg)={joints_deg}")
@@ -348,43 +354,56 @@ class PlannerRuntime:
             "use_left_eef_collision_box": bool(use_left_eef_collision_box),
         }
         start_joints_deg = self._recorded_start_joints(arm)
-        try:
-            joint_names = [f"{arm}_arm_joint{index}" for index in range(1, 8)]
-            if planner == "rrtstar":
-                # SDK 20260803 only whitelists ptp/lin/ompl for joint helpers,
-                # while the planner server also exposes its RRTstar pipeline.
-                # Send the standard joint waypoint directly so startup recovery
-                # can use that server-side pipeline without weakening SDK checks
-                # for the existing planners.
+        joint_names = [f"{arm}_arm_joint{index}" for index in range(1, 8)]
+        def request() -> dict[str, Any]:
+            allow_right_hand_tall_contact = self._allow_right_hand_tall_contact(arm)
+            # The SDK convenience methods do not expose the right-gripper/tall-box
+            # exception. Use the equivalent wire request only when either
+            # request-local collision policy is needed; ordinary requests retain
+            # the SDK path unchanged.
+            if (
+                planner == "rrtstar"
+                or use_left_eef_collision_box
+                or allow_right_hand_tall_contact
+            ):
+                # The server exposes RRTstar although this SDK's public joint
+                # helper only whitelists ptp/lin/ompl.
                 payload = {
-                        "waypoints": [{
-                            "name": "runtime_rrtstar_joint_target",
-                            "type": "joint",
-                            "group": group,
-                            "planner": "rrtstar",
-                            "max_velocity_scaling_factor": self.config.max_velocity,
-                            "max_acceleration_scaling_factor": self.config.max_acceleration,
-                            "joint_names": joint_names,
-                            "joint_values": target["joint_values_deg"],
-                        }],
-                        "topp": {
-                            "max_vel_factor": self.config.max_velocity,
-                            "max_acc_factor": self.config.max_acceleration,
-                        },
-                    }
+                    "waypoints": [{
+                        "name": f"runtime_{planner}_joint_target",
+                        "type": "joint",
+                        "group": group,
+                        "planner": planner,
+                        "max_velocity_scaling_factor": self.config.max_velocity,
+                        "max_acceleration_scaling_factor": self.config.max_acceleration,
+                        "joint_names": joint_names,
+                        "joint_values": target["joint_values_deg"],
+                    }],
+                    "topp": {
+                        "max_vel_factor": self.config.max_velocity,
+                        "max_acc_factor": self.config.max_acceleration,
+                    },
+                }
                 if use_left_eef_collision_box:
                     payload["use_left_eef_collision_box"] = True
-                response = self._planner._trajectory.send_payload(payload, timeout=30.0)
-            else:
-                response = self._planner.plan_joint_trajectory(
-                    group=group,
-                    planner=planner,
-                    joint_names=joint_names,
-                    joint_values=target["joint_values_deg"],
-                    max_vel=self.config.max_velocity,
-                    max_acc=self.config.max_acceleration,
-                    use_left_eef_collision_box=use_left_eef_collision_box,
-                )
+                if allow_right_hand_tall_contact:
+                    payload["allow_right_hand_tall_contact"] = True
+                return self._planner._trajectory.send_payload(payload, timeout=30.0)
+            return self._planner.plan_joint_trajectory(
+                group=group,
+                planner=planner,
+                joint_names=joint_names,
+                joint_values=target["joint_values_deg"],
+                max_vel=self.config.max_velocity,
+                max_acc=self.config.max_acceleration,
+                use_left_eef_collision_box=use_left_eef_collision_box,
+            )
+
+        try:
+            response = retry_task_creation(
+                request,
+                label=f"{arm}臂 {planner.upper()} 关节规划",
+            )
         except BaseException as exc:
             self._record_plan(
                 status="failure", arm=arm, planner=planner,
@@ -445,7 +464,7 @@ class PlannerRuntime:
         use_left_eef_collision_box: bool = False,
     ) -> dict[str, Any] | None:
         """Plan one explicit Cartesian tool pose without executing it."""
-        if planner not in {"lin", "ompl", "rrtstar"}:
+        if planner not in {"ptp", "lin", "ompl", "rrtstar"}:
             raise ValueError(f"unsupported Cartesian planner: {planner!r}")
         if rrtstar_goal_tolerance and planner != "rrtstar":
             raise ValueError(
@@ -472,7 +491,7 @@ class PlannerRuntime:
             "use_left_eef_collision_box": bool(use_left_eef_collision_box),
         }
         recorded_start = self._recorded_start_joints(arm, start_joints_deg)
-        try:
+        def request() -> dict[str, Any]:
             if start_joints_deg is not None:
                 if (
                     len(start_joints_deg) != 7
@@ -512,8 +531,30 @@ class PlannerRuntime:
                     payload["rrtstar_goal_tolerance"] = True
                 if use_left_eef_collision_box:
                     payload["use_left_eef_collision_box"] = True
-                response = self._planner._trajectory.send_payload(payload, timeout=30.0)
-            elif planner in {"ompl", "rrtstar"}:
+                if self._allow_right_hand_tall_contact(arm):
+                    payload["allow_right_hand_tall_contact"] = True
+                return self._planner._trajectory.send_payload(payload, timeout=30.0)
+            else:
+                allow_right_hand_tall_contact = self._allow_right_hand_tall_contact(arm)
+                # See the joint-space counterpart above. PTP/LIN need the raw
+                # request only while a request-local collision policy is active.
+                if not (
+                    planner == "rrtstar"
+                    or use_left_eef_collision_box
+                    or allow_right_hand_tall_contact
+                ):
+                    return self._planner.plan_cart_trajectory(
+                        group=group,
+                        planner=planner,
+                        frame_id=pose.frame_id,
+                        ik_frame=tool_frame,
+                        position=pose.position,
+                        orientation=pose.orientation,
+                        max_vel=self.config.max_velocity,
+                        max_acc=self.config.max_acceleration,
+                        rrtstar_goal_tolerance=rrtstar_goal_tolerance,
+                        use_left_eef_collision_box=use_left_eef_collision_box,
+                    )
                 payload = {
                         "waypoints": [{
                             "name": f"runtime_{planner}_target",
@@ -538,20 +579,15 @@ class PlannerRuntime:
                     payload["rrtstar_goal_tolerance"] = True
                 if use_left_eef_collision_box:
                     payload["use_left_eef_collision_box"] = True
-                response = self._planner._trajectory.send_payload(payload, timeout=30.0)
-            else:
-                response = self._planner.plan_cart_trajectory(
-                    group=group,
-                    planner=planner,
-                    frame_id=pose.frame_id,
-                    ik_frame=tool_frame,
-                    position=pose.position,
-                    orientation=pose.orientation,
-                    max_vel=self.config.max_velocity,
-                    max_acc=self.config.max_acceleration,
-                    rrtstar_goal_tolerance=rrtstar_goal_tolerance,
-                    use_left_eef_collision_box=use_left_eef_collision_box,
-                )
+                if allow_right_hand_tall_contact:
+                    payload["allow_right_hand_tall_contact"] = True
+                return self._planner._trajectory.send_payload(payload, timeout=30.0)
+
+        try:
+            response = retry_task_creation(
+                request,
+                label=f"{arm}臂 {planner.upper()} 笛卡尔规划",
+            )
         except BaseException as exc:
             self._record_plan(
                 status="failure", arm=arm, planner=planner,
@@ -599,11 +635,31 @@ class PlannerRuntime:
             return None
         target = {"waypoints": waypoints}
         start_joints_deg = self._recorded_start_joints(arm)
+        allow_right_hand_tall_contact = self._allow_right_hand_tall_contact(arm)
+
+        def request() -> dict[str, Any]:
+            if not allow_right_hand_tall_contact:
+                return self._planner.plan_trajectory(
+                    waypoints,
+                    max_vel=self.config.max_velocity,
+                    max_acc=self.config.max_acceleration,
+                )
+            payload = {
+                "waypoints": waypoints,
+                "topp": {
+                    "max_vel_factor": self.config.max_velocity,
+                    "max_acc_factor": self.config.max_acceleration,
+                    "final_phase_ratio": 0.05,
+                    "final_phase_oversample": 2.0,
+                },
+                "allow_right_hand_tall_contact": True,
+            }
+            return self._planner._trajectory.send_payload(payload, timeout=30.0)
+
         try:
-            response = self._planner.plan_trajectory(
-                waypoints,
-                max_vel=self.config.max_velocity,
-                max_acc=self.config.max_acceleration,
+            response = retry_task_creation(
+                request,
+                label=f"{arm}臂笛卡尔序列规划",
             )
         except BaseException as exc:
             self._record_plan(
@@ -678,11 +734,31 @@ class PlannerRuntime:
             return None
         target = {"waypoints": waypoints}
         start_joints_deg = self._recorded_start_joints(arm, first_joints_deg)
+        allow_right_hand_tall_contact = self._allow_right_hand_tall_contact(arm)
+
+        def request() -> dict[str, Any]:
+            if not allow_right_hand_tall_contact:
+                return self._planner.plan_trajectory(
+                    waypoints,
+                    max_vel=self.config.max_velocity,
+                    max_acc=self.config.max_acceleration,
+                )
+            payload = {
+                "waypoints": waypoints,
+                "topp": {
+                    "max_vel_factor": self.config.max_velocity,
+                    "max_acc_factor": self.config.max_acceleration,
+                    "final_phase_ratio": 0.05,
+                    "final_phase_oversample": 2.0,
+                },
+                "allow_right_hand_tall_contact": True,
+            }
+            return self._planner._trajectory.send_payload(payload, timeout=30.0)
+
         try:
-            response = self._planner.plan_trajectory(
-                waypoints,
-                max_vel=self.config.max_velocity,
-                max_acc=self.config.max_acceleration,
+            response = retry_task_creation(
+                request,
+                label=f"{arm}臂关节-笛卡尔序列规划",
             )
         except BaseException as exc:
             self._record_plan(
@@ -717,7 +793,7 @@ class PlannerRuntime:
         from parm_sdk import Arm
 
         arm_id = 1 if arm == "left" else 2
-        with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1")) as sdk_arm:
+        with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.3.11")) as sdk_arm:
             sdk_arm.cancel_task(arm_id)
 
     def _execute_planned_trajectory(
@@ -740,7 +816,7 @@ class PlannerRuntime:
 
         arm_key = "left" if arm_id == 1 else "right"
         with guard:
-            with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1")) as sdk_arm:
+            with Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.3.11")) as sdk_arm:
                 state = sdk_arm.get_state() or {}
                 task_state = str(
                     (((state.get("state") or {}).get(arm_key) or {}).get("task_state") or "")

@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "stl": "tool/welding_up_side_1118_only_2_small_screws_removed.stl",
+  "positive_face_normal_stl": [0.0, 0.0, 1.0],
+  "positive_face_definition": "Validated with the 20260721_221444 capture: the CAD +Z face is the physical positive (non-grasp) side. CAD -Z facing the camera is the physical reverse (grasp) side.",
+  "minimum_score_margin_m": 0.00035,
+  "minimum_reverse_icp_fitness": 0.75,
+  "minimum_reverse_depth_match_fraction": 0.70,
+  "wide_head_outward_grasp_offset_m": 0.005,
+  "wide_head_inward_grasp_offset_m": 0.010,
+  "grasp_width_axis_stl": [-0.00040286, -0.99999954, -0.00086799],
+  "wide_head_image_left_grasp_lateral_offset_m": -0.008,
+  "wide_head_image_right_grasp_lateral_offset_m": 0.008,
+  "grasp_lateral_offset_axis": "grasp_frame_+Y",
+  "grasp_lateral_offset_rule": "In camera image coordinates, compare the projected wide-head centre with the projected CAD workpiece centroid. Wide head left of the centroid uses -8 mm along grasp-frame +Y; wide head right uses +8 mm along grasp-frame +Y."
+}

@@ -21,7 +21,7 @@ FULL_PIPELINE = HERE / "run_full_visual_prediction.py"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serial", default="261222076212", help="头部 D435i 序列号")
+    parser.add_argument("--serial", default="261722072445", help="头部 D435i 序列号")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)

@@ -325,7 +325,7 @@ def main() -> None:
     parser.add_argument("--capture", action="store_true", help="capture one read-only Arm/Planner TF pair")
     parser.add_argument("--solve", action="store_true", help="solve a bridge from saved samples")
     parser.add_argument("--output", type=Path, default=REPO_ROOT / "deploy" / "calibration" / "output" / "planner_tf_bridge.json")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--arm-id", type=int, choices=(1, 2), default=1)
     parser.add_argument("--planner-host", default="localhost")
     parser.add_argument("--planner-trajectory-port", type=int, default=5605,

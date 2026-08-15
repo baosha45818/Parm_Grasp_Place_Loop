@@ -15,6 +15,11 @@ from pathlib import Path
 import sys
 import time
 
+LOOP_ROOT = Path(__file__).resolve().parents[3]
+if str(LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOOP_ROOT))
+
+from tool.planner_task_retry import retry_task_creation
 from move_by_joints import (
     ensure_ready,
     finite,
@@ -82,6 +87,25 @@ def pose_from_lookup_transform(data: object) -> list[float]:
     return xyz + quat_to_rotvec(quat)
 
 
+def planner_relative_pose(
+    planner: object, frame_id: str, parent_frame: str, child_frame: str,
+) -> list[float]:
+    """Read ``T_parent_child`` from the planner's live TF tree.
+
+    The SDK reports its right ``eef_pose`` in ``right_hand_transfer_base``
+    (also named ``right_arm_end_link``).  Module 7 plans in the planner's
+    native ``right_eef`` frame, so this helper deliberately obtains their
+    relation from the planner rather than using a hand-measured tool offset.
+    """
+    body_parent = pose_from_lookup_transform(
+        planner.lookup_transform(frame_id, parent_frame).get("data")
+    )
+    body_child = pose_from_lookup_transform(
+        planner.lookup_transform(frame_id, child_frame).get("data")
+    )
+    return compose_pose(inverse_pose(body_parent), body_child)
+
+
 def pose_file_reference_frame(path: Path) -> str | None:
     """Return the explicit eef_pose reference frame recorded by teach v2."""
     try:
@@ -122,10 +146,10 @@ def load_workpiece_base_xy_yaw(path: Path, index: int) -> list[float]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="PARM 单臂基于末端位姿的绝对移动")
     parser.add_argument("--arm-id", type=int, choices=(1, 2), required=True, help="1=左臂，2=右臂")
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     parser.add_argument(
-        "--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"),
-        help="parm-planner 服务地址（默认：PARM_PLANNER_HOST 或 localhost）",
+        "--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"),
+        help="parm-planner 服务地址（默认：PARM_PLANNER_HOST 或 127.0.0.1）",
     )
     parser.add_argument(
         "--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"),
@@ -254,15 +278,18 @@ def main() -> int:
             # The planner and arm server are independent services.  Re-plan
             # immediately before execution so the first waypoint follows the
             # newest planner-side joint state.
-            result = planner.plan_cart_trajectory(
-                group=group,
-                planner=args.planner,
-                frame_id=args.frame_id,
-                ik_frame=ik_frame,
-                position=planner_target[:3],
-                orientation=rotvec_to_quat(planner_target[3:]),
-                max_vel=args.max_vel,
-                max_acc=args.max_acc,
+            result = retry_task_creation(
+                lambda: planner.plan_cart_trajectory(
+                    group=group,
+                    planner=args.planner,
+                    frame_id=args.frame_id,
+                    ik_frame=ik_frame,
+                    position=planner_target[:3],
+                    orientation=rotvec_to_quat(planner_target[3:]),
+                    max_vel=args.max_vel,
+                    max_acc=args.max_acc,
+                ),
+                label=f"{arm_label} {args.planner.upper()} 笛卡尔规划",
             )
             data = result.get("data") or {}
             trajectory = data.get("trajectory")

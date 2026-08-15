@@ -3,12 +3,12 @@
 
 Each invocation creates the next numeric capture directory under ``runs`` in
 this module.  The directory is self-contained:
-RGB, aligned depth, XYZ, depth-derived seed masks, the final SAM2 mask, the
-mask-pose JSON, and the annotated pose image are all saved together.
+RGB, XYZ, depth-derived seed masks, the final SAM2 mask, and the mask-pose
+JSON are all saved together.
 
-The pose JSON preserves the body-base XY, tail-to-head yaw, quadrant, and
-push-entry field conventions of the established RGB-mask pipeline.  RGB-D is
-used only to find reliable SAM2 foreground prompts.
+The pose JSON preserves the body-base XY, tail-to-head yaw, and quadrant
+conventions of the established RGB-mask pipeline.  RGB-D is used only to find
+reliable SAM2 foreground prompts.
 
 Example:
     python3 tabletop_pointcloud_workpiece_pose.py --workpiece 2
@@ -27,6 +27,8 @@ import socket
 import struct
 import subprocess
 import sys
+import shutil
+import tempfile
 import time
 import http.client
 from datetime import datetime, timezone
@@ -50,13 +52,42 @@ if Path(sys.executable).absolute() != RUNTIME_PYTHON.absolute():
 import cv2
 import numpy as np
 import open3d as o3d
-from scipy.spatial import cKDTree
 
 # These helpers were previously imported from mask_workpiece_pose.py.  Keep a
 # local copy so this file can run as a standalone tabletop pose pipeline.
-DEFAULT_CALIBRATION = MODULE_ROOT / "calibration/sdk_base_to_planner_alignment.json"
+# Head eye-to-hand calibration confirmed by the operator at the old teach
+# console display ``pitch=-45.0 deg, yaw=0.0 deg``.  That console uses SDK
+# 20260803, which negates pitch before it reaches the controller.  This pose
+# script uses SDK 20260811, whose direct command convention is +45 deg for
+# the identical physical low-head pose.  This is an SDK/body-base transform,
+# not the older planner-alignment file in this module's calibration directory.
+DEFAULT_CALIBRATION = MODULE_ROOT / "calibration/head_charuco_13x5_calibration_head.json"
+CALIBRATED_HEAD_PITCH_DEG = 45.0
+CALIBRATED_HEAD_YAW_DEG = 0.0
+CALIBRATED_TEACH_DISPLAY_PITCH_DEG = -45.0
 DEFAULT_PLANE_Z_M = -0.391809
-PUSH_SIDE_ANCHOR_FRACTION_FROM_TAIL = 0.80
+
+# Report-only pose-confidence policy.  These defaults are deliberately kept
+# separate from ICP optimization: they identify ambiguous or weak estimates
+# without changing the selected transform or blocking a downstream grasp.
+POSE_CONFIDENCE_THRESHOLDS = {
+    "high_min_observed_points": 400,
+    "acceptable_min_observed_points": 300,
+    "high_min_fitness": 0.97,
+    "acceptable_min_fitness": 0.93,
+    "high_max_rmse_mm": 4.2,
+    "acceptable_max_rmse_mm": 4.8,
+    "high_max_depth_score_mm": 4.5,
+    "acceptable_max_depth_score_mm": 6.25,
+    "high_min_face_margin_mm": 1.0,
+    "acceptable_min_face_margin_mm": 0.35,
+    "high_max_near_optimal_center_deviation_mm": 3.0,
+    "high_max_near_optimal_rotation_deviation_deg": 2.0,
+    "acceptable_max_near_optimal_center_deviation_mm": 5.0,
+    "acceptable_max_near_optimal_rotation_deviation_deg": 4.0,
+    "reject_near_optimal_center_deviation_mm": 8.0,
+    "reject_near_optimal_rotation_deviation_deg": 6.0,
+}
 
 # Keep the CAD assets explicit here so this script remains runnable after the
 # former head_pointcloud_icp_pose helper has been removed.
@@ -64,8 +95,8 @@ WORKPIECE_1_DIR = MODULE_ROOT / "assets/workpiece_1"
 WORKPIECE_2_DIR = MODULE_ROOT / "assets/workpiece_2"
 WORKPIECE_ASSETS = {
     "1": (
-        WORKPIECE_1_DIR / "welding_up_side_1118_only_2_small_screws_removed.stl",
-        WORKPIECE_1_DIR / "welding_up_side_1118_only_2_small_screws_removed.semantic.json",
+        WORKPIECE_1_DIR / "workpiece_1.stl",
+        WORKPIECE_1_DIR / "workpiece1.semantic.json",
     ),
     "2": (
         WORKPIECE_2_DIR / "workpiece_2.stl",
@@ -76,7 +107,7 @@ DEFAULT_WORKPIECE = "2"
 DEFAULT_STL, DEFAULT_SEMANTIC_CALIBRATION = WORKPIECE_ASSETS[DEFAULT_WORKPIECE]
 
 
-DEFAULT_HEAD_SERIAL = "261222076212"
+DEFAULT_HEAD_SERIAL = "261722072445"
 DEFAULT_CAPTURE_ROOT = PARM_PROJECT_ROOT / "output/module_4_2"
 SAM2_SOCKET = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_SOCKET",
@@ -86,21 +117,38 @@ SAM2_BIN = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_BIN",
     str(PARM_PROJECT_ROOT / "tool/sam2-service/.venv/bin/sam2-service"),
 ))
-# Exact safe ROI used by desktop_grasp/config/tabletop_workspace.json.
-MAIN_SAFE_ROI_XYWH = (300, 180, 460, 400)
+# Trapezoidal tabletop region selected on workpiece_1 capture 379.  Vertices
+# are clockwise in the 1280x720 head RGB frame, and follow the table edges so
+# floor and surrounding hardware are not treated as possible workpieces.
+DEFAULT_TABLETOP_ROI_POLYGON_PX = np.asarray(
+    ((272, 213), (1072, 188), (1256, 685), (141, 697)), dtype=np.float64,
+)
 
 
 def load_calibration(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
+    """Load either legacy or current head eye-to-hand calibration schema.
+
+    The new ChArUco output names its transform ``T_base_head_camera`` while
+    the former planner-alignment export used ``T_body_base_head_camera``.
+    Both mean p_base = T_base_head_camera @ p_head_camera.
+    """
     payload = json.loads(path.read_text(encoding="utf-8"))
     if payload.get("status") not in (None, "ACCEPTED"):
         raise RuntimeError(f"calibration is not accepted: {path}")
     camera_matrix = np.asarray(payload["camera_matrix"], dtype=np.float64)
     distortion = np.asarray(payload.get("distortion_coeffs", []), dtype=np.float64).reshape(-1)
-    if "T_body_base_head_camera" not in payload:
-        raise RuntimeError(f"calibration lacks T_body_base_head_camera: {path}")
-    transform = np.asarray(payload["T_body_base_head_camera"], dtype=np.float64)
+    transform_key = next(
+        (key for key in ("T_base_head_camera", "T_body_base_head_camera") if key in payload), None
+    )
+    if transform_key is None:
+        raise RuntimeError(
+            f"calibration lacks T_base_head_camera/T_body_base_head_camera: {path}"
+        )
+    transform = np.asarray(payload[transform_key], dtype=np.float64)
     image_size = tuple(int(value) for value in payload["image_size"])
-    if camera_matrix.shape != (3, 3) or transform.shape != (4, 4) or len(image_size) != 2:
+    if (camera_matrix.shape != (3, 3) or transform.shape != (4, 4)
+            or len(image_size) != 2 or not np.all(np.isfinite(transform))
+            or not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0))):
         raise RuntimeError(f"invalid calibration payload: {path}")
     return camera_matrix, distortion, transform, image_size
 
@@ -139,45 +187,6 @@ def _rotated_box_axis(component: np.ndarray) -> tuple[np.ndarray, np.ndarray, np
     return centre, edges[index] / lengths[index], corners
 
 
-def _mask_contains(component: np.ndarray, point_xy: np.ndarray) -> bool:
-    x, y = np.rint(point_xy).astype(int)
-    return 0 <= x < component.shape[1] and 0 <= y < component.shape[0] and bool(component[y, x])
-
-
-def _point_along_mask_ray(component: np.ndarray, start_xy: np.ndarray, direction_xy: np.ndarray,
-                          *, want_inside: bool, max_distance_px: float, margin_px: float = 2.0) -> np.ndarray:
-    norm = float(np.linalg.norm(direction_xy))
-    if norm <= 1e-9:
-        raise RuntimeError("push-point direction has zero length")
-    direction, step_px = direction_xy / norm, 0.25
-    if want_inside:
-        first_inside, last_inside = None, None
-        for distance in np.arange(0.0, max_distance_px + step_px, step_px):
-            point = start_xy + distance * direction
-            if _mask_contains(component, point):
-                first_inside = distance if first_inside is None else first_inside
-                last_inside = point
-                if distance - first_inside >= margin_px:
-                    return point
-            elif last_inside is not None:
-                return last_inside
-        if last_inside is not None:
-            return last_inside
-        raise RuntimeError("could not find mask interior along requested push-point ray")
-    seen_inside, edge_distance = False, None
-    for distance in np.arange(0.0, max_distance_px + step_px, step_px):
-        point = start_xy + distance * direction
-        if _mask_contains(component, point):
-            seen_inside = True
-        elif seen_inside:
-            edge_distance = distance if edge_distance is None else edge_distance
-            if distance - edge_distance >= margin_px:
-                return point
-    if edge_distance is not None:
-        return start_xy + edge_distance * direction
-    raise RuntimeError("could not find a mask edge along requested push-point ray")
-
-
 def component_pose(component: np.ndarray, camera_matrix: np.ndarray, distortion: np.ndarray,
                    t_base_camera: np.ndarray, plane_z: float) -> dict:
     """Mask-only diagnostics retained for JSON compatibility and debug drawing."""
@@ -193,7 +202,7 @@ def component_pose(component: np.ndarray, camera_matrix: np.ndarray, distortion:
     if len(tail_candidates) < 1 or len(head_candidates) < 1:
         raise RuntimeError("component has no usable head/tail pixels")
     # The wider endpoint is the head.  This is diagnostic only: ICP/CAD
-    # overwrites all final head/tail, yaw and push-entry pose fields below.
+    # overwrites the final head/tail and yaw fields below.
     normal = np.array([-coarse_axis[1], coarse_axis[0]])
     tail_width = float(np.ptp(tail_candidates @ normal))
     head_width = float(np.ptp(head_candidates @ normal))
@@ -209,70 +218,30 @@ def component_pose(component: np.ndarray, camera_matrix: np.ndarray, distortion:
         _pixel_to_base_xy(head_pixel, camera_matrix, distortion, t_base_camera, plane_z)
         - _pixel_to_base_xy(tail_pixel, camera_matrix, distortion, t_base_camera, plane_z)
     )
-    right_normal = np.array([-direction[1], direction[0]], dtype=np.float64)
-    try:
-        if base_quadrant == 1:
-            push_pixel = _point_along_mask_ray(component, tail_pixel, direction, want_inside=True,
-                                               max_distance_px=long_length)
-            push_policy = "tail_inside"
-        else:
-            use_left = base_quadrant == 2 or (base_quadrant == 3 and base_angle_deg < 225.0)
-            push_pixel = _point_along_mask_ray(
-                component, tail_pixel + PUSH_SIDE_ANCHOR_FRACTION_FROM_TAIL * direction,
-                -right_normal if use_left else right_normal, want_inside=False,
-                max_distance_px=float(math.hypot(*component.shape)),
-            )
-            push_policy = "left_outside" if use_left else "right_outside"
-    except RuntimeError:
-        # This is a mask-only diagnostic.  CAD/ICP replaces the final push
-        # entry point, so an irregular mask edge must not reject the pose.
-        push_pixel, push_policy = tail_pixel.copy(), "mask_diagnostic_fallback"
     center_base = _pixel_to_base_xy(center_pixel, camera_matrix, distortion, t_base_camera, plane_z)
-    push_base = _pixel_to_base_xy(push_pixel, camera_matrix, distortion, t_base_camera, plane_z)
     return {
         "center_pixel_xy": center_pixel.tolist(), "center_base_xy_m": center_base.tolist(),
         "center_base_xy_mm": (center_base * 1000.0).tolist(),
         "grasp_center_pixel_xy": ((tail_pixel + head_pixel) / 2.0).tolist(),
         "head_pixel_xy": head_pixel.tolist(), "tail_pixel_xy": tail_pixel.tolist(),
         "head_direction_base_angle_deg": base_angle_deg, "head_direction_base_quadrant": base_quadrant,
-        "push_entry_point": {"pixel_xy": push_pixel.tolist(), "base_xy_m": push_base.tolist(),
-                               "base_xy_mm": (push_base * 1000.0).tolist(), "policy": push_policy},
         "head_width_px": head_width, "tail_width_px": tail_width,
         "head_to_tail_width_ratio": float(head_width / max(tail_width, 1e-6)),
         "area_px": int(len(points_xy)), "rotated_box_pixel_corners_xy": corners.tolist(),
     }
 
 
-def write_debug_image(mask: np.ndarray, poses: list[dict], output: Path) -> None:
-    image = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-    for index, pose in enumerate(poses, start=1):
-        center = tuple(np.rint(pose["center_pixel_xy"]).astype(int))
-        grasp_center = tuple(np.rint(pose.get("grasp_center_pixel_xy", pose["center_pixel_xy"])).astype(int))
-        head, tail = tuple(np.rint(pose["head_pixel_xy"]).astype(int)), tuple(np.rint(pose["tail_pixel_xy"]).astype(int))
-        push = tuple(np.rint(pose["push_entry_point"]["pixel_xy"]).astype(int))
-        box = np.rint(np.asarray(pose["rotated_box_pixel_corners_xy"])).astype(np.int32)
-        cv2.polylines(image, [box], True, (0, 255, 255), 1)
-        cv2.arrowedLine(image, tail, head, (0, 0, 255), 2, tipLength=0.18)
-        cv2.circle(image, center, 4, (0, 255, 0), -1)
-        cv2.drawMarker(image, grasp_center, (255, 255, 0), cv2.MARKER_CROSS, 12, 2)
-        cv2.circle(image, push, 4, (255, 0, 255), -1)
-        cv2.putText(image, f"#{index} base {pose['head_direction_base_angle_deg']:.1f} deg Q{pose['head_direction_base_quadrant']}",
-                    (center[0] + 8, center[1] - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1, cv2.LINE_AA)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(output), image):
-        raise RuntimeError(f"failed to write debug image: {output}")
-
-
 def write_icp_workpiece_frame(rgb: np.ndarray, poses: list[dict], camera_matrix: np.ndarray,
-                              distortion: np.ndarray, output: Path, roi_bounds: tuple[int, int, int, int],
+                              distortion: np.ndarray, output: Path, roi_polygon: np.ndarray,
                               axis_length_m: float = 0.045) -> None:
     """Overlay the ROI and each ICP-estimated semantic workpiece frame on RGB."""
     image = rgb.copy()
-    left, top, right, bottom = roi_bounds
-    cv2.rectangle(image, (left, top), (right - 1, bottom - 1), (0, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(image, "ROI", (left + 6, top + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+    polygon = np.rint(roi_polygon).astype(np.int32)
+    cv2.polylines(image, [polygon], True, (0, 255, 255), 2, cv2.LINE_AA)
+    label = tuple(polygon[0] + np.array((6, 24)))
+    cv2.putText(image, "ROI", label, cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (0, 0, 0), 3, cv2.LINE_AA)
-    cv2.putText(image, "ROI", (left + 6, top + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+    cv2.putText(image, "ROI", label, cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                 (0, 255, 255), 1, cv2.LINE_AA)
     colors = ((0, 0, 255), (0, 200, 0), (255, 80, 0))  # BGR: X red, Y green, Z blue
     for index, pose in enumerate(poses, start=1):
@@ -310,6 +279,22 @@ def load_semantic_calibration(path: Path) -> np.ndarray:
     if not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0)):
         raise RuntimeError(f"semantic calibration is not a homogeneous transform: {path}")
     return transform
+
+
+def load_positive_face_axis(path: Path) -> np.ndarray:
+    """Return the semantic direction which points out of the front face."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    axis_name = str(payload.get("positive_face", {}).get("upward_axis", "+Z"))
+    axes = {
+        "+X": (1.0, 0.0, 0.0), "-X": (-1.0, 0.0, 0.0),
+        "+Y": (0.0, 1.0, 0.0), "-Y": (0.0, -1.0, 0.0),
+        "+Z": (0.0, 0.0, 1.0), "-Z": (0.0, 0.0, -1.0),
+    }
+    if axis_name not in axes:
+        raise RuntimeError(
+            f"positive_face.upward_axis must be one of {sorted(axes)}, got {axis_name!r}: {path}"
+        )
+    return np.asarray(axes[axis_name], dtype=np.float64)
 
 
 def load_stl_triangles(path: Path) -> np.ndarray:
@@ -371,9 +356,15 @@ def sample_stl_surface(path: Path, count: int, seed: int = 0) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", default=DEFAULT_HEAD_SERIAL, help="head D435i serial number")
-    parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "localhost"))
-    parser.add_argument("--head-pitch-deg", type=float, default=38.5)
-    parser.add_argument("--head-yaw-deg", type=float, default=0.0)
+    parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"))
+    parser.add_argument(
+        "--head-pitch-deg", type=float, default=CALIBRATED_HEAD_PITCH_DEG,
+        help="capture pitch in this script's SDK convention; must remain +45 for the default calibration",
+    )
+    parser.add_argument(
+        "--head-yaw-deg", type=float, default=CALIBRATED_HEAD_YAW_DEG,
+        help="capture yaw in SDK/teach-console convention; must remain 0 for the default calibration",
+    )
     parser.add_argument(
         "--head-settle-s", type=float, default=2.0,
         help="seconds to wait after the head move before depth capture (default: 2)",
@@ -398,8 +389,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION)
     parser.add_argument("--plane-z", type=float, default=DEFAULT_PLANE_Z_M)
     parser.add_argument(
-        "--roi", nargs=4, type=float, default=(300 / 1280, 180 / 720, 760 / 1280, 580 / 720),
-        metavar=("X0", "Y0", "X1", "Y1"), help="normalized tabletop ROI; default matches desktop_grasp main.py safe ROI",
+        "--roi", nargs=4, type=float, default=None,
+        metavar=("X0", "Y0", "X1", "Y1"),
+        help="optional normalized rectangular ROI override; the default is the capture-379 tabletop trapezoid",
     )
     parser.add_argument("--plane-distance-mm", type=float, default=4.0)
     parser.add_argument("--plane-samples", type=int, default=40000)
@@ -438,11 +430,22 @@ def parse_args() -> argparse.Namespace:
                         help="maximum iterations for FPFH/RANSAC initialization")
     parser.add_argument("--icp-global-seeds", type=int, default=16,
                         help="number of deterministic FPFH/RANSAC global initializations; side-on workpieces need broader seeding")
-    parser.add_argument("--minimum-z-up-dot", type=float, default=0.15,
-                        help="minimum dot product between configured semantic +Z and the table-up normal")
+    parser.add_argument("--minimum-z-up-dot", type=float, default=0.90,
+                        help="minimum absolute dot product between configured positive-face axis and the table-up normal (default 0.90 permits at most about 25.8 degrees from table-up)")
     parser.add_argument("--max-table-penetration-mm", type=float, default=10.0,
                         help="reject CAD poses that place any sampled surface this far below the fitted table; 10 mm absorbs RGB-D/table-plane bias")
-    parser.add_argument("--minimum-face-margin-mm", type=float, default=0.35)
+    parser.add_argument(
+        "--minimum-face-margin-mm", type=float, default=0.35,
+        help="minimum depth-score advantage required to classify FRONT or BACK; otherwise OTHER",
+    )
+    parser.add_argument(
+        "--near-optimal-score-window-mm", type=float, default=0.5,
+        help="diagnostic window above a same-side best depth score for pose-consensus reporting",
+    )
+    parser.add_argument(
+        "--low-confidence-retries", type=int, default=2,
+        help="additional RGB-D captures after a LOW pose-confidence result; LOW attempts are discarded",
+    )
     parser.add_argument("--sam2-url", default=f"unix://{SAM2_SOCKET}")
     args = parser.parse_args()
     preset_stl, preset_semantic = WORKPIECE_ASSETS[args.workpiece]
@@ -458,6 +461,20 @@ def normalized_roi_bounds(roi: tuple[float, float, float, float] | list[float], 
     if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
         raise ValueError("--roi must satisfy 0 <= X0 < X1 <= 1 and 0 <= Y0 < Y1 <= 1")
     return int(math.floor(x0 * width)), int(math.floor(y0 * height)), int(math.ceil(x1 * width)), int(math.ceil(y1 * height))
+
+
+def tabletop_roi_mask(roi: tuple[float, float, float, float] | list[float] | None,
+                      width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the default perspective tabletop mask, or an explicit rectangular override."""
+    if roi is not None:
+        left, top, right, bottom = normalized_roi_bounds(roi, width, height)
+        polygon = np.asarray(((left, top), (right - 1, top), (right - 1, bottom - 1), (left, bottom - 1)), dtype=np.int32)
+    else:
+        scale = np.asarray((width / 1280.0, height / 720.0), dtype=np.float64)
+        polygon = np.rint(DEFAULT_TABLETOP_ROI_POLYGON_PX * scale).astype(np.int32)
+    mask = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillConvexPoly(mask, polygon, 1, lineType=cv2.LINE_8)
+    return mask.astype(bool), polygon
 
 
 def create_run_dir(root: Path) -> tuple[int, Path]:
@@ -496,8 +513,8 @@ def move_head_to_capture_pose(args: argparse.Namespace) -> dict[str, object]:
     """Move the head to the calibrated capture pose before opening the camera."""
     if args.skip_head_move:
         return {"commanded": False, "reason": "--skip-head-move"}
-    if not -45.0 <= args.head_pitch_deg <= 45.0:
-        raise ValueError("--head-pitch-deg must be in [-45, 45]")
+    if not -8.0 <= args.head_pitch_deg <= 45.0:
+        raise ValueError("--head-pitch-deg must be in [-8, 45] for the installed parm_sdk")
     if not -60.0 <= args.head_yaw_deg <= 60.0:
         raise ValueError("--head-yaw-deg must be in [-60, 60]")
     if args.head_settle_s < 0:
@@ -516,12 +533,11 @@ def move_head_to_capture_pose(args: argparse.Namespace) -> dict[str, object]:
                 "pitch_deg": float(state["pitch"]["position"]),
                 "yaw_deg": float(state["yaw"]["position"]),
             }
-            # Head.move_to() negates pitch before sending it to the server,
-            # whereas get_state() exposes the raw server angle unchanged.
-            initial_sdk = {
-                "pitch_deg": -initial_raw["pitch_deg"],
-                "yaw_deg": initial_raw["yaw_deg"],
-            }
+            # This script uses parm_sdk 20260811: get_state() and move_to()
+            # use the same convention (positive pitch looks down about +Y).
+            # The older teach console displayed -45 for this physical pose
+            # because its SDK negated pitch before sending the command.
+            initial_sdk = initial_raw.copy()
             moving_value = state.get("controller", {}).get("is_moving")
             initially_moving = bool(moving_value) if moving_value is not None else None
         except (AttributeError, KeyError, TypeError, ValueError):
@@ -561,10 +577,7 @@ def move_head_to_capture_pose(args: argparse.Namespace) -> dict[str, object]:
                 "pitch_deg": float(state["pitch"]["position"]),
                 "yaw_deg": float(state["yaw"]["position"]),
             }
-            observed_sdk = {
-                "pitch_deg": -observed_raw["pitch_deg"],
-                "yaw_deg": observed_raw["yaw_deg"],
-            }
+            observed_sdk = observed_raw.copy()
         except (AttributeError, KeyError, TypeError, ValueError):
             observed_raw = observed_sdk = None
     finally:
@@ -582,6 +595,25 @@ def move_head_to_capture_pose(args: argparse.Namespace) -> dict[str, object]:
         "observed_state_deg": observed_raw,
         "observed_state_raw_deg": observed_raw, "observed_state_sdk_deg": observed_sdk,
     }
+
+
+def validate_calibration_capture_pose(args: argparse.Namespace) -> None:
+    """Prevent an accidental capture at a pose incompatible with the default extrinsic."""
+    try:
+        using_default = args.calibration.resolve() == DEFAULT_CALIBRATION.resolve()
+    except OSError:
+        using_default = args.calibration == DEFAULT_CALIBRATION
+    if using_default and (
+        not math.isclose(args.head_pitch_deg, CALIBRATED_HEAD_PITCH_DEG, abs_tol=1e-9)
+        or not math.isclose(args.head_yaw_deg, CALIBRATED_HEAD_YAW_DEG, abs_tol=1e-9)
+    ):
+        raise ValueError(
+            "the default ChArUco calibration is valid only at the confirmed "
+            f"physical low-head pose (this SDK: pitch={CALIBRATED_HEAD_PITCH_DEG:g}, "
+            f"yaw={CALIBRATED_HEAD_YAW_DEG:g}; old teach display: "
+            f"pitch={CALIBRATED_TEACH_DISPLAY_PITCH_DEG:g}); provide a matching --calibration "
+            "before overriding --head-pitch-deg/--head-yaw-deg"
+        )
 
 
 def capture_rgbd(args: argparse.Namespace, run_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
@@ -637,8 +669,6 @@ def capture_rgbd(args: argparse.Namespace, run_dir: Path) -> tuple[np.ndarray, n
     xyz[depth == 0] = np.nan
     if not cv2.imwrite(str(run_dir / "rgb.png"), rgb):
         raise RuntimeError("failed to write rgb.png")
-    if not cv2.imwrite(str(run_dir / "depth_aligned.png"), depth):
-        raise RuntimeError("failed to write depth_aligned.png")
     np.savez_compressed(
         run_dir / "rgbd.npz", rgb=rgb, depth_raw=depth, xyz_m=xyz,
         intrinsics=np.asarray([intr.fx, intr.fy, intr.ppx, intr.ppy], dtype=np.float64),
@@ -646,7 +676,7 @@ def capture_rgbd(args: argparse.Namespace, run_dir: Path) -> tuple[np.ndarray, n
         timestamp_unix_s=np.asarray(time.time()),
     )
     metadata: dict[str, object] = {
-        "capture_index": int(run_dir.name), "captured_at": datetime.now(timezone.utc).isoformat(),
+        "capture_index": None, "captured_at": datetime.now(timezone.utc).isoformat(),
         "serial": args.serial, "resolution": [int(rgb.shape[1]), int(rgb.shape[0])],
         "depth_scale_m": scale_m, "depth_fusion": f"median of {args.depth_fuse_frames} aligned frames",
         "intrinsics": {"fx": float(intr.fx), "fy": float(intr.fy), "ppx": float(intr.ppx), "ppy": float(intr.ppy)},
@@ -694,14 +724,12 @@ def distributed_positive_points(labels: np.ndarray, label: int, count: int = 3) 
 def build_seed_groups(rgb: np.ndarray, xyz: np.ndarray, args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, list[dict[str, object]], np.ndarray]:
     """Return table-height/darkness seeds and one point-only SAM2 prompt group per workpiece."""
     height, width = rgb.shape[:2]
-    left, top, right, bottom = normalized_roi_bounds(args.roi, width, height)
     # Equivalent to main.py's depth condition: 0 < raw depth < 65535.
     valid = np.isfinite(xyz).all(axis=2) & (xyz[:, :, 2] > 0.0) & (xyz[:, :, 2] < 65.0)
     plane = fit_table_plane(xyz[valid], args.plane_distance_mm * 1e-3, args.plane_samples, args.plane_iters)
     heights = xyz @ plane[:3] + plane[3]
     gray = cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY)
-    roi = np.zeros((height, width), dtype=bool)
-    roi[top:bottom, left:right] = True
+    roi, _ = tabletop_roi_mask(args.roi, width, height)
     raw_seed = valid & roi & (heights >= args.seed_height_mm * 1e-3) & (gray <= args.seed_max_gray)
     cleaned = cv2.morphologyEx(raw_seed.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     cleaned = cv2.dilate(cleaned, np.ones((5, 5), np.uint8), iterations=1)
@@ -851,31 +879,42 @@ def fpfh_ransac_initial(source: np.ndarray, target: np.ndarray, voxel_m: float, 
 
 def full_6d_icp(source: np.ndarray, target: np.ndarray, initial: np.ndarray,
                 iterations: int, max_corr_m: float, workers: int = 16) -> tuple[np.ndarray, float, float]:
-    """Robust point-to-point ICP that updates unrestricted 3-D rotation and translation."""
-    tree, T = cKDTree(target), initial.copy()
-    for _ in range(iterations):
-        transformed = transform_points(T, source)
-        distances, nearest = tree.query(transformed, k=1, workers=workers)
-        keep = distances < max_corr_m
-        if np.count_nonzero(keep) < 30:
-            keep[np.argsort(distances)[:min(250, len(distances))]] = True
-        cutoff = np.quantile(distances[keep], 0.82)
-        keep &= distances <= cutoff
-        current, matched = transformed[keep], target[nearest[keep]]
-        current_center, matched_center = current.mean(axis=0), matched.mean(axis=0)
-        H = (current-current_center).T @ (matched-matched_center)
-        U, _, Vt = np.linalg.svd(H)
-        rotation = Vt.T @ U.T
-        if np.linalg.det(rotation) < 0.0:
-            Vt[-1] *= -1.0
-            rotation = Vt.T @ U.T
-        delta = np.eye(4); delta[:3, :3] = rotation; delta[:3, 3] = matched_center - rotation @ current_center
-        T = delta @ T
-        if np.linalg.norm(rotation - np.eye(3), ord="fro") < 2e-5 and np.linalg.norm(delta[:3, 3]) < 2e-6:
-            break
-    distances, _ = tree.query(transform_points(T, source), k=1, workers=workers)
-    inliers = distances < max_corr_m
-    return T, float(np.sqrt(np.mean(distances[inliers] ** 2))) if np.any(inliers) else float("inf"), float(np.mean(inliers))
+    """Robust full-6DoF point-to-plane ICP against the observed RGB-D cloud.
+
+    Normals belong to ``target`` (the observed mask-local point cloud), which
+    makes each residual the CAD point's signed distance along the measured
+    surface normal.  The global FPFH/RANSAC initializer remains point-to-point;
+    only this local refinement changes to point-to-plane.
+    """
+    del workers  # Open3D owns nearest-neighbour parallelism for this solver.
+    source_cloud = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(np.asarray(source, dtype=np.float64))
+    )
+    target_cloud = o3d.geometry.PointCloud(
+        o3d.utility.Vector3dVector(np.asarray(target, dtype=np.float64))
+    )
+    # The observed cloud is already voxel-downsampled at 3 mm.  A radius at
+    # least twice the correspondence gate gives stable normals while retaining
+    # local workpiece geometry.
+    normal_radius_m = max(2.0 * max_corr_m, 0.008)
+    target_cloud.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius_m, max_nn=40)
+    )
+    result = o3d.pipelines.registration.registration_icp(
+        source_cloud,
+        target_cloud,
+        max_corr_m,
+        np.asarray(initial, dtype=np.float64),
+        o3d.pipelines.registration.TransformationEstimationPointToPlane(
+            o3d.pipelines.registration.TukeyLoss(k=max_corr_m * 0.5)
+        ),
+        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=int(iterations)),
+    )
+    return (
+        np.asarray(result.transformation, dtype=np.float64),
+        float(result.inlier_rmse),
+        float(result.fitness),
+    )
 
 
 def semantic_half_turn_initials(initial: np.ndarray, stl_semantic: np.ndarray) -> list[tuple[str, np.ndarray]]:
@@ -898,24 +937,48 @@ def semantic_half_turn_initials(initial: np.ndarray, stl_semantic: np.ndarray) -
 
 
 def depth_score(T: np.ndarray, cad_render: np.ndarray, depth: np.ndarray, mask: np.ndarray, K: np.ndarray, scale: float) -> float:
+    """Score a pose by z-buffer rendering the CAD against observed depth.
+
+    A previous 2-D nearest-neighbour approximation let multiple CAD surfaces
+    on the same camera ray participate in scoring.  In particular, a surface
+    hidden behind the front face could accidentally explain a depth pixel.
+    Here each CAD sample is rasterised into its nearest pixel and ``minimum.at``
+    retains only the smallest camera-Z value: the physically visible surface.
+    """
+    height, width = depth.shape[:2]
     points = transform_points(T, cad_render)
-    points = points[points[:, 2] > 0.1]
-    uv = np.column_stack((K[0, 0] * points[:, 0] / points[:, 2] + K[0, 2], K[1, 1] * points[:, 1] / points[:, 2] + K[1, 2]))
-    inside = (uv[:, 0] >= 0) & (uv[:, 0] < depth.shape[1]) & (uv[:, 1] >= 0) & (uv[:, 1] < depth.shape[0])
-    tree = cKDTree(uv[inside])
-    rows, cols = np.nonzero(mask & (depth > 0))
-    if len(rows) > 14000:
-        take = np.linspace(0, len(rows) - 1, 14000).astype(int); rows, cols = rows[take], cols[take]
-    pixel_distance, nearest = tree.query(np.column_stack((cols, rows)), k=1, distance_upper_bound=2.5, workers=-1)
-    keep = np.isfinite(pixel_distance)
-    if np.count_nonzero(keep) < 80:
+    points = points[np.isfinite(points).all(axis=1) & (points[:, 2] > 0.1)]
+    if len(points) == 0:
         return float("inf")
-    observed_z = depth[rows[keep], cols[keep]].astype(float) * scale
-    residual = np.abs(points[inside][nearest[keep], 2] - observed_z)
-    return float(np.mean(np.minimum(residual, 0.020)) + 0.004 * (1.0 - np.mean(keep)))
+    columns = np.rint(K[0, 0] * points[:, 0] / points[:, 2] + K[0, 2]).astype(np.intp)
+    rows = np.rint(K[1, 1] * points[:, 1] / points[:, 2] + K[1, 2]).astype(np.intp)
+    inside = (0 <= columns) & (columns < width) & (0 <= rows) & (rows < height)
+    if not np.any(inside):
+        return float("inf")
+
+    # Z-buffer: for every image pixel, retain the nearest CAD surface only.
+    rendered_z = np.full((height, width), np.inf, dtype=np.float64)
+    pixel_indices = rows[inside] * width + columns[inside]
+    np.minimum.at(rendered_z.ravel(), pixel_indices, points[inside, 2])
+
+    observed = mask.astype(bool) & (depth > 0)
+    rendered = np.isfinite(rendered_z)
+    overlap = observed & rendered
+    overlap_count = int(np.count_nonzero(overlap))
+    if overlap_count < 80:
+        return float("inf")
+    observed_z = depth[overlap].astype(np.float64) * scale
+    residual = np.abs(rendered_z[overlap] - observed_z)
+
+    # Score both depth agreement and visible-silhouette agreement.  The latter
+    # penalises CAD pixels outside the SAM2 component as well as observed
+    # component pixels that the rendered CAD does not cover.
+    union_count = int(np.count_nonzero(observed | rendered))
+    coverage_error = 1.0 - overlap_count / union_count
+    return float(np.mean(np.minimum(residual, 0.020)) + 0.004 * coverage_error)
 
 
-def semantic_landmarks(vertices: np.ndarray, stl_semantic: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+def semantic_landmarks(vertices: np.ndarray, stl_semantic: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     inverse = np.linalg.inv(stl_semantic)
     semantic = transform_points(inverse, vertices)
     low, high = np.percentile(semantic[:, 0], (2.5, 97.5))
@@ -923,8 +986,7 @@ def semantic_landmarks(vertices: np.ndarray, stl_semantic: np.ndarray) -> tuple[
     # rather than as a mesh-vertex centroid.
     center = np.zeros(3, dtype=np.float64)
     tail, head = semantic[semantic[:, 0] <= low].mean(axis=0), semantic[semantic[:, 0] >= high].mean(axis=0)
-    width = float(np.percentile(semantic[:, 1], 97.5) - np.percentile(semantic[:, 1], 2.5))
-    return center, tail, head, width
+    return center, tail, head
 
 
 def matrix_to_rpy_zyx(rotation: np.ndarray) -> tuple[float, float, float]:
@@ -940,29 +1002,6 @@ def matrix_to_rpy_zyx(rotation: np.ndarray) -> tuple[float, float, float]:
     return roll, pitch, yaw
 
 
-def cad_push_entry(T_base_semantic: np.ndarray, tail: np.ndarray, head: np.ndarray, width_m: float, yaw_deg: float) -> tuple[np.ndarray, str]:
-    """Compute the legacy push-entry policy from the ICP-aligned semantic axes."""
-    axis = head - tail
-    length = float(np.linalg.norm(axis))
-    if length < 1e-9:
-        raise RuntimeError("CAD semantic head/tail landmarks have zero length")
-    direction = axis / length
-    quadrant = int(yaw_deg // 90.0) + 1
-    if quadrant == 1:
-        local = tail + direction * (0.05 * length)
-        policy = "tail_inside"
-    else:
-        # For workpiece 2, semantic +Y is the configured left side when
-        # travelling from -X toward +X with +Z upward.
-        left = quadrant == 2 or (quadrant == 3 and yaw_deg < 225.0)
-        lateral = (1.0 if left else -1.0) * (0.5 * width_m + 0.002)
-        local = tail + direction * (0.80 * length) + np.array([0.0, lateral, 0.0])
-        policy = "left_outside" if left else "right_outside"
-        if quadrant == 3:
-            policy += "_q3_toward_q2" if left else "_q3_toward_q4"
-    return transform_points(T_base_semantic, local[None, :])[0], policy
-
-
 def downsample_points(points: np.ndarray, voxel_m: float = .003, maximum: int = 5000) -> np.ndarray:
     points = np.asarray(points, dtype=np.float64); points = points[np.isfinite(points).all(axis=1)]
     if len(points) == 0: return points.reshape(0, 3)
@@ -972,7 +1011,7 @@ def downsample_points(points: np.ndarray, voxel_m: float = .003, maximum: int = 
     return points[:maximum]
 
 
-def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray, depth_scale: float, camera_matrix: np.ndarray, distortion: np.ndarray, base_camera: np.ndarray, table_plane: np.ndarray, cad: np.ndarray, cad_render: np.ndarray, stl_semantic: np.ndarray, landmarks: tuple[np.ndarray, np.ndarray, np.ndarray, float], args: argparse.Namespace, diagnostic: dict) -> dict:
+def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray, depth_scale: float, camera_matrix: np.ndarray, distortion: np.ndarray, base_camera: np.ndarray, table_plane: np.ndarray, cad: np.ndarray, cad_render: np.ndarray, stl_semantic: np.ndarray, positive_face_axis: np.ndarray, landmarks: tuple[np.ndarray, np.ndarray, np.ndarray, float], args: argparse.Namespace, diagnostic: dict) -> dict:
     observed = downsample_points(xyz[component], maximum=args.max_observed_points)
     if len(observed) < args.min_icp_points: raise RuntimeError(f"insufficient mask depth: {len(observed)} points")
     table_plane = np.asarray(table_plane, dtype=np.float64)
@@ -992,7 +1031,7 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
         )
         return initialization, transform, rmse, fitness
 
-    trials = []
+    trials: dict[str, list[dict[str, object]]] = {"FRONT": [], "BACK": []}
     # The four semantic half-turn hypotheses are independent.  Run them in a
     # fixed-size pool while keeping RANSAC seeds sequential (Open3D's RNG is
     # process-global).  executor.map preserves the original candidate order.
@@ -1007,10 +1046,11 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
                 # STL (and semantic) origin is the defined workpiece centre.
                 # It was anchored at the robust observed-cloud centre before
                 # local ICP so a fold cannot be mistaken for the whole part.
-                semantic_z_camera = (transform @ stl_semantic)[:3, 2]
-                z_up_dot = float(semantic_z_camera @ table_normal)
+                T_camera_semantic = transform @ stl_semantic
+                positive_face_camera = T_camera_semantic[:3, :3] @ positive_face_axis
+                face_up_dot = float(positive_face_camera @ table_normal)
                 origin_pixel, _ = cv2.projectPoints(
-                    transform[:3, 3][None, :], np.zeros(3), np.zeros(3), camera_matrix, distortion,
+                    T_camera_semantic[:3, 3][None, :], np.zeros(3), np.zeros(3), camera_matrix, distortion,
                 )
                 ox, oy = np.rint(origin_pixel.reshape(2)).astype(int)
                 origin_in_mask = (
@@ -1018,18 +1058,179 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
                 )
                 table_height = transform_points(transform, cad) @ table_normal + table_plane[3]
                 penetration_m = float(max(0.0, -np.min(table_height)))
-                if z_up_dot >= args.minimum_z_up_dot and origin_in_mask and penetration_m <= args.max_table_penetration_mm * 1e-3:
+                if not origin_in_mask or penetration_m > args.max_table_penetration_mm * 1e-3:
+                    continue
+                side = (
+                    "FRONT" if face_up_dot >= args.minimum_z_up_dot else
+                    "BACK" if face_up_dot <= -args.minimum_z_up_dot else None
+                )
+                if side is not None:
                     score = depth_score(transform, cad_render, depth, component, camera_matrix, depth_scale)
-                    trials.append((score, f"fpfh_seed_{seed}/{initialization}", transform, rmse, fitness, z_up_dot, [int(ox), int(oy)], penetration_m))
-    if not trials:
+                    if np.isfinite(score):
+                        trials[side].append({
+                            "score": score,
+                            "initialization": f"fpfh_seed_{seed}/{initialization}",
+                            "transform": transform,
+                            "rmse": rmse,
+                            "fitness": fitness,
+                            "face_up_dot": face_up_dot,
+                            "origin_pixel": [int(ox), int(oy)],
+                            "penetration_m": penetration_m,
+                        })
+    best = {
+        side: min(candidates, key=lambda candidate: float(candidate["score"]))
+        for side, candidates in trials.items() if candidates
+    }
+    if not best:
         raise RuntimeError(
-            "no full-6DoF ICP pose satisfies semantic +Z above the table with the defined origin inside the mask; "
+            "no full-6DoF ICP pose satisfies either configured face direction, origin, and table constraints; "
             "check the mask, the CAD semantic frame, or --minimum-z-up-dot"
         )
-    score, initialization, T_camera_stl, rmse, fitness, z_up_dot, origin_pixel, penetration_m = min(trials, key=lambda value: value[0])
+    if len(best) == 2:
+        front_score, back_score = float(best["FRONT"]["score"]), float(best["BACK"]["score"])
+        margin_m = abs(front_score - back_score)
+        orientation = min(best, key=lambda side: float(best[side]["score"])) if margin_m >= args.minimum_face_margin_mm * 1e-3 else "OTHER"
+    else:
+        margin_m = None
+        orientation = "OTHER"
+    selected_side = orientation if orientation in best else min(best, key=lambda side: float(best[side]["score"]))
+    selected = best[selected_side]
+    score = float(selected["score"])
+    initialization = str(selected["initialization"])
+    T_camera_stl = np.asarray(selected["transform"], dtype=np.float64)
+    rmse = float(selected["rmse"])
+    fitness = float(selected["fitness"])
+    face_up_dot = float(selected["face_up_dot"])
+    origin_pixel = list(selected["origin_pixel"])
+    penetration_m = float(selected["penetration_m"])
+
+    def candidate_pose(candidate: dict[str, object]) -> tuple[np.ndarray, list[float]]:
+        transform = np.asarray(candidate["transform"], dtype=np.float64)
+        semantic = base_camera @ transform @ stl_semantic
+        rpy = matrix_to_rpy_zyx(semantic[:3, :3])
+        return semantic, [float(math.degrees(value)) for value in rpy]
+
+    # A low local ICP residual can still leave several materially different
+    # poses nearly tied.  Preserve the within-face leaderboard and the spread
+    # of candidates close to the best score as a confidence diagnostic.
+    candidate_confidence: dict[str, object] = {}
+    score_window_m = args.near_optimal_score_window_mm * 1e-3
+    for side, candidates in trials.items():
+        if not candidates:
+            continue
+        ranked = sorted(candidates, key=lambda candidate: float(candidate["score"]))
+        best_candidate = ranked[0]
+        best_transform, best_rpy = candidate_pose(best_candidate)
+        best_score = float(best_candidate["score"])
+        top_three = []
+        for rank, candidate in enumerate(ranked[:3], start=1):
+            semantic, rpy = candidate_pose(candidate)
+            relative_rotation = best_transform[:3, :3].T @ semantic[:3, :3]
+            cosine = float(np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0))
+            top_three.append({
+                "rank": rank,
+                "depth_score_mm": float(candidate["score"]) * 1000.0,
+                "score_gap_from_best_mm": (float(candidate["score"]) - best_score) * 1000.0,
+                "center_base_m": semantic[:3, 3].tolist(),
+                "rpy_deg": rpy,
+                "center_deviation_from_best_mm": float(np.linalg.norm(semantic[:3, 3] - best_transform[:3, 3])) * 1000.0,
+                "rotation_deviation_from_best_deg": math.degrees(math.acos(cosine)),
+                "initialization": str(candidate["initialization"]),
+            })
+        near_optimal = [candidate for candidate in ranked if float(candidate["score"]) <= best_score + score_window_m]
+        near_position_deviations_mm, near_rotation_deviations_deg = [], []
+        near_rpys = []
+        for candidate in near_optimal:
+            semantic, rpy = candidate_pose(candidate)
+            relative_rotation = best_transform[:3, :3].T @ semantic[:3, :3]
+            cosine = float(np.clip((np.trace(relative_rotation) - 1.0) * 0.5, -1.0, 1.0))
+            near_position_deviations_mm.append(float(np.linalg.norm(semantic[:3, 3] - best_transform[:3, 3])) * 1000.0)
+            near_rotation_deviations_deg.append(math.degrees(math.acos(cosine)))
+            near_rpys.append(rpy)
+        candidate_confidence[side] = {
+            "candidate_count": len(ranked),
+            "top_three": top_three,
+            "top_three_score_gaps_mm": [entry["score_gap_from_best_mm"] for entry in top_three],
+            "near_optimal_score_window_mm": args.near_optimal_score_window_mm,
+            "near_optimal_candidate_count": len(near_optimal),
+            "near_optimal_max_center_deviation_from_best_mm": max(near_position_deviations_mm),
+            "near_optimal_max_rotation_deviation_from_best_deg": max(near_rotation_deviations_deg),
+            "near_optimal_rpy_component_span_deg": (
+                (np.max(np.asarray(near_rpys), axis=0) - np.min(np.asarray(near_rpys), axis=0)).tolist()
+            ),
+        }
+
+    selected_candidate_confidence = candidate_confidence[selected_side]
+    near_count = int(selected_candidate_confidence["near_optimal_candidate_count"])
+    near_center_deviation_mm = float(selected_candidate_confidence["near_optimal_max_center_deviation_from_best_mm"])
+    near_rotation_deviation_deg = float(selected_candidate_confidence["near_optimal_max_rotation_deviation_from_best_deg"])
+    score_mm = score * 1000.0
+    rmse_mm = rmse * 1000.0
+    face_margin_mm = None if margin_m is None else margin_m * 1000.0
+    thresholds = POSE_CONFIDENCE_THRESHOLDS
+    low_reasons: list[str] = []
+    if orientation == "OTHER":
+        low_reasons.append("front_back_orientation_ambiguous")
+    if len(observed) < thresholds["acceptable_min_observed_points"]:
+        low_reasons.append("too_few_observed_points")
+    if fitness < thresholds["acceptable_min_fitness"]:
+        low_reasons.append("low_icp_fitness")
+    if rmse_mm > thresholds["acceptable_max_rmse_mm"]:
+        low_reasons.append("high_icp_rmse")
+    if score_mm > thresholds["acceptable_max_depth_score_mm"]:
+        low_reasons.append("high_depth_score")
+    if (face_margin_mm is not None
+            and face_margin_mm < thresholds["acceptable_min_face_margin_mm"]):
+        low_reasons.append("insufficient_front_back_score_margin")
+    if (near_count >= 2 and (
+            near_center_deviation_mm > thresholds["reject_near_optimal_center_deviation_mm"]
+            or near_rotation_deviation_deg > thresholds["reject_near_optimal_rotation_deviation_deg"]
+    )):
+        low_reasons.append("near_optimal_candidates_disagree")
+    high_quality = (
+        orientation != "OTHER"
+        and len(observed) >= thresholds["high_min_observed_points"]
+        and fitness >= thresholds["high_min_fitness"]
+        and rmse_mm <= thresholds["high_max_rmse_mm"]
+        and score_mm <= thresholds["high_max_depth_score_mm"]
+        and face_margin_mm is not None
+        and face_margin_mm >= thresholds["high_min_face_margin_mm"]
+        and (near_count == 1 or (
+            near_center_deviation_mm <= thresholds["high_max_near_optimal_center_deviation_mm"]
+            and near_rotation_deviation_deg <= thresholds["high_max_near_optimal_rotation_deviation_deg"]
+        ))
+    )
+    advisories: list[str] = []
+    if near_count >= 2 and (
+            near_center_deviation_mm > thresholds["acceptable_max_near_optimal_center_deviation_mm"]
+            or near_rotation_deviation_deg > thresholds["acceptable_max_near_optimal_rotation_deviation_deg"]
+    ):
+        advisories.append("near_optimal_candidate_variation")
+    top_three = selected_candidate_confidence["top_three"]
+    if len(top_three) >= 2 and float(top_three[1]["score_gap_from_best_mm"]) < args.near_optimal_score_window_mm:
+        advisories.append("runner_up_inside_near_optimal_score_window")
+    pose_confidence = {
+        "level": "LOW" if low_reasons else ("HIGH" if high_quality else "MEDIUM"),
+        "recommended_for_grasp": not low_reasons,
+        "report_only": True,
+        "low_reasons": low_reasons,
+        "advisories": advisories,
+        "thresholds": thresholds,
+        "checks": {
+            "orientation": orientation,
+            "observed_points": int(len(observed)),
+            "icp_fitness": fitness,
+            "icp_rmse_mm": rmse_mm,
+            "depth_score_mm": score_mm,
+            "front_back_score_margin_mm": face_margin_mm,
+            "near_optimal_candidate_count": near_count,
+            "near_optimal_max_center_deviation_mm": near_center_deviation_mm,
+            "near_optimal_max_rotation_deviation_deg": near_rotation_deviation_deg,
+        },
+    }
     T_base_semantic = base_camera @ T_camera_stl @ stl_semantic
     T_camera_semantic = T_camera_stl @ stl_semantic
-    center_s, tail_s, head_s, width = landmarks
+    center_s, tail_s, head_s = landmarks
     center_b, tail_b, head_b = transform_points(T_base_semantic, np.stack((center_s, tail_s, head_s)))
     center_c, tail_c, head_c = transform_points(T_camera_semantic, np.stack((center_s, tail_s, head_s)))
     pixels, _ = cv2.projectPoints(np.stack((center_c, head_c, tail_c)), np.zeros(3), np.zeros(3), camera_matrix, distortion)
@@ -1041,17 +1242,54 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
         raise RuntimeError("workpiece semantic +X is nearly vertical; horizontal yaw is undefined")
     yaw = math.degrees(math.atan2(float(horizontal_direction[1]), float(horizontal_direction[0]))) % 360.0
     quadrant = int(yaw // 90.0) + 1
-    push_b, push_policy = cad_push_entry(T_base_semantic, tail_s, head_s, width, yaw)
-    push_c = transform_points(T_camera_semantic, np.asarray([tail_s + (head_s-tail_s) * .05]))[0] if quadrant == 1 else None
-    if push_c is None:
-        # Invert the calibrated base transform only for visual projection; the
-        # authoritative contact point remains push_b in body_base.
-        push_c = transform_points(np.linalg.inv(base_camera), push_b[None, :])[0]
-    push_px, _ = cv2.projectPoints(push_c[None, :], np.zeros(3), np.zeros(3), camera_matrix, distortion)
     roll, pitch, yaw_rpy = matrix_to_rpy_zyx(T_base_semantic[:3, :3])
     # Retain mask-only measurements (area/box/width) as diagnostics, but replace every pose field with ICP/CAD geometry.
     record = dict(diagnostic)
-    record.update({"center_pixel_xy": center_px.tolist(), "head_pixel_xy": head_px.tolist(), "tail_pixel_xy": tail_px.tolist(), "center_base_xy_m": center_b[:2].tolist(), "center_base_xy_mm": (center_b[:2]*1000).tolist(), "head_base_xy_m": head_b[:2].tolist(), "tail_base_xy_m": tail_b[:2].tolist(), "head_direction_base_vector": direction.tolist(), "head_direction_base_xy_unit": (horizontal_direction / horizontal_length).tolist(), "head_direction_base_angle_deg": yaw, "head_direction_base_quadrant": quadrant, "robot_base_xy_yaw": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "x_mm": float(center_b[0]*1000), "y_mm": float(center_b[1]*1000), "yaw_rad": math.radians(yaw), "yaw_deg": yaw, "yaw_quadrant": quadrant, "yaw_definition": "horizontal projection of CAD semantic +X (tail to head), estimated by full-6DoF mask-local point-cloud ICP"}, "robot_base_xyz_rpy": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]), "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll), "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0, "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)"}, "push_entry_point": {"pixel_xy": push_px.reshape(2).tolist(), "base_xy_m": push_b[:2].tolist(), "base_xy_mm": (push_b[:2]*1000).tolist(), "policy": push_policy, "definition": "ICP/CAD semantic push entry: Q1 near the tail; Q2 left side; Q4 right side; Q3 selects the Q2/Q4-facing side at 80 percent tail-to-head."}, "pose_body_base": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]), "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll), "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0, "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)", "rotation_matrix": T_base_semantic[:3, :3].tolist()}, "object_side": "positive_face_full_6dof", "icp": {"rmse_mm": rmse*1000, "fitness": fitness, "depth_score_mm": score*1000, "observed_points": int(len(observed)), "initial_hypotheses": int(args.icp_global_seeds * 4), "initialization": initialization, "semantic_up_axis": "+Z", "semantic_z_up_dot_table_normal": z_up_dot, "origin_pixel_xy": origin_pixel, "table_penetration_mm": penetration_m*1000, "origin_constraint": "projected semantic origin must lie in the SAM2 workpiece mask"}, "T_head_camera_stl": T_camera_stl.tolist(), "T_head_camera_workpiece": T_camera_semantic.tolist(), "T_head_camera_workpiece_semantic": T_camera_semantic.tolist(), "T_body_base_workpiece_semantic": T_base_semantic.tolist()})
+    face_hypotheses = {
+        side: {
+            "depth_score_mm": float(candidate["score"]) * 1000,
+            "rmse_mm": float(candidate["rmse"]) * 1000,
+            "fitness": float(candidate["fitness"]),
+            "face_up_dot_table_normal": float(candidate["face_up_dot"]),
+            "initialization": str(candidate["initialization"]),
+        }
+        for side, candidate in best.items()
+    }
+    record.update({
+        "center_pixel_xy": center_px.tolist(), "head_pixel_xy": head_px.tolist(),
+        "tail_pixel_xy": tail_px.tolist(), "center_base_xy_m": center_b[:2].tolist(),
+        "center_base_xy_mm": (center_b[:2] * 1000).tolist(), "head_base_xy_m": head_b[:2].tolist(),
+        "tail_base_xy_m": tail_b[:2].tolist(), "head_direction_base_vector": direction.tolist(),
+        "head_direction_base_xy_unit": (horizontal_direction / horizontal_length).tolist(),
+        "head_direction_base_angle_deg": yaw, "head_direction_base_quadrant": quadrant,
+        "robot_base_xy_yaw": {"x_m": float(center_b[0]), "y_m": float(center_b[1]),
+            "x_mm": float(center_b[0] * 1000), "y_mm": float(center_b[1] * 1000),
+            "yaw_rad": math.radians(yaw), "yaw_deg": yaw, "yaw_quadrant": quadrant,
+            "yaw_definition": "horizontal projection of CAD semantic +X (tail to head), estimated by full-6DoF mask-local point-cloud ICP"},
+        "robot_base_xyz_rpy": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]),
+            "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll),
+            "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0,
+            "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)"},
+        "pose_body_base": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]),
+            "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll),
+            "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0,
+            "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)", "rotation_matrix": T_base_semantic[:3, :3].tolist()},
+        "orientation": orientation,
+        "object_side": {"FRONT": "positive_face_full_6dof", "BACK": "reverse_face_full_6dof", "OTHER": "ambiguous_face_full_6dof"}[orientation],
+        "orientation_score_margin_mm": None if margin_m is None else margin_m * 1000,
+        "required_orientation_margin_mm": args.minimum_face_margin_mm,
+        "face_hypotheses": face_hypotheses, "candidate_confidence": candidate_confidence,
+        "pose_confidence": pose_confidence,
+        "icp": {"rmse_mm": rmse * 1000, "fitness": fitness, "depth_score_mm": score * 1000,
+            "observed_points": int(len(observed)), "initial_hypotheses": int(args.icp_global_seeds * 4),
+            "initialization": initialization, "positive_face_axis_semantic": positive_face_axis.tolist(),
+            "positive_face_up_dot_table_normal": face_up_dot, "origin_pixel_xy": origin_pixel,
+            "table_penetration_mm": penetration_m * 1000,
+            "origin_constraint": "projected semantic origin must lie in the SAM2 workpiece mask"},
+        "T_head_camera_stl": T_camera_stl.tolist(), "T_head_camera_workpiece": T_camera_semantic.tolist(),
+        "T_head_camera_workpiece_semantic": T_camera_semantic.tolist(),
+        "T_body_base_workpiece_semantic": T_base_semantic.tolist(),
+    })
     return record
 
 
@@ -1086,71 +1324,226 @@ def result_payload(mask_path: Path, calibration: Path, plane_z: float, poses: li
 
 def main() -> int:
     args = parse_args()
-    if min(args.plane_distance_mm, args.seed_height_mm, args.min_seed_area, args.min_mask_area,
-           args.min_pose_area, args.icp_workers) <= 0:
+    if (min(args.plane_distance_mm, args.seed_height_mm, args.min_seed_area, args.min_mask_area,
+            args.min_pose_area, args.icp_workers) <= 0
+            or args.minimum_face_margin_mm < 0 or args.near_optimal_score_window_mm < 0
+            or args.low_confidence_retries < 0):
         raise ValueError("thresholds and minimum areas must be positive")
     for path in (args.calibration, args.stl, args.semantic_calibration):
         if not path.is_file(): raise FileNotFoundError(path)
     workpiece_capture_root = args.capture_root / f"workpiece_{args.workpiece}"
-    run_index, run_dir = create_run_dir(workpiece_capture_root)
-    try:
-        head_move = move_head_to_capture_pose(args)
-        rgb, depth, xyz, capture_metadata = capture_rgbd(args, run_dir)
-        camera_matrix, distortion, t_base_camera, calibration_size = load_calibration(args.calibration)
-        if calibration_size != (rgb.shape[1], rgb.shape[0]):
-            raise RuntimeError(f"capture resolution {rgb.shape[1]}x{rgb.shape[0]} differs from calibration {calibration_size}")
-        raw_seed, cleaned_seed, groups, plane = build_seed_groups(rgb, xyz, args)
-        triangles = load_stl_triangles(args.stl)
-        vertices = triangles.reshape(-1, 3)
-        stl_semantic = load_semantic_calibration(args.semantic_calibration)
-        landmarks = semantic_landmarks(vertices, stl_semantic)
-        cad = sample_stl_surface(args.stl, args.model_samples)
-        cad_render = sample_stl_surface(args.stl, args.render_samples)
-        cv2.imwrite(str(run_dir / "seed_raw.png"), raw_seed.astype(np.uint8) * 255)
-        cv2.imwrite(str(run_dir / "seed_cleaned.png"), cleaned_seed.astype(np.uint8) * 255)
-        write_seed_debug(rgb, raw_seed, cleaned_seed, groups, run_dir / "seed_prompts.png")
-        left, top, right, bottom = normalized_roi_bounds(args.roi, rgb.shape[1], rgb.shape[0])
-        roi = np.zeros(rgb.shape[:2], dtype=bool)
-        roi[top:bottom, left:right] = True
-        mask, group_diagnostics, device = sam2_mask(rgb, cleaned_seed, groups, roi, args)
-        mask_path = run_dir / "mask.png"
-        if not cv2.imwrite(str(mask_path), mask.astype(np.uint8) * 255):
-            raise RuntimeError(f"failed to write {mask_path}")
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-        labels_to_pose = [label for label in range(1, count) if int(stats[label, cv2.CC_STAT_AREA]) >= args.min_pose_area]
-        labels_to_pose.sort(key=lambda label: int(stats[label, cv2.CC_STAT_AREA]), reverse=True)
-        poses, rejected = [], []
-        for label in labels_to_pose:
-            try:
-                component = labels == label
-                diagnostic = component_pose(component, camera_matrix, distortion, t_base_camera, args.plane_z)
-                poses.append(icp_pose_for_mask(component, xyz, depth, float(capture_metadata["depth_scale_m"]), camera_matrix, distortion, t_base_camera, plane, cad, cad_render, stl_semantic, landmarks, args, diagnostic))
-            except RuntimeError as exc:
-                rejected.append({"label": int(label), "area_px": int(stats[label, cv2.CC_STAT_AREA]), "reason": str(exc)})
-        pose_json = result_payload(
-            mask_path, args.calibration, args.plane_z, poses, rejected,
-            workpiece=args.workpiece, stl=args.stl, semantic_calibration=args.semantic_calibration,
+    workpiece_capture_root.mkdir(parents=True, exist_ok=True)
+    validate_calibration_capture_pose(args)
+    head_move = move_head_to_capture_pose(args)
+    camera_matrix, distortion, t_base_camera, calibration_size = load_calibration(args.calibration)
+    triangles = load_stl_triangles(args.stl)
+    vertices = triangles.reshape(-1, 3)
+    stl_semantic = load_semantic_calibration(args.semantic_calibration)
+    positive_face_axis = load_positive_face_axis(args.semantic_calibration)
+    landmarks = semantic_landmarks(vertices, stl_semantic)
+    cad = sample_stl_surface(args.stl, args.model_samples)
+    cad_render = sample_stl_surface(args.stl, args.render_samples)
+
+    def low_attempt_key(attempt_poses: list[dict]) -> tuple[float, float, float, float]:
+        """Lower is better when no attempt has reached MEDIUM confidence."""
+        penalties = []
+        for pose in attempt_poses:
+            confidence = pose["pose_confidence"]
+            checks, thresholds = confidence["checks"], confidence["thresholds"]
+            penalties.append(sum((
+                max(0.0, (thresholds["acceptable_min_observed_points"] - checks["observed_points"])
+                    / thresholds["acceptable_min_observed_points"]),
+                max(0.0, (thresholds["acceptable_min_fitness"] - checks["icp_fitness"])
+                    / thresholds["acceptable_min_fitness"]),
+                max(0.0, (checks["icp_rmse_mm"] - thresholds["acceptable_max_rmse_mm"])
+                    / thresholds["acceptable_max_rmse_mm"]),
+                max(0.0, (checks["depth_score_mm"] - thresholds["acceptable_max_depth_score_mm"])
+                    / thresholds["acceptable_max_depth_score_mm"]),
+                max(0.0, (checks["near_optimal_max_center_deviation_mm"]
+                    - thresholds["reject_near_optimal_center_deviation_mm"])
+                    / thresholds["reject_near_optimal_center_deviation_mm"]),
+                max(0.0, (checks["near_optimal_max_rotation_deviation_deg"]
+                    - thresholds["reject_near_optimal_rotation_deviation_deg"])
+                    / thresholds["reject_near_optimal_rotation_deviation_deg"]),
+                1.0 if checks["orientation"] == "OTHER" else 0.0,
+            )))
+        return (
+            float(sum(len(pose["pose_confidence"]["low_reasons"]) for pose in attempt_poses)),
+            float(sum(penalties)),
+            -float(sum(pose["icp"]["fitness"] for pose in attempt_poses)),
+            float(sum(pose["icp"]["depth_score_mm"] for pose in attempt_poses)),
         )
+
+    def back_icp_key(attempt_poses: list[dict]) -> tuple[float, float, float]:
+        """Rank two independently captured BACK results; lower is better.
+
+        ``depth_score_mm`` is the same score used to choose the winning ICP
+        hypothesis within a capture.  RMSE and fitness make the choice
+        deterministic when the depth scores are tied.
+        """
+        return (
+            float(sum(pose["icp"]["depth_score_mm"] for pose in attempt_poses)),
+            float(sum(pose["icp"]["rmse_mm"] for pose in attempt_poses)),
+            -float(sum(pose["icp"]["fitness"] for pose in attempt_poses)),
+        )
+
+    # Keep only the best rejected attempt in a private temporary directory;
+    # numeric output directories remain reserved for accepted/fallback results.
+    with tempfile.TemporaryDirectory(prefix=".pending_pose_best_", dir=workpiece_capture_root) as best_name, \
+            tempfile.TemporaryDirectory(prefix=".pending_pose_back_", dir=workpiece_capture_root) as back_name:
+        best_dir = Path(best_name)
+        back_dir = Path(back_name)
+        best_key: tuple[float, float, float, float] | None = None
+        best_pose_json: dict | None = None
+        best_metadata: dict | None = None
+        best_pose_count = 0
+        first_back_key: tuple[float, float, float] | None = None
+        first_back_pose_json: dict | None = None
+        first_back_metadata: dict | None = None
+        first_back_pose_count = 0
+        # A BACK detection consumes one additional capture for confirmation;
+        # low-confidence retries retain their existing allowance.
+        attempt = 1
+        attempt_limit = args.low_confidence_retries + 1
+        while attempt <= attempt_limit:
+            # Do not expose rejected captures in the numeric output sequence.
+            # TemporaryDirectory removes images/point clouds after each attempt.
+            with tempfile.TemporaryDirectory(prefix=".pending_pose_", dir=workpiece_capture_root) as pending_name:
+                pending_dir = Path(pending_name)
+                rgb, depth, xyz, capture_metadata = capture_rgbd(args, pending_dir)
+                if calibration_size != (rgb.shape[1], rgb.shape[0]):
+                    raise RuntimeError(f"capture resolution {rgb.shape[1]}x{rgb.shape[0]} differs from calibration {calibration_size}")
+                raw_seed, cleaned_seed, groups, plane = build_seed_groups(rgb, xyz, args)
+                cv2.imwrite(str(pending_dir / "seed_raw.png"), raw_seed.astype(np.uint8) * 255)
+                cv2.imwrite(str(pending_dir / "seed_cleaned.png"), cleaned_seed.astype(np.uint8) * 255)
+                write_seed_debug(rgb, raw_seed, cleaned_seed, groups, pending_dir / "seed_prompts.png")
+                roi, roi_polygon = tabletop_roi_mask(args.roi, rgb.shape[1], rgb.shape[0])
+                mask, group_diagnostics, device = sam2_mask(rgb, cleaned_seed, groups, roi, args)
+                pending_mask_path = pending_dir / "mask.png"
+                if not cv2.imwrite(str(pending_mask_path), mask.astype(np.uint8) * 255):
+                    raise RuntimeError(f"failed to write {pending_mask_path}")
+                count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+                labels_to_pose = [label for label in range(1, count) if int(stats[label, cv2.CC_STAT_AREA]) >= args.min_pose_area]
+                labels_to_pose.sort(key=lambda label: int(stats[label, cv2.CC_STAT_AREA]), reverse=True)
+                poses, rejected = [], []
+                for label in labels_to_pose:
+                    try:
+                        component = labels == label
+                        diagnostic = component_pose(component, camera_matrix, distortion, t_base_camera, args.plane_z)
+                        poses.append(icp_pose_for_mask(component, xyz, depth, float(capture_metadata["depth_scale_m"]), camera_matrix, distortion, t_base_camera, plane, cad, cad_render, stl_semantic, positive_face_axis, landmarks, args, diagnostic))
+                    except RuntimeError as exc:
+                        rejected.append({"label": int(label), "area_px": int(stats[label, cv2.CC_STAT_AREA]), "reason": str(exc)})
+                if not poses:
+                    print(f"[retry] attempt={attempt}/{args.low_confidence_retries + 1} no valid pose discarded")
+                    attempt += 1
+                    continue
+
+                write_icp_workpiece_frame(
+                    rgb, poses, camera_matrix, distortion, pending_dir / "rgb_icp_workpiece_frame.png",
+                    roi_polygon,
+                )
+                pose_json = result_payload(
+                    pending_mask_path, args.calibration, args.plane_z, poses, rejected,
+                    workpiece=args.workpiece, stl=args.stl, semantic_calibration=args.semantic_calibration,
+                )
+                metadata = {
+                    **capture_metadata, "head_move": head_move, "confidence_attempt": attempt,
+                    "low_confidence_retries_allowed": args.low_confidence_retries,
+                    "confidence_fallback_used": False,
+                    "calibration": str(args.calibration), "table_plane_head_camera": plane.tolist(),
+                    "roi_normalized_rect_override": list(args.roi) if args.roi is not None else None,
+                    "roi_polygon_px": roi_polygon.tolist(), "seed_height_mm": args.seed_height_mm, "seed_max_gray": args.seed_max_gray,
+                    "seed_groups": groups, "sam2_groups": group_diagnostics, "sam2_device": device, "pose_source": "mask-local point cloud + STL multi-start full-6DoF ICP",
+                    "mask_foreground_pixels": int(np.count_nonzero(mask)), "pose_components": len(poses),
+                    "files": {"rgb": "rgb.png", "rgbd": "rgbd.npz", "seed_raw": "seed_raw.png", "seed_cleaned": "seed_cleaned.png", "seed_prompts": "seed_prompts.png", "mask": "mask.png", "pose_json": "mask_pose.json", "icp_workpiece_frame": "rgb_icp_workpiece_frame.png"},
+                }
+                is_back_detection = bool(poses) and all(pose["orientation"] == "BACK" for pose in poses)
+                if is_back_detection:
+                    current_back_key = back_icp_key(poses)
+                    if first_back_pose_json is None:
+                        # Do not publish a single BACK detection: a fresh
+                        # RGB-D capture is required before declaring BACK.
+                        shutil.copytree(pending_dir, back_dir, dirs_exist_ok=True)
+                        first_back_key = current_back_key
+                        first_back_pose_json = pose_json
+                        first_back_metadata = metadata
+                        first_back_pose_count = len(poses)
+                        attempt_limit += 1
+                        print(f"[retry] attempt={attempt} BACK detected; capturing once more for confirmation")
+                        attempt += 1
+                        continue
+
+                    # Both independent captures are BACK.  Save the one with
+                    # the better ICP score, rather than always saving the
+                    # confirmation capture.
+                    use_current = first_back_key is None or current_back_key < first_back_key
+                    selected_dir = pending_dir if use_current else back_dir
+                    selected_pose_json = pose_json if use_current else first_back_pose_json
+                    selected_metadata = metadata if use_current else first_back_metadata
+                    selected_pose_count = len(poses) if use_current else first_back_pose_count
+                    if selected_metadata is None:
+                        raise RuntimeError("BACK confirmation metadata is missing")
+                    run_index, run_dir = create_run_dir(workpiece_capture_root)
+                    for artifact in selected_dir.iterdir():
+                        os.replace(artifact, run_dir / artifact.name)
+                    selected_pose_json["mask"] = str(run_dir / "mask.png")
+                    selected_pose_json["back_face_confirmation"] = {
+                        "confirmed": True,
+                        "captures_checked": 2,
+                        "selection": "second_capture" if use_current else "first_capture",
+                        "first_capture_icp_key": list(first_back_key) if first_back_key is not None else None,
+                        "second_capture_icp_key": list(current_back_key),
+                        "key_definition": "sum(depth_score_mm), sum(rmse_mm), negative sum(fitness); lower is better",
+                    }
+                    pose_path = run_dir / "mask_pose.json"
+                    pose_path.write_text(json.dumps(selected_pose_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    selected_metadata["capture_index"] = run_index
+                    selected_metadata["back_face_confirmation"] = selected_pose_json["back_face_confirmation"]
+                    (run_dir / "metadata.json").write_text(json.dumps(selected_metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                    print(f"[done] capture={run_index} dir={run_dir} workpieces={selected_pose_count} pose_json={pose_path} back_confirmed=2 icp_selection={selected_pose_json['back_face_confirmation']['selection']}")
+                    return 0
+                low_poses = [pose for pose in poses if pose["pose_confidence"]["level"] == "LOW"]
+                if low_poses:
+                    reasons = ",".join("+".join(pose["pose_confidence"]["low_reasons"]) for pose in low_poses)
+                    key = low_attempt_key(poses)
+                    if best_key is None or key < best_key:
+                        shutil.copytree(pending_dir, best_dir, dirs_exist_ok=True)
+                        best_key, best_pose_json, best_metadata, best_pose_count = key, pose_json, metadata, len(poses)
+                    print(f"[retry] attempt={attempt}/{args.low_confidence_retries + 1} low-confidence pose discarded: {reasons}")
+                    attempt += 1
+                    continue
+
+                run_index, run_dir = create_run_dir(workpiece_capture_root)
+                for artifact in pending_dir.iterdir():
+                    os.replace(artifact, run_dir / artifact.name)
+                capture_metadata["capture_index"] = run_index
+                pose_json["mask"] = str(run_dir / "mask.png")
+                pose_path = run_dir / "mask_pose.json"
+                pose_path.write_text(json.dumps(pose_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                metadata["capture_index"] = run_index
+                (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                print(f"[done] capture={run_index} dir={run_dir} workpieces={len(poses)} pose_json={pose_path}")
+                return 0
+
+            attempt += 1
+
+        if best_pose_json is None or best_metadata is None:
+            raise RuntimeError(
+                f"no valid pose after {args.low_confidence_retries + 1} captures; "
+                "no result was written to the numeric output directory"
+            )
+        run_index, run_dir = create_run_dir(workpiece_capture_root)
+        for artifact in best_dir.iterdir():
+            os.replace(artifact, run_dir / artifact.name)
+        best_pose_json["mask"] = str(run_dir / "mask.png")
         pose_path = run_dir / "mask_pose.json"
-        pose_path.write_text(json.dumps(pose_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        write_debug_image(mask.astype(np.uint8) * 255, poses, run_dir / "mask_pose.png")
-        write_icp_workpiece_frame(
-            rgb, poses, camera_matrix, distortion, run_dir / "rgb_icp_workpiece_frame.png",
-            (left, top, right, bottom),
-        )
-        metadata = {
-            **capture_metadata, "head_move": head_move, "calibration": str(args.calibration), "table_plane_head_camera": plane.tolist(),
-            "roi_normalized": list(args.roi), "seed_height_mm": args.seed_height_mm, "seed_max_gray": args.seed_max_gray,
-            "seed_groups": groups, "sam2_groups": group_diagnostics, "sam2_device": device, "pose_source": "mask-local point cloud + STL multi-start full-6DoF ICP",
-            "mask_foreground_pixels": int(np.count_nonzero(mask)), "pose_components": len(poses),
-            "files": {"rgb": "rgb.png", "depth": "depth_aligned.png", "rgbd": "rgbd.npz", "seed_raw": "seed_raw.png", "seed_cleaned": "seed_cleaned.png", "seed_prompts": "seed_prompts.png", "mask": "mask.png", "pose_json": "mask_pose.json", "pose_debug": "mask_pose.png", "icp_workpiece_frame": "rgb_icp_workpiece_frame.png"},
-        }
-        (run_dir / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception as exc:
-        (run_dir / "error.json").write_text(json.dumps({"error": str(exc)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        raise
-    print(f"[done] capture={run_index} dir={run_dir} workpieces={len(poses)} pose_json={pose_path} pose_debug={run_dir / 'mask_pose.png'}")
-    return 0
+        pose_path.write_text(json.dumps(best_pose_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        best_metadata["capture_index"] = run_index
+        best_metadata["confidence_fallback_used"] = True
+        best_metadata["confidence_fallback_selection_key"] = list(best_key) if best_key is not None else None
+        (run_dir / "metadata.json").write_text(json.dumps(best_metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(f"[done] capture={run_index} dir={run_dir} workpieces={best_pose_count} pose_json={pose_path} confidence_fallback=LOW")
+        return 0
 
 
 if __name__ == "__main__":

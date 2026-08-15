@@ -41,12 +41,52 @@ from scipy.spatial import cKDTree
 
 LOOP_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_STL = LOOP_ROOT / "tool/workpiece_1/workpiece_1.stl"
-WRIST_CALIBRATION = LOOP_ROOT / "tool/calibration/left_wrist_d405/calibration_wrist1.json"
+# Current-deployment D405 hand-eye, directly in Planner frames.  This replaces
+# the former SDK EEF calibration and planner_tf_bridge conversion.
+WRIST_CALIBRATION = (
+    LOOP_ROOT / "third_party/graspnet/deploy/calibration/output/"
+    "wrist1_planner_final_v3/calibration_wrist1_planner.json"
+)
 TCP_CALIBRATION = LOOP_ROOT / "tool/calibration/graspnet_tcp/calibration_translation2.json"
 LEFT_EEF_MIN_GRASP_Z_BASE_M = -0.541
-ICP_DAEMON_SOCKET = Path(os.environ.get("TRADITIONAL_ICP_DAEMON_SOCKET", "/tmp/traditional-stl-icp.sock"))
+# Empirical maximum correction for the current robot/camera installation.
+# The +body_base-Y finger contacts 7 mm early only when the jaw line is
+# parallel to body_base Y.  We project base +Y onto the *horizontal jaw line*
+# at runtime: 7 mm at theta=0, 4.95 mm at theta=45, and exactly 0 at
+# theta=90.  Do not use a constant base-Y translation, which would wrongly
+# shift the grasp along the workpiece at theta=90.
+BASE_POSITIVE_Y_MAX_JAW_COMPENSATION_M = 0.007
+
+
+def _default_icp_daemon_socket() -> Path:
+    """Keep each Unix user isolated from unrelated /tmp ICP worker sockets."""
+    return Path(f"/tmp/traditional-stl-icp-{os.getuid()}.sock")
+
+
+# An explicit environment value remains available for controlled shared setups.
+# The normal live loop must not reuse or try to remove a daemon owned by another
+# user/session, which is possible with one fixed global /tmp socket name.
+ICP_DAEMON_SOCKET = Path(
+    os.environ.get("TRADITIONAL_ICP_DAEMON_SOCKET", _default_icp_daemon_socket())
+)
 ICP_DAEMON_AUTHKEY = b"traditional-stl-icp-v1"
 ICP_DAEMON_GENERATION = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+
+
+def planner_base_camera(capture_meta: dict) -> np.ndarray:
+    """Return T_body_base_d405 from the direct Planner capture chain."""
+    if not capture_meta.get("T_body_base_left_arm_end_link"):
+        raise RuntimeError(
+            "capture metadata lacks T_body_base_left_arm_end_link; "
+            "recapture through the direct-Planner Module 1 path"
+        )
+    wrist = json.loads(WRIST_CALIBRATION.read_text(encoding="utf-8"))
+    if wrist.get("parent_frame") != "left_arm_end_link" or wrist.get("base_frame") != "left_arm_base":
+        raise RuntimeError(f"unexpected direct Planner D405 calibration frames: {WRIST_CALIBRATION}")
+    return (
+        np.asarray(capture_meta["T_body_base_left_arm_end_link"], dtype=float)
+        @ np.asarray(wrist["T_left_arm_end_link_d405_color_optical"], dtype=float)
+    )
 
 
 # These are installed once in each worker, so the sampled STL is not sent
@@ -499,7 +539,17 @@ SWEEP_INTRUSION_CLUSTER_RADIUS_M = .008
 SWEEP_INTRUSION_MIN_CLUSTER_POINTS = 100
 MIN_MASK_CLOSING_SECTION_WIDTH_M = .010
 BACK_BOSS_CENTER_LOCAL_M = np.array((-.0395, 0., 0.))
-BACK_HEAD_HIGH_CENTER_LOCAL_M = np.array((-.0100, 0., 0.))
+# Workpiece 1, back face: the small boss is deliberately at local -X.  Do not
+# substitute the visually higher pad around x=-10 mm: the operator has
+# established that it is a less reliable pinch feature.
+BACK_BOSS_DIRECTION_REFERENCE_LOCAL_M = np.array((-.0275, 0., 0.))
+BACK_BOSS_MAX_DEPTH_RESIDUAL_M = .008
+# Back-face emergency fallback: the broad positive-X raised end shown by the
+# operator.  The pinch remains across local Y, therefore perpendicular to X.
+BACK_POSITIVE_HIGH_X_RANGE_M = (.024, .041)
+BACK_POSITIVE_HIGH_SAMPLES = 18
+BACK_POSITIVE_HIGH_MIN_SIDE_SUPPORT_M = .012
+BACK_POSITIVE_HIGH_MIN_JAW_TO_X_ANGLE_DEG = 80.0
 
 
 def grasp_template(face: str, icp_fitness: float, *, front_axis_center_min_fitness: float) -> tuple[np.ndarray, str]:
@@ -559,28 +609,102 @@ def choose_front_clearance_grasp(
     return local[index], source, float(distances[index])
 
 
-def choose_back_high_grasp(
+def validate_back_boss_grasp(
     T_camera_object: np.ndarray, mask: np.ndarray, depth: np.ndarray, K: np.ndarray, scale: float,
-) -> tuple[np.ndarray, str]:
-    """Use the visible tail boss or head high pad, never the low back middle."""
-    choices = (
-        (BACK_BOSS_CENTER_LOCAL_M, "back_tail_boss_high"),
-        (BACK_HEAD_HIGH_CENTER_LOCAL_M, "back_head_high"),
-    )
-    ranked = []
+) -> dict:
+    """Validate the required Workpiece-1 back-face local--X small boss.
+
+    A back-face grasp is never allowed to fall back to another high point.
+    Both the boss and an inboard point along its *signed* local +X direction
+    must have real SAM-masked D405 depth.  This makes the chosen feature and
+    its direction explicit in the report, while the boss depth residual
+    rejects a registration whose proposed boss does not lie on observed data.
+    """
     T = np.asarray(T_camera_object, dtype=float)
-    for local, source in choices:
-        point = T[:3, :3] @ local + T[:3, 3]
-        pixel = project_pixel(K, point)
+    boss_camera = T[:3, :3] @ BACK_BOSS_CENTER_LOCAL_M + T[:3, 3]
+    inboard_camera = T[:3, :3] @ BACK_BOSS_DIRECTION_REFERENCE_LOCAL_M + T[:3, 3]
+    boss_pixel = project_pixel(K, boss_camera)
+    inboard_pixel = project_pixel(K, inboard_camera)
+    boss_depth = local_depth_point(depth, mask, K, scale, boss_pixel)
+    inboard_depth = local_depth_point(depth, mask, K, scale, inboard_pixel)
+    direction_px = None
+    if boss_pixel is not None and inboard_pixel is not None:
+        direction_px = [boss_pixel[0] - inboard_pixel[0], boss_pixel[1] - inboard_pixel[1]]
+    direction_length = (float(np.linalg.norm(direction_px)) if direction_px is not None else 0.0)
+    depth_residual = (float(np.linalg.norm(boss_depth - boss_camera))
+                      if boss_depth is not None else float("inf"))
+    valid = bool(
+        boss_depth is not None
+        and inboard_depth is not None
+        and direction_length >= 3.0
+        and depth_residual <= BACK_BOSS_MAX_DEPTH_RESIDUAL_M
+    )
+    return {
+        "valid": valid,
+        "required_local_center_m": BACK_BOSS_CENTER_LOCAL_M.tolist(),
+        "feature": "workpiece1_back_small_boss_local_negative_x",
+        "direction_reference_local_m": BACK_BOSS_DIRECTION_REFERENCE_LOCAL_M.tolist(),
+        "direction_local": "+X_from_boss_to_inboard",
+        "boss_pixel": boss_pixel,
+        "inboard_pixel": inboard_pixel,
+        "direction_projected_pixels": direction_px,
+        "direction_projected_length_px": direction_length,
+        "boss_depth_residual_m": depth_residual,
+        "maximum_boss_depth_residual_m": BACK_BOSS_MAX_DEPTH_RESIDUAL_M,
+        "boss_has_local_sam_depth": boss_depth is not None,
+        "inboard_has_local_sam_depth": inboard_depth is not None,
+    }
+
+
+def choose_back_positive_high_fallback(
+    cad: np.ndarray, T_camera_object: np.ndarray, mask: np.ndarray, depth: np.ndarray,
+    K: np.ndarray, scale: float,
+) -> dict:
+    """Find the widest valid pinch section of the back-face +X raised end.
+
+    This is deliberately usable only after the required -X small boss has no
+    local depth (occluded).  The pinch line is local Y; verify its acute angle
+    to local X explicitly rather than relying on a pose-convention assumption.
+    """
+    T = np.asarray(T_camera_object, dtype=float)
+    x_values = np.linspace(*BACK_POSITIVE_HIGH_X_RANGE_M, BACK_POSITIVE_HIGH_SAMPLES)
+    choices = []
+    for x in x_values:
+        local = np.array((x, 0., 0.))
+        minus_y, plus_y, samples = jaw_side_support(cad, local)
+        if min(minus_y, plus_y) < BACK_POSITIVE_HIGH_MIN_SIDE_SUPPORT_M:
+            continue
+        camera = T[:3, :3] @ local + T[:3, 3]
+        pixel = project_pixel(K, camera)
         depth_point = local_depth_point(depth, mask, K, scale, pixel)
-        if depth_point is not None:
-            # Smaller camera Z is the exposed/high visible region.
-            ranked.append((float(depth_point[2]), local.copy(), source))
-    if ranked:
-        _, local, source = min(ranked, key=lambda item: item[0])
-        return local, source
-    # Downstream SAM/depth gates will reject this if it has no real support.
-    return BACK_BOSS_CENTER_LOCAL_M.copy(), "back_tail_boss_high_no_local_depth"
+        if depth_point is None:
+            continue
+        residual = float(np.linalg.norm(depth_point - camera))
+        if residual > BACK_BOSS_MAX_DEPTH_RESIDUAL_M:
+            continue
+        # The connecting line of the two fingers is the local Y opening axis.
+        local_angle = float(np.degrees(np.arccos(np.clip(
+            abs(float(np.dot(np.array((1., 0., 0.)), np.array((0., 1., 0.))))), 0., 1.
+        ))))
+        if local_angle <= BACK_POSITIVE_HIGH_MIN_JAW_TO_X_ANGLE_DEG:
+            continue
+        choices.append((minus_y + plus_y, local, pixel, residual, minus_y, plus_y, samples, local_angle))
+    if not choices:
+        return {"valid": False, "reason": "no_wide_positive_x_high_section_with_local_depth"}
+    width, local, pixel, residual, minus_y, plus_y, samples, angle = max(choices, key=lambda item: item[0])
+    return {
+        "valid": True,
+        "feature": "workpiece1_back_positive_x_wide_high_fallback",
+        "local_center_m": local.tolist(),
+        "local_x_search_range_m": list(BACK_POSITIVE_HIGH_X_RANGE_M),
+        "section_width_m": float(width),
+        "local_minus_y_support_m": float(minus_y), "local_plus_y_support_m": float(plus_y),
+        "section_samples": int(samples), "grasp_center_pixel": pixel,
+        "depth_residual_m": residual, "maximum_depth_residual_m": BACK_BOSS_MAX_DEPTH_RESIDUAL_M,
+        "jaw_line_object_local": [0.0, 1.0, 0.0],
+        "jaw_line_to_object_x_angle_deg": angle,
+        "minimum_jaw_line_to_object_x_angle_deg": BACK_POSITIVE_HIGH_MIN_JAW_TO_X_ANGLE_DEG,
+    }
 
 
 def jaw_side_support(cad: np.ndarray, local_center: np.ndarray, *, x_half_band_m: float = .004) -> tuple[float, float, int]:
@@ -907,8 +1031,7 @@ def template(
 
 def final_target_camera_transform(T_camera_object: np.ndarray, capture_meta: dict, upward_offset_m: float) -> np.ndarray:
     """Translate an object-local contact template to the configured final +base-Z target."""
-    T_base_camera = (np.asarray(capture_meta["T_base_eef"], dtype=float)
-                     @ np.asarray(json.loads(WRIST_CALIBRATION.read_text())["T_eef_wrist1"], dtype=float))
+    T_base_camera = planner_base_camera(capture_meta)
     shifted = np.asarray(T_camera_object, dtype=float).copy()
     shifted[:3, 3] += T_base_camera[:3, :3].T @ np.array((0., 0., upward_offset_m))
     return shifted
@@ -919,12 +1042,9 @@ def base_execution_plan(
     min_grasp_angle_to_table_deg: float = 65.0, front_axis_center_min_fitness: float = .80,
 ) -> dict | None:
     """Use the deployed GraspNet wrist/TCP calibration convention, without inference."""
-    if not capture_meta.get("T_base_eef"):
+    if not capture_meta.get("T_body_base_left_arm_end_link"):
         return None
-    wrist = json.loads(WRIST_CALIBRATION.read_text())
-    T_base_eef_capture = np.asarray(capture_meta["T_base_eef"], dtype=float)
-    T_eef_camera = np.asarray(wrist["T_eef_wrist1"], dtype=float)
-    T_base_object = T_base_eef_capture @ T_eef_camera @ np.asarray(selected["T_camera_object"], dtype=float)
+    T_base_object = planner_base_camera(capture_meta) @ np.asarray(selected["T_camera_object"], dtype=float)
     front = selected["face_side"] == "front"
     if "grasp_template_local_m" in selected:
         local_center = np.asarray(selected["grasp_template_local_m"], dtype=float)
@@ -938,6 +1058,19 @@ def base_execution_plan(
     local_opening = np.array((0., 1., 0.))
     local_side = np.cross(local_approach, local_opening)
     R_eef = T_base_object[:3, :3] @ np.column_stack((local_approach, local_opening, local_side))
+    # Remove the vertical component before projecting.  The correction is a
+    # two-finger centring correction in the table plane, not a height change.
+    jaw_axis_base_xy = np.array((R_eef[0, 1], R_eef[1, 1], 0.0), dtype=float)
+    jaw_axis_norm = float(np.linalg.norm(jaw_axis_base_xy))
+    if jaw_axis_norm < 1e-8:
+        return None
+    jaw_axis_base_xy /= jaw_axis_norm
+    base_y = np.array((0.0, 1.0, 0.0), dtype=float)
+    base_grasp_center_compensation = (
+        BASE_POSITIVE_Y_MAX_JAW_COMPENSATION_M
+        * float(np.dot(base_y, jaw_axis_base_xy))
+        * jaw_axis_base_xy
+    )
     # The EEF +X column is the commanded pinch/approach axis.  The table is
     # the arm-base XY plane, so asin(|axis·Z|) is its acute angle to the table.
     grasp_angle_to_table_deg = float(np.degrees(np.arcsin(np.clip(abs(R_eef[2, 0]), 0., 1.))))
@@ -946,8 +1079,11 @@ def base_execution_plan(
     # ICP alone, to correct the physical table-height coordinate.
     center[2] += float(selected.get("pointcloud_height_correction_base_m", 0.0))
     # Version7 convention: positive descends and negative raises the final
-    # closure point.  The hover below is recomputed from that actual target.
-    final_center = center - np.array((0., 0., grasp_downward_probe_m))
+    # closure point.  Apply the jaw-line-projected lateral compensation here
+    # (rather than to the object-local template) so it is also represented in
+    # the depth-cloud keepout screen and in the pregrasp-to-final motion.
+    compensated_center = center + base_grasp_center_compensation
+    final_center = compensated_center - np.array((0., 0., grasp_downward_probe_m))
     requested_final_z = float(final_center[2])
     final_center[2] = max(final_center[2], LEFT_EEF_MIN_GRASP_Z_BASE_M)
     z_clamped = bool(final_center[2] != requested_final_z)
@@ -955,9 +1091,16 @@ def base_execution_plan(
     pregrasp_tcp = final_center + np.array((0., 0., .10))
     rotvec = Rotation.from_matrix(R_eef).as_rotvec()
     return {
-        "coordinate_frame": "arm1_base", "source": "traditional_sam_stl_icp",
+        "coordinate_frame": "body_base", "source": "traditional_sam_stl_icp_direct_planner",
         "selected_mask_index": int(selected["mask_index"]), "icp": selected["icp"],
+        # Keep the vision/ICP centre separate from the executed centre.  The
+        # former anchors the rendered jaw model; their difference is consumed
+        # by the 3-D keepout check as a real base-frame displacement.
         "face_side": selected["face_side"], "grasp_center_base_m": center.tolist(),
+        "base_grasp_center_compensation_m": base_grasp_center_compensation.tolist(),
+        "base_positive_y_max_jaw_compensation_m": BASE_POSITIVE_Y_MAX_JAW_COMPENSATION_M,
+        "horizontal_jaw_axis_base": jaw_axis_base_xy.tolist(),
+        "compensated_grasp_center_base_m": compensated_center.tolist(),
         "pointcloud_height_correction_base_m": float(selected.get("pointcloud_height_correction_base_m", 0.0)),
         "grasp_template_source": grasp_template_source,
         "grasp_template_local_m": local_center.tolist(),
@@ -969,14 +1112,18 @@ def base_execution_plan(
         "left_eef_min_grasp_z_clamped": z_clamped,
         "grasp_downward_probe_m": float(grasp_downward_probe_m),
         "eef_rotation_base": R_eef.tolist(), "eef_axis_angle_rad": rotvec.tolist(),
+        # Preserve the object-axis direction separately from the EEF roll.
+        # A later 180-degree parallel-jaw symmetry roll flips EEF Y/Z but
+        # must never reverse an operator request expressed in object axes.
+        "object_negative_x_axis_base": (-T_base_object[:3, 0]).tolist(),
         "grasp_angle_to_table_deg": grasp_angle_to_table_deg,
         "min_grasp_angle_to_table_deg": float(min_grasp_angle_to_table_deg),
         "pregrasp_grasp_tcp_base_m": pregrasp_tcp.tolist(),
         "vertical_pregrasp_height_m": .10,
-        # Exact Module 1-1/V7 direct-center behavior: left_eef is the
-        # open-jaw center, so the legacy closed-tip TCP pivot is deliberately
-        # not applied to these Planner target poses.
-        "planner_target_mode": "direct_left_eef_open_jaw_center",
+        # On the current robot, left_eef is the physical two-finger closure
+        # centre.  Send it directly; the legacy grasp-TCP pivot must not be
+        # applied to these Planner target poses.
+        "planner_target_mode": "direct_left_eef_closure_center",
         "planner_direct_grasp_center": True,
         "pregrasp_eef_pose": np.r_[pregrasp_tcp, rotvec].tolist(),
         "predicted_grasp_eef_pose": np.r_[center, rotvec].tolist(),
@@ -1360,14 +1507,30 @@ def run(argv: list[str] | None = None, *, keep_icp_workers_alive: bool = False) 
     clouds_by_mask = {int(record["mask_index"]): all_clouds_by_mask[int(record["mask_index"])] for record in accepted}
     for record in accepted:
         if record["face_side"] == "back":
-            local, source = choose_back_high_grasp(
+            validation = validate_back_boss_grasp(
                 np.asarray(record["T_camera_object"], dtype=float), masks[int(record["mask_index"])],
                 depth, K, scale,
             )
             T = np.asarray(record["T_camera_object"], dtype=float)
+            local = BACK_BOSS_CENTER_LOCAL_M.copy()
             record["grasp_template_local_m"] = local.tolist()
-            record["grasp_template_source"] = source
+            record["grasp_template_source"] = "back_tail_boss_required_local_negative_x"
+            record["back_boss_validation"] = validation
+            # Only a genuinely occluded boss may use the operator-approved
+            # broad +X raised-end fallback.  A visible-but-inconsistent boss
+            # is a registration/segmentation problem and must be rejected.
+            if not validation["valid"] and not validation["boss_has_local_sam_depth"]:
+                fallback = choose_back_positive_high_fallback(
+                    cad, T, masks[int(record["mask_index"])], depth, K, scale,
+                )
+                record["back_positive_high_fallback"] = fallback
+                if fallback["valid"]:
+                    local = np.asarray(fallback["local_center_m"], dtype=float)
+                    record["grasp_template_local_m"] = local.tolist()
+                    record["grasp_template_source"] = "back_positive_x_wide_high_boss_occluded"
             record["template_grasp_center_camera_m"] = (T[:3, :3] @ local + T[:3, 3]).tolist()
+            if not validation["valid"] and record["grasp_template_source"] != "back_positive_x_wide_high_boss_occluded":
+                record["planner_rejection_reason"] = "required_back_small_boss_direction_or_local_depth_not_verified"
             continue
         if record["face_side"] != "front":
             continue
@@ -1393,8 +1556,7 @@ def run(argv: list[str] | None = None, *, keep_icp_workers_alive: bool = False) 
         record["front_clearance_to_other_instances_m"] = clearance
         record["front_grasp_end_exclusion_m"] = FRONT_GRASP_END_EXCLUSION_M
         record["template_grasp_center_camera_m"] = (T[:3, :3] @ local + T[:3, 3]).tolist()
-    T_base_camera = (np.asarray(meta["T_base_eef"], dtype=float)
-                     @ np.asarray(json.loads(WRIST_CALIBRATION.read_text())["T_eef_wrist1"], dtype=float))
+    T_base_camera = planner_base_camera(meta)
     for record in accepted:
         T = np.asarray(record["T_camera_object"], dtype=float)
         local = np.asarray(record["grasp_template_local_m"], dtype=float)
@@ -1443,6 +1605,12 @@ def run(argv: list[str] | None = None, *, keep_icp_workers_alive: bool = False) 
     planner_candidates = []
     angle_fallbacks: list[tuple[dict, dict]] = []
     for record in ranked:
+        if (record["face_side"] == "back"
+                and not record.get("back_boss_validation", {}).get("valid", False)
+                and not record.get("back_positive_high_fallback", {}).get("valid", False)):
+            # The only permitted back-face feature is the verified local -X
+            # small boss.  Never route around this rule to a different pad.
+            continue
         if record.get("pointcloud_height_source") != "local_sam_depth_median":
             record["planner_rejection_reason"] = "no_local_sam_depth_at_predicted_grasp_xy"
             continue
@@ -1544,8 +1712,7 @@ def run(argv: list[str] | None = None, *, keep_icp_workers_alive: bool = False) 
         ]
         other_points = (np.vstack(other_clouds) if other_clouds
                         else np.empty((0, 3), dtype=float))
-        T_base_camera = (np.asarray(meta["T_base_eef"], dtype=float)
-                         @ np.asarray(json.loads(WRIST_CALIBRATION.read_text())["T_eef_wrist1"], dtype=float))
+        T_base_camera = planner_base_camera(meta)
         # Start from the operator-facing face offset already embedded in the
         # final plan, then try the smallest additional +body_base Z lift.
         nominal_center_base = np.asarray(candidate_plan["grasp_center_base_m"], dtype=float)

@@ -125,6 +125,60 @@ def wide_head_grasp_point(head_center, outward_direction, outward_m, inward_m, h
     return np.asarray(head_center, dtype=float) + direction * float(distance)
 
 
+def reverse_grasp_record_from_icp(T_camera_object, table_normal_camera, K, vertices, orientation, *, object_key='sam2-0', quality=None):
+    """Build the reverse-grasp TCP record from an already accepted CAD/ICP pose.
+
+    Buffer Check exposes exactly this ICP contract.  Keeping the TCP derivation
+    here makes its recovery path use the same CAD wide-head offsets and
+    GraspNet frame convention as a fresh Module 5-1 observation.
+    """
+    T = np.asarray(T_camera_object, dtype=float)
+    if T.shape != (4, 4) or not np.all(np.isfinite(T)):
+        raise ValueError('T_camera_object must be a finite 4x4 matrix')
+    K = np.asarray(K, dtype=float)
+    if K.shape != (3, 3) or not np.all(np.isfinite(K)):
+        raise ValueError('K must be a finite 3x3 matrix')
+    rotation, translation = T[:3, :3], T[:3, 3]
+    normal = normalize(table_normal_camera)
+    raw_head, long_axis, width, _ = widest_head_in_stl(vertices)
+    if orientation.get('grasp_point_stl_m') is not None:
+        raw_head = np.asarray(orientation['grasp_point_stl_m'], dtype=float)
+    if orientation.get('grasp_width_axis_stl') is not None:
+        width = normalize(np.asarray(orientation['grasp_width_axis_stl'], dtype=float))
+    if orientation.get('grasp_outward_axis_stl') is not None:
+        head_outward_stl = normalize(np.asarray(orientation['grasp_outward_axis_stl'], dtype=float))
+    else:
+        head_outward_stl = wide_head_outward_direction(vertices, raw_head, long_axis)
+    object_center = rotation @ np.asarray(vertices, dtype=float).mean(axis=0) + translation
+    object_to_camera = normalize(-object_center)
+    head_towards_camera = bool(np.dot(rotation @ head_outward_stl, object_to_camera) > 0.0)
+    inward_offset_m = float(orientation['wide_head_inward_grasp_offset_m'])
+    outward_offset_m = float(orientation['wide_head_outward_grasp_offset_m'])
+    head_center_camera = rotation @ raw_head + translation
+    wide_head_image_left = bool(project_to_pixel(K, head_center_camera)[0] < project_to_pixel(K, object_center)[0])
+    lateral_offset_m = float(orientation['wide_head_image_left_grasp_lateral_offset_m'] if wide_head_image_left else orientation['wide_head_image_right_grasp_lateral_offset_m'])
+    head = wide_head_grasp_point(raw_head, head_outward_stl, outward_offset_m, inward_offset_m, head_towards_camera)
+    R = make_grasp_frame(rotation @ width, normal)
+    center = rotation @ head + translation + R[:, 1] * lateral_offset_m
+    record = {
+        'object_side': 'reverse', 'object_key': object_key,
+        'wide_head_outward_grasp_offset_m': outward_offset_m,
+        'wide_head_inward_grasp_offset_m': inward_offset_m,
+        'grasp_lateral_offset_m': lateral_offset_m,
+        'grasp_lateral_offset_axis': 'grasp_frame_+Y',
+        'wide_head_image_direction': 'left' if wide_head_image_left else 'right',
+        'wide_head_towards_camera': head_towards_camera,
+        'wide_head_grasp_offset_direction': 'inward' if head_towards_camera else 'outward',
+        'wide_head_grasp_offset_m': inward_offset_m if head_towards_camera else outward_offset_m,
+        'grasp_frame_convention': 'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side',
+        'grasp_pose': pose_record(R, center),
+        'pregrasp_pose': pose_record(R, center - R[:, 0] * .08),
+    }
+    if quality:
+        record.update(quality)
+    return record
+
+
 def depth_score(T, cad_render, feature, depth, mask, K, scale):
     """Visible-surface depth error from a dense CAD point z-buffer/splat."""
     p = transform(T, cad_render); good = p[:, 2] > .1; p, feature = p[good], feature[good]
@@ -146,20 +200,29 @@ def depth_score(T, cad_render, feature, depth, mask, K, scale):
     return score, {'match_fraction': float(keep.mean()), 'depth_mae_m': mae, 'weighted_feature_fraction': float(np.mean(feature[ind[keep]]))}
 
 
-def classify(cad_icp, cad_render, feature, observed, depth, mask, K, scale, cad_up, min_margin_m, normal):
+def workspace_roi_mask(workspace, image_shape):
+    """Rasterize the same calibrated tabletop polygon used by SAM2."""
+    height, width = image_shape[:2]
+    reference_width, reference_height = workspace['reference_color_size_wh']
+    polygon = np.asarray(workspace['safe_roi_polygon_px'], dtype=np.int32)
+    if polygon.ndim != 2 or polygon.shape[0] < 3 or polygon.shape[1] != 2:
+        raise ValueError('safe_roi_polygon_px must contain at least three [x, y] points')
+    polygon = np.rint(polygon.astype(float) * [width / reference_width, height / reference_height]).astype(np.int32)
+    roi = np.zeros((height, width), dtype=np.uint8)
+    cv2.fillPoly(roi, [polygon], 1)
+    return roi.astype(bool)
+
+
+def classify(cad_icp, cad_render, feature, observed, depth, mask, K, scale, cad_up, normal):
     trials = []
     for side, initial in face_initials(cad_icp, observed, normal, cad_up):
         T, rmse, fitness = constrained_icp(cad_icp, observed, initial, normal)
-        score, render = depth_score(T, cad_render, feature, depth, mask, K, scale)
-        trials.append({'side': side, 'T': T, 'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render_score_m': score, 'render': render})
-    best = {side: min((x for x in trials if x['side']==side), key=lambda x:x['render_score_m']) for side in ('positive','reverse')}
-    up, down = best['positive'], best['reverse']; margin = abs(up['render_score_m']-down['render_score_m'])
-    # A fixed, labelled-scene-calibrated physical margin is preferable to a
-    # percentage of the score: the latter incorrectly rejected the known
-    # reverse-side part when both hypotheses had a high common depth offset.
-    threshold = float(min_margin_m)
-    side = 'unknown' if not np.isfinite(margin) or margin < threshold else min(best, key=lambda s: best[s]['render_score_m'])
-    return side, best, margin, threshold
+        _score, render = depth_score(T, cad_render, feature, depth, mask, K, scale)
+        trials.append({'side': side, 'T': T, 'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render': render})
+    quality_key = lambda x: (x['icp_fitness'], x['render']['match_fraction'], -x['icp_rmse_m'])
+    best = {side: max((x for x in trials if x['side']==side), key=quality_key) for side in ('positive','reverse')}
+    side = max(best, key=lambda name: quality_key(best[name]))
+    return side, best
 
 
 def main():
@@ -173,22 +236,13 @@ def main():
     # This is a fixed project calibration, not a command-line hyperparameter.
     orientation = json.loads(a.orientation_config.read_text())
     workspace = json.loads((MODULE_ROOT/'config/tabletop_workspace.json').read_text())
-    rx, ry, rw, rh = workspace['safe_roi_xywh']; safe_roi = np.zeros(depth.shape, dtype=bool); safe_roi[ry:ry+rh,rx:rx+rw] = True
+    safe_roi = workspace_roi_mask(workspace, depth.shape)
     # A per-object RANSAC can fit the workpiece itself and flip its normal.
     # Estimate this once from the complete scene, where the tabletop dominates.
     scene_points = mask_depth_to_points_cam(np.ones(depth.shape, dtype=bool), depth, K, float(meta['depth_scale_m']), .35, 1.2, 1)
     scene_normal = table_normal(scene_points)
     cad_up = normalize(orientation['positive_face_normal_stl']); feature = (cad_render @ cad_up >= np.percentile(cad_render @ cad_up, 88))
     vertices = tris.reshape(-1,3)
-    raw_head, long_axis, width, _ = widest_head_in_stl(vertices)
-    if orientation.get('grasp_point_stl_m') is not None:
-        raw_head = np.asarray(orientation['grasp_point_stl_m'], dtype=float)
-    if orientation.get('grasp_width_axis_stl') is not None:
-        width = normalize(np.asarray(orientation['grasp_width_axis_stl'], dtype=float))
-    if orientation.get('grasp_outward_axis_stl') is not None:
-        head_outward_stl = normalize(np.asarray(orientation['grasp_outward_axis_stl'], dtype=float))
-    else:
-        head_outward_stl = wide_head_outward_direction(vertices, raw_head, long_axis)
     records, diagnostics = [], []
     orient = rgb.copy()
     for i, raw_m in enumerate(masks):
@@ -198,7 +252,7 @@ def main():
             continue
         pts = voxel_downsample_np(remove_radius_outliers_np(mask_depth_to_points_cam(m, depth, K, float(meta['depth_scale_m']), .35, 1.2, 1)), .003)
         if len(pts) < 120: continue
-        side, best, margin, threshold = classify(cad_icp, cad_render, feature, pts, depth, m.astype(bool), K, float(meta['depth_scale_m']), cad_up, orientation['minimum_score_margin_m'], scene_normal)
+        side, best = classify(cad_icp, cad_render, feature, pts, depth, m.astype(bool), K, float(meta['depth_scale_m']), cad_up, scene_normal)
         reverse_quality = best['reverse']
         reverse_match = float(reverse_quality['render']['match_fraction'])
         reverse_fitness = float(reverse_quality['icp_fitness'])
@@ -211,7 +265,7 @@ def main():
         # Buffer recovery path consumes this exact estimate to re-grasp a part
         # which has been corrected to its front side; recomputing a centre from
         # the mask would discard the CAD/ICP registration we just validated.
-        diag = {'object_key': f'sam2-{i}', 'classification': accepted_side, 'score_margin_m': margin, 'required_margin_m': threshold,
+        diag = {'object_key': f'sam2-{i}', 'classification': accepted_side,
                 'table_normal_camera': scene_normal.round(9).tolist(),
                 'reverse_geometry_quality': {'icp_fitness': reverse_fitness, 'minimum_icp_fitness': orientation['minimum_reverse_icp_fitness'], 'depth_match_fraction': reverse_match, 'minimum_depth_match_fraction': orientation['minimum_reverse_depth_match_fraction'], 'accepted': geometry_ok},
                 'positive': {**{k:v for k,v in best['positive'].items() if k!='T'}, 'T_camera_object': best['positive']['T'].round(9).tolist()},
@@ -219,44 +273,22 @@ def main():
         diagnostics.append(diag)
         color = {'positive': (0,180,0), 'reverse': (0,0,220), 'unknown': (0,180,255), 'rejected_geometry': (120,120,120)}[accepted_side]
         tint = np.zeros_like(orient); tint[:]=color; orient[m>0] = (.55*orient[m>0]+.45*tint[m>0]).astype(np.uint8)
-        ys, xs = np.nonzero(m); cv2.putText(orient, f'{accepted_side} d={margin*1000:.1f}mm', (int(xs.mean()),int(ys.mean())), cv2.FONT_HERSHEY_SIMPLEX, .48, color, 2, cv2.LINE_AA)
+        ys, xs = np.nonzero(m); cv2.putText(orient, f"{accepted_side} f={best[side]['icp_fitness']:.2f} d={best[side]['render']['match_fraction']:.2f}", (int(xs.mean()),int(ys.mean())), cv2.FONT_HERSHEY_SIMPLEX, .48, color, 2, cv2.LINE_AA)
         if accepted_side != 'reverse': continue
-        T = best[side]['T']; rotation, translation = T[:3,:3], T[:3,3]
-        object_center = rotation @ vertices.mean(axis=0) + translation
-        object_to_camera = normalize(-object_center)
-        # The CAD direction runs from the wide-head centre to its outer end.
-        # A positive dot means that end is physically closer to the camera;
-        # use the configured inward displacement (zero means the head centre).
-        # The opposite direction uses its independently configured displacement.
-        head_towards_camera = bool(np.dot(rotation @ head_outward_stl, object_to_camera) > 0.0)
-        inward_offset_m = float(orientation['wide_head_inward_grasp_offset_m'])
-        outward_offset_m = float(orientation['wide_head_outward_grasp_offset_m'])
-        head_center_camera = rotation @ raw_head + translation
-        wide_head_image_left = bool(
-            project_to_pixel(K, head_center_camera)[0]
-            < project_to_pixel(K, object_center)[0]
-        )
-        lateral_offset_m = float(
-            orientation['wide_head_image_left_grasp_lateral_offset_m']
-            if wide_head_image_left
-            else orientation['wide_head_image_right_grasp_lateral_offset_m']
-        )
-        head = wide_head_grasp_point(raw_head, head_outward_stl, outward_offset_m, inward_offset_m, head_towards_camera)
-        R = make_grasp_frame(rotation@width, scene_normal)
-        # Apply the tuned side bias in the grasp/workpiece frame, never in the
-        # camera frame.  Grasp +Y is the jaw-opening (workpiece-width) axis, so
-        # the chosen physical side follows the part when its yaw changes.
-        center = rotation @ head + translation + R[:, 1] * lateral_offset_m
-        # Version7/GraspNet convention: +X is the approach axis.  Retreating
-        # by -X is therefore a vertical, above-table pregrasp for this frame.
-        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'grasp_lateral_offset_m':lateral_offset_m, 'grasp_lateral_offset_axis':'grasp_frame_+Y', 'wide_head_image_direction':'left' if wide_head_image_left else 'right', 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
+        records.append(reverse_grasp_record_from_icp(
+            best[side]['T'], scene_normal, K, vertices, orientation,
+            object_key=f'sam2-{i}',
+            quality={'icp_fitness': best[side]['icp_fitness'],
+                     'depth_match_fraction': best[side]['render']['match_fraction'],
+                     'icp_rmse_m': best[side]['icp_rmse_m']},
+        ))
     # One workpiece can receive overlapping SAM2 prompts.  Associate duplicate
     # reverse masks by their CAD/TCP centres and retain the stronger face score.
     unique = []
     for record in records:
         center = np.asarray(record['grasp_pose']['translation_m'], dtype=float)
         same = next((j for j, old in enumerate(unique) if np.linalg.norm(center-np.asarray(old['grasp_pose']['translation_m'], dtype=float)) < .025), None)
-        if same is None or record['orientation_score_margin_m'] > unique[same]['orientation_score_margin_m']:
+        if same is None or (record['icp_fitness'], record['depth_match_fraction'], -record['icp_rmse_m']) > (unique[same]['icp_fitness'], unique[same]['depth_match_fraction'], -unique[same]['icp_rmse_m']):
             if same is None: unique.append(record)
             else: unique[same] = record
     records = unique

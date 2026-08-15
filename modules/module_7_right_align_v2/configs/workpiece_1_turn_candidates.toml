@@ -116,7 +116,7 @@ grasp_point_tcp_local_rpy_candidates_deg = [
   ],
   [
     [0.0],              # grasp point 3：roll
-    [0.0, -15.0, +15.0,-30.0, +30.0], # grasp point 3：pitch
+    [0.0, -10.0, +10.0,-15.0, +15.0], # grasp point 3：pitch
     [0.0],              # grasp point 3：yaw
   ],
 ]
@@ -152,11 +152,11 @@ turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
 
 # 旋转和下放共用的固定桌面参考点，body_base XY（m）。
-# 由 module_4_2/workpiece_1/285/rgb.png 中标记红点的原图像素约 [756, 472]
-# 结合该帧 RGB-D 深度和 T_body_base_head_camera 投影得到。
+# 由 module_4_2/workpiece_1/391/rgb.png 中标记红点的原图像素约 [673, 460]
+# 结合该帧桌面平面和 T_body_base_head_camera 投影得到。
 # 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
 # place_x/place_y_offset_candidates_m 均相对此点解释。
-fixed_reference_body_base_xy_m = [0.502045, -0.045800]
+fixed_reference_body_base_xy_m = [0.502166, 0.015160]
 
 # 工件正面在 body_base 下的基准局部 RPY。
 front_base_rpy_deg = [0.0, 0.0, 0.0]
@@ -180,19 +180,7 @@ roll_candidates_deg = [ 0.0, 20.0, -20.0]
 pitch_candidates_deg = [ 0.0, -20.0, 20.0]
 
 # 工件局部 yaw 摆正候选，优先落在 Q1。
-yaw_candidates_deg = [35.0, 30.0, 45.0, 60.0, 75.0, 0.0]
-
-# 旧搜索兼容参数：摆正姿态搜索步长。
-turn_attitude_search_step_deg = 15.0
-
-# 旧搜索兼容参数：摆正区域网格步长。
-turn_search_grid_step_m = 0.05
-
-# 旧搜索兼容参数：摆正区域正 X 最小距离。
-turn_positive_x_min_m = 0.0
-
-# 旧搜索兼容参数：摆正区域正 X 最大距离。
-turn_positive_x_max_m = 0.2
+yaw_candidates_deg = [35.0, 30.0, 40.0, 60.0, 70.0, 0.0]
 
 # 并行 RRTConnect 摆正规划的最大 worker 数。
 rrt_turn_parallelism = 3
@@ -208,11 +196,11 @@ place_rrtstar_goal_tolerance = true
 place_x_offset_candidates_m = [0.050, 0.025, 0.00]
 
 # 下放后工件中心相对固定 body_base 参考点的 Y 偏移候选。
-place_y_offset_candidates_m = [-0.150, -0.120, -0.100]
+place_y_offset_candidates_m = [-0.180, -0.150, -0.100]
 
 # 松爪时 TCP 相对抓取高度的额外安全余量候选；按左到右顺序规划。
 # 每个余量都会与全部 XY 候选组合；均不可达则保留工件并报错，不自动生成更高的余量。
-place_tcp_extra_clearance_m = [0.01, 0.02, 0.03]
+place_tcp_extra_clearance_m = [0.01, 0.015]
 
 # 并行 RRTConnect 下放规划的最大 worker 数。
 rrt_place_parallelism = 3

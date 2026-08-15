@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import shlex
@@ -22,13 +23,16 @@ import subprocess
 import sys
 import threading
 import time
+from typing import Any
 
 from planning_log import PLAN_LOG_ENV, append_event
-from move_by_joints import ensure_ready, load_pose_file
 
 
 MODULE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_ROOT.parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from tool.planner_task_retry import retry_task_creation
 RUNTIME_PYTHON = PROJECT_ROOT / ".venv/bin/python"
 if not RUNTIME_PYTHON.is_file():
     raise RuntimeError(f"总控运行环境不存在: {RUNTIME_PYTHON}")
@@ -36,6 +40,114 @@ if not RUNTIME_PYTHON.is_file():
 # interpreter normally resolve to the same binary but do not share packages.
 if Path(sys.executable).absolute() != RUNTIME_PYTHON.absolute():
     os.execv(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+
+# Self-contained copies of the move_by_joints.py helpers used by this
+# pipeline.  No move_by_eef_pose.py symbol is used by this file.
+def finite(values: Any, count: int, name: str) -> list[float]:
+    if not isinstance(values, (list, tuple)) or len(values) != count:
+        raise ValueError(f"{name} 必须恰好包含 {count} 个数。")
+    result = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError(f"{name} 必须全为有限数。")
+    return result
+
+
+def rpy_to_rotvec(rpy: list[float]) -> list[float]:
+    """Convert ZYX-composed RPY radians to an axis-angle rotation vector."""
+    roll, pitch, yaw = finite(rpy, 3, "rpy")
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    rotation = (
+        (cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+        (sy * cp, sy * sp * sr + cy * cr, sy * sp * sr - cy * sr),
+        (-sp, cp * sr, cp * cr),
+    )
+    theta = math.acos(max(-1.0, min(1.0, (rotation[0][0] + rotation[1][1] + rotation[2][2] - 1.0) / 2.0)))
+    if theta < 1e-10:
+        return [0.0, 0.0, 0.0]
+    sine = math.sin(theta)
+    if abs(sine) < 1e-8:
+        axis = [math.sqrt(max(0.0, (rotation[index][index] + 1.0) / 2.0)) for index in range(3)]
+        if rotation[2][1] - rotation[1][2] < 0:
+            axis[0] = -axis[0]
+        if rotation[0][2] - rotation[2][0] < 0:
+            axis[1] = -axis[1]
+        if rotation[1][0] - rotation[0][1] < 0:
+            axis[2] = -axis[2]
+    else:
+        axis = [
+            (rotation[2][1] - rotation[1][2]) / (2.0 * sine),
+            (rotation[0][2] - rotation[2][0]) / (2.0 * sine),
+            (rotation[1][0] - rotation[0][1]) / (2.0 * sine),
+        ]
+    norm = math.sqrt(sum(component * component for component in axis))
+    if norm < 1e-10:
+        raise ValueError("无法将 rpy 转换为旋转向量。")
+    return [component / norm * theta for component in axis]
+
+
+def pose_to_command(raw_pose: Any) -> list[float]:
+    if isinstance(raw_pose, dict):
+        xyz = finite(raw_pose.get("xyz"), 3, "eef_pose.xyz")
+        if "rpy" in raw_pose:
+            return xyz + rpy_to_rotvec(raw_pose["rpy"])
+        for key in ("rotvec", "axis_angle", "rxryrz", "rotation_vector"):
+            if key in raw_pose:
+                return xyz + finite(raw_pose[key], 3, f"eef_pose.{key}")
+        raise ValueError("eef_pose 缺少 rpy 或旋转向量字段。")
+    return finite(raw_pose, 6, "eef_pose")
+
+
+def load_pose_file(path: Path, arm_id: int, target: str, prefer_driver_pose: bool = False) -> list[float]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    key = "left" if arm_id == 1 else "right"
+    saved_arm = (data.get("arms") or {}).get(key)
+    if not isinstance(saved_arm, dict):
+        raise ValueError(f"文件中没有 {key} 臂数据，不能用于 arm_id={arm_id}。")
+    if target == "joint":
+        return finite(saved_arm.get("joint_positions_deg"), 7, "joint_positions_deg")
+    if prefer_driver_pose and "driver_eef_pose" in saved_arm:
+        return pose_to_command(saved_arm["driver_eef_pose"])
+    return pose_to_command(saved_arm.get("eef_pose"))
+
+
+def ensure_ready(arm: Any, arm_id: int, recover_timeout_s: float = 10.0) -> None:
+    """Recover errors and enable the requested arm before planning motion."""
+    state = arm.get_state()
+    if state is None:
+        raise RuntimeError("尚未收到机械臂状态。")
+    system_state = str(state.get("system_state", "")).strip().lower()
+    if system_state == "error":
+        print("检测到 ERROR，正在 clear_error() 并等待恢复...")
+        arm.clear_error()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            system_state = str((state or {}).get("system_state", "")).strip().lower()
+            if system_state == "running":
+                break
+            if system_state == "estop":
+                raise RuntimeError(f"clear_error() 后进入 ESTOP：{state.get('estop_reason')!r}")
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"clear_error() 后未能恢复 RUNNING，当前={system_state!r}")
+    if system_state == "estop":
+        raise RuntimeError(f"系统处于 ESTOP：{state.get('estop_reason')!r}")
+    if system_state != "running":
+        raise RuntimeError(f"系统尚未就绪，当前 system_state={system_state!r}")
+    key = "left" if arm_id == 1 else "right"
+    if not bool((state.get("state") or {}).get(key, {}).get("enabled", False)):
+        print("目标手臂未使能，正在 enable()...")
+        arm.enable()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            if bool(((state or {}).get("state") or {}).get(key, {}).get("enabled", False)):
+                return
+            time.sleep(0.05)
+        raise RuntimeError("enable() 后目标手臂仍未使能。")
 
 VISION_MODULE_DIR = PROJECT_ROOT / "modules/module_4_head_judge/module_4_2_pose_estimation"
 ALIGN_MODULE_DIR = PROJECT_ROOT / "modules/module_7_right_align"
@@ -81,13 +193,11 @@ def parse_args() -> argparse.Namespace:
                         help="观察/抓取/调整闭环的总周期上限（默认 20）")
     parser.add_argument("--observation-attempts", type=int, default=3,
                         help="在 10.json 拍照时未识别到工件的重拍次数（默认 3）")
-    parser.add_argument("--roi", nargs=4, type=float,
-                        default=(0.08, 0.20, 0.98, 0.97))
     parser.add_argument("--joint-speed", type=float, default=0.2,
                         help="保存位姿 RRTstar 的速度/加速度比例基数")
-    parser.add_argument("--joint-speed-scale", type=float, default=2.5,
+    parser.add_argument("--joint-speed-scale", type=float, default=2.0,
                         help="保存位姿 RRTstar 的速度/加速度倍率")
-    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"),
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"),
                         help="轨迹规划器地址")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR,
                         help=f"运行日志目录（默认 {DEFAULT_LOG_DIR}）")
@@ -250,7 +360,7 @@ def release_gripper(args: argparse.Namespace, reason: str) -> None:
     gripper = None
     try:
         gripper = import_sdk().Gripper(
-            host=os.environ.get("PARM_GRIPPER_HOST", "localhost")
+            host=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11")
         )
         gripper.move(args.arm_id, 100.0, mode="async", preempt=True)
         deadline = time.monotonic() + 5.0
@@ -283,7 +393,7 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
     arm = planner = None
     try:
         sdk = import_sdk()
-        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         for attempt in range(1, SAVED_POSE_PLAN_RETRIES + 1):
@@ -292,7 +402,7 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
                 f"({attempt}/{SAVED_POSE_PLAN_RETRIES})。"
             )
             try:
-                result = planner._trajectory.send_payload({
+                result = retry_task_creation(lambda: planner._trajectory.send_payload({
                     "waypoints": [{
                         "name": f"module_8_1_saved_pose_{number}",
                         "type": "joint",
@@ -307,7 +417,7 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
                         "max_vel_factor": speed_scale,
                         "max_acc_factor": speed_scale,
                     },
-                }, timeout=30.0)
+                }, timeout=30.0), label=f"右臂 Module 8 到 {pose_path.name}")
             except Exception as exc:
                 if attempt == SAVED_POSE_PLAN_RETRIES:
                     raise RuntimeError(
@@ -346,13 +456,12 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
             arm.close()
 
 
-def observe_once(args: argparse.Namespace) -> tuple[Path, int, float]:
+def observe_once(args: argparse.Namespace) -> tuple[Path, int, float, str]:
     capture_root = CAPTURE_ROOT / f"workpiece_{args.workpiece}"
     before = {path.resolve() for path in capture_root.glob("*/mask_pose.json")}
     command = [
         sys.executable, str(POSE_SCRIPT),
         "--workpiece", str(args.workpiece),
-        "--roi", *map(str, args.roi),
     ]
     run_checked(command, cwd=VISION_MODULE_DIR)
     after = {path.resolve() for path in capture_root.glob("*/mask_pose.json")}
@@ -379,6 +488,12 @@ def observe_once(args: argparse.Namespace) -> tuple[Path, int, float]:
     item = workpieces[args.workpiece_index]
     if not isinstance(item, dict):
         raise RuntimeError(f"workpieces[{args.workpiece_index}] 不是对象")
+    orientation = item.get("orientation")
+    if orientation not in {"FRONT", "BACK", "OTHER"}:
+        raise RuntimeError(
+            "位姿文件缺少有效正反面判断 orientation；"
+            "请使用支持正反面输出的 Module 4-2。"
+        )
     quadrant = item.get("head_direction_base_quadrant")
     if quadrant not in (1, 2, 3, 4):
         raise RuntimeError(f"位姿文件包含无效象限：{quadrant!r}")
@@ -386,12 +501,12 @@ def observe_once(args: argparse.Namespace) -> tuple[Path, int, float]:
         yaw_deg = float(item["head_direction_base_angle_deg"]) % 360.0
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("位姿文件缺少有效的 head_direction_base_angle_deg") from exc
-    return pose_file, int(quadrant), yaw_deg
+    return pose_file, int(quadrant), yaw_deg, orientation
 
 
 def observe_at_10_while_returning_to_4(
     args: argparse.Namespace, *, already_at_10: bool = False,
-) -> tuple[Path, int, float]:
+) -> tuple[Path, int, float, str]:
     """Capture only after pose 10 is reached, then calculate during 10 -> 4.
 
     ``move_to_saved_pose`` waits for the motion command to finish.  In addition
@@ -443,7 +558,7 @@ def observe_at_10_while_returning_to_4(
     raise AssertionError("unreachable")
 
 
-def observe_at_pose_4(args: argparse.Namespace) -> tuple[Path, int, float]:
+def observe_at_pose_4(args: argparse.Namespace) -> tuple[Path, int, float, str]:
     """Observe directly at pose 4; retries remain at pose 4 as well."""
     for attempt in range(1, args.observation_attempts + 1):
         try:
@@ -462,6 +577,22 @@ def observe_at_pose_4(args: argparse.Namespace) -> tuple[Path, int, float]:
 
 def directly_graspable(quadrant: int, yaw_deg: float) -> bool:
     return quadrant == 1 and Q1_MIN_DEG <= yaw_deg <= Q1_MAX_DEG
+
+
+def wait_for_manual_nonfront_intervention(orientation: str, pose_file: Path) -> None:
+    """Keep the worker alive until an operator has corrected a back-side part."""
+    print(
+        "[manual] 右手抓取之前发现反面工件，需要人工介入："
+        f"orientation={orientation}，pose={pose_file}。"
+    )
+    while True:
+        try:
+            answer = input("请人工处理工件后输入 y 并回车，重新识别：").strip().lower()
+        except EOFError as exc:
+            raise RuntimeError("等待人工处理反面工件时终端输入已关闭。") from exc
+        if answer in {"y", "yes"}:
+            return
+        print("未确认；请人工处理工件后输入 y 并回车，流程保持暂停。")
 
 
 def grasp(pose_file: Path, args: argparse.Namespace) -> int:
@@ -545,22 +676,36 @@ def main() -> int:
             observation_at_pose_10 = False
 
             for cycle in range(1, args.max_cycles + 1):
-                if observation_at_pose_10:
-                    pose_file, quadrant, yaw_deg = observe_at_10_while_returning_to_4(
-                        args, already_at_10=True,
+                # A non-front workpiece requires physical operator action, not
+                # a failed worker. Re-check at pose 4 after acknowledgement.
+                while True:
+                    if observation_at_pose_10:
+                        pose_file, quadrant, yaw_deg, orientation = observe_at_10_while_returning_to_4(
+                            args, already_at_10=True,
+                        )
+                    else:
+                        pose_file, quadrant, yaw_deg, orientation = observe_at_pose_4(args)
+                    observation_at_pose_10 = False
+                    append_event({
+                        "event": "observation", "cycle": cycle,
+                        "pose_file": str(pose_file), "quadrant": quadrant, "yaw_deg": yaw_deg,
+                        "orientation": orientation,
+                    })
+                    print(
+                        f"[decision] 周期 {cycle}/{args.max_cycles}：工件 {args.workpiece}，"
+                        f"orientation={orientation}，Q{quadrant}，yaw={yaw_deg:.2f}°，pose={pose_file}，"
+                        f"连续抓取失败={consecutive_grasp_failures}/{args.max_grasp_failures}"
                     )
-                else:
-                    pose_file, quadrant, yaw_deg = observe_at_pose_4(args)
-                observation_at_pose_10 = False
-                append_event({
-                    "event": "observation", "cycle": cycle,
-                    "pose_file": str(pose_file), "quadrant": quadrant, "yaw_deg": yaw_deg,
-                })
-                print(
-                    f"[decision] 周期 {cycle}/{args.max_cycles}：工件 {args.workpiece}，"
-                    f"Q{quadrant}，yaw={yaw_deg:.2f}°，pose={pose_file}，"
-                    f"连续抓取失败={consecutive_grasp_failures}/{args.max_grasp_failures}"
-                )
+                    if orientation == "FRONT":
+                        break
+                    append_event({
+                        "event": "manual_nonfront_intervention",
+                        "cycle": cycle,
+                        "pose_file": str(pose_file),
+                        "orientation": orientation,
+                    })
+                    wait_for_manual_nonfront_intervention(orientation, pose_file)
+                    print("[manual] 已确认人工处理；保持 4.json 观察位，重新识别。")
 
                 # A fresh Q1 observation in the direct-grasp yaw window always
                 # wins over any previous adjustment state.  ``force_reorient``
@@ -574,17 +719,17 @@ def main() -> int:
 
                     if grasp_status == Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE:
                         print(
-                            "[decision] 直接抓取 servo 线段未通过无碰撞预检；"
-                            "不闭爪，直接进入 Module 7 调整。"
+                            "[decision] 直接抓取路径不可用（例如工件 −X 后方对齐点 "
+                            "RRTstar 不可达）；不闭爪，直接进入 Module 7 调整。"
                         )
-                        release_gripper(args, "直接抓取预检不可达")
+                        release_gripper(args, "直接抓取路径不可用")
                         move_to_saved_pose(4, args)
                         move_to_saved_pose(10, args)
                         move_to_saved_pose(6, args)
                         reorient_status = reorient(pose_file, args)
                         if reorient_status != 0:
                             print(f"[retry] 调整失败（exit={reorient_status}）；打开夹爪后返回观察位。")
-                            release_gripper(args, "直接抓取预检后的调整失败")
+                            release_gripper(args, "直接抓取路径不可用后的调整失败")
                         else:
                             print("[motion] 调整完成；连续抓取失败计数清零。")
                             consecutive_grasp_failures = 0

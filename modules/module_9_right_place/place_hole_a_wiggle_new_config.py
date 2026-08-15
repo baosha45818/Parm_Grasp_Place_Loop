@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Continuous 7-mm/s straight-line place search with 50-Hz force monitoring.
+"""Continuous 15-mm/s straight-line place search with 50-Hz force monitoring.
 
 The taught start is a fixed right-arm joint vector.  After that joint move,
 the actual SDK end-effector pose is used as the world-frame centre.  By
@@ -14,6 +14,7 @@ import argparse
 from datetime import datetime
 import json
 import math
+import multiprocessing as mp
 import os
 from pathlib import Path
 import shlex
@@ -66,7 +67,12 @@ class PlacementContactReached(RuntimeError):
     """A validated insertion-release signature stopped the search successfully."""
 
 
+class PostEntryFxRiseReached(RuntimeError):
+    """The post-insertion descent reached its raw sensor-Fx stop threshold."""
+
+
 SEARCH_DISTANCE_EXHAUSTED_EXIT_CODE = 42
+MAX_SERVO_RECOVERY_ATTEMPTS = 20
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -93,8 +99,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--live", action="store_true", help="连接真实硬件")
     parser.add_argument("--confirm-live", action="store_true", help="确认现场安全，允许真实运动")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--force-host", default="127.0.0.1")
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--force-host", default=os.environ.get("PARM_FORCE_SENSOR_HOST", "192.168.3.22"))
     parser.add_argument(
         "--reset-right-task-before-servo",
         action="store_true",
@@ -276,6 +282,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--post-entry-relief-speed-mm-s", type=float, default=1.0,
         help="确认进洞后的卸力线速度，默认 1 mm/s",
     )
+    parser.add_argument(
+        "--post-entry-descend-mm", type=float, default=10.0,
+        help="进洞后沿世界 Z− 的最大下降距离，默认 10 mm；0 表示关闭",
+    )
+    parser.add_argument(
+        "--post-entry-descend-fx-rise-n", type=float, default=0.0,
+        help="进洞后下降时，相对下降前基线 raw Fx 上升至该值即停止；0 表示不读取力传感器",
+    )
+    parser.add_argument(
+        "--post-entry-descend-speed-mm-s", type=float, default=1.0,
+        help="进洞后 Z− 下降线速度，默认 1 mm/s",
+    )
+    parser.add_argument("--second-hole-lift-mm", type=float, default=40.0,
+                        help="第一洞确认后沿世界 Z+ 提起距离，默认 40 mm")
+    parser.add_argument("--second-hole-y-offset-mm", type=float, default=30.0,
+                        help="第一洞确认后沿世界 Y+ 移至第二洞的距离，默认 30 mm")
+    parser.add_argument("--second-hole-descend-mm", type=float, default=48.0,
+                        help="第二洞沿世界 Z− 下降距离，默认 48 mm")
+    parser.add_argument("--second-hole-lateral-speed-mm-s", type=float, default=10.0,
+                        help="第二洞上提与 Y+ 平移速度，默认 10 mm/s")
+    parser.add_argument("--second-hole-x-return-speed-mm-s", type=float, default=25.0,
+                        help="第二洞后沿世界 X−110 mm 的速度，默认 25 mm/s")
+    parser.add_argument("--second-hole-descend-speed-mm-s", type=float, default=5.0,
+                        help="第二洞 Z− 下降速度，默认 5 mm/s")
+    parser.add_argument("--pre-search-initial-descend-mm", type=float, default=10.0,
+                        help="规划到起始关节位后先沿世界 Z− 下降距离，默认 10 mm")
+    parser.add_argument("--pre-search-forward-mm", type=float, default=142.0,
+                        help="初始下降后沿世界 X+ 前进距离，默认 142 mm")
+    parser.add_argument("--pre-search-descend-mm", type=float, default=20.0,
+                        help="前进后沿世界 Z− 下降距离，默认 20 mm")
+    parser.add_argument("--pre-search-approach-speed-mm-s", type=float, default=10.0,
+                        help="前进和下降预接近速度，默认 10 mm/s")
     parser.add_argument("--output", type=Path, help="运行日志路径；默认 logs/hole_a_wiggle_<时间>.log")
     args = parser.parse_args(argv)
     if args.live != args.confirm_live:
@@ -334,6 +372,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         and args.post_entry_relief_speed_mm_s > 0.0
     ):
         parser.error("启用进洞后固定后拉时：速度必须为正")
+    if not math.isfinite(args.post_entry_descend_mm) or not 0.0 <= args.post_entry_descend_mm <= 10.0:
+        parser.error("--post-entry-descend-mm 必须在 0 到 10 mm 之间")
+    if args.post_entry_descend_mm > 0.0 and not (
+        math.isfinite(args.post_entry_descend_fx_rise_n)
+        and args.post_entry_descend_fx_rise_n >= 0.0
+        and math.isfinite(args.post_entry_descend_speed_mm_s)
+        and args.post_entry_descend_speed_mm_s > 0.0
+    ):
+        parser.error("启用进洞后下降时：Fx 阈值必须为非负数，速度必须为正")
+    for name in (
+        "second_hole_lift_mm", "second_hole_y_offset_mm", "second_hole_descend_mm",
+        "second_hole_lateral_speed_mm_s", "second_hole_x_return_speed_mm_s",
+        "second_hole_descend_speed_mm_s",
+        "pre_search_forward_mm", "pre_search_descend_mm", "pre_search_approach_speed_mm_s",
+        "pre_search_initial_descend_mm",
+    ):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0.0:
+            parser.error(f"--{name.replace('_', '-')} 必须为正数")
     fx_reversal_enabled = args.entry_fx_reversal_confirm_frames > 0
     if fx_reversal_enabled and not (
         math.isfinite(args.entry_fx_reversal_pre_n)
@@ -390,6 +447,204 @@ def command_for(target_rpy: list[float]) -> list[float]:
 
 class TargetNotReached(RuntimeError):
     """A commanded servo target remained outside its endpoint tolerance."""
+
+
+class ServoWorkerTimeout(RuntimeError):
+    """The isolated public-SDK ServoPose worker did not acknowledge in time."""
+
+
+def _servo_worker_main(host: str, commands: object, replies: object) -> None:
+    """Own one public SDK Arm client for one ServoPose session at a time."""
+    arm = None
+    try:
+        from parm_sdk import Arm
+
+        arm = Arm(host=host)
+        while True:
+            message = commands.recv()  # type: ignore[attr-defined]
+            request_id = message["id"]
+            operation = message["operation"]
+            try:
+                if operation == "start":
+                    arm.start_servo_pose(**message["kwargs"])
+                elif operation == "push":
+                    arm.push_servo_pose(2, message["waypoint"])
+                elif operation == "stop":
+                    arm.stop_servo_pose(2)
+                elif operation == "close":
+                    replies.send({"id": request_id, "ok": True})  # type: ignore[attr-defined]
+                    return
+                else:
+                    raise ValueError(f"unknown servo worker operation: {operation!r}")
+                replies.send({"id": request_id, "ok": True})  # type: ignore[attr-defined]
+            except Exception as exc:
+                replies.send({  # type: ignore[attr-defined]
+                    "id": request_id, "ok": False,
+                    "exception_type": type(exc).__name__, "exception": str(exc),
+                })
+    except Exception as exc:
+        # A start request waiting in the parent will time out if startup fails
+        # before the first command can be consumed.
+        try:
+            replies.send({  # type: ignore[attr-defined]
+                "id": None, "ok": False,
+                "exception_type": type(exc).__name__, "exception": str(exc),
+            })
+        except Exception:
+            pass
+    finally:
+        if arm is not None:
+            try:
+                arm.close()
+            except Exception:
+                pass
+
+
+class ServoWorker:
+    """Parent-side RPC wrapper with a killable boundary around public SDK calls."""
+
+    def __init__(self, host: str) -> None:
+        self._context = mp.get_context("spawn")
+        # A Pipe gives the parent a real ``poll(timeout)`` operation.  The
+        # queue feeder thread used previously could itself wedge after the SDK
+        # worker stalled, leaving the parent blocked before its watchdog ran.
+        self._command_recv, self._command_send = self._context.Pipe(duplex=False)
+        self._reply_recv, self._reply_send = self._context.Pipe(duplex=False)
+        self._next_id = 0
+        self._process = self._context.Process(
+            target=_servo_worker_main,
+            args=(host, self._command_recv, self._reply_send),
+            daemon=True,
+        )
+        self._process.start()
+        # The parent only sends commands and receives replies.  Closing its
+        # duplicate child ends makes worker death visible as EOF/BrokenPipe.
+        self._command_recv.close()
+        self._reply_send.close()
+
+    def _call(self, operation: str, *, timeout_s: float, **payload: object) -> None:
+        if not self._process.is_alive():
+            raise ServoWorkerTimeout(f"ServoPose worker exited before {operation}")
+        self._next_id += 1
+        request_id = self._next_id
+        try:
+            self._command_send.send({"id": request_id, "operation": operation, **payload})
+            if not self._reply_recv.poll(timeout_s):
+                raise TimeoutError
+            reply = self._reply_recv.recv()
+        except (BrokenPipeError, EOFError, OSError) as exc:
+            self.terminate()
+            raise ServoWorkerTimeout(
+                f"ServoPose worker connection failed during {operation}: {exc}"
+            ) from exc
+        except TimeoutError:
+            self.terminate()
+            raise ServoWorkerTimeout(
+                f"ServoPose worker {operation} exceeded {timeout_s:.2f}s deadline"
+            ) from None
+        if reply.get("id") != request_id:
+            self.terminate()
+            raise ServoWorkerTimeout(
+                f"ServoPose worker returned an unexpected reply during {operation}: {reply!r}"
+            )
+        if reply.get("ok"):
+            return
+        raise RuntimeError(
+            f"ServoPose worker {operation} failed: "
+            f"{reply.get('exception_type')}: {reply.get('exception')}"
+        )
+
+    def start(self, **kwargs: object) -> None:
+        self._call("start", timeout_s=5.0, kwargs=kwargs)
+
+    def push(self, waypoint: list[float]) -> None:
+        self._call("push", timeout_s=0.5, waypoint=waypoint)
+
+    def stop(self) -> None:
+        self._call("stop", timeout_s=3.0)
+
+    def terminate(self) -> None:
+        if self._process.is_alive():
+            self._process.terminate()
+        self._process.join(timeout=1.0)
+        for connection in (
+            self._command_send, self._reply_recv,
+        ):
+            try:
+                connection.close()
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        if self._process.is_alive():
+            try:
+                self._call("close", timeout_s=0.5)
+            except Exception:
+                pass
+        self.terminate()
+
+
+class ServoArmProxy:
+    """Delegate normal Arm API calls while isolating public ServoPose calls."""
+
+    def __init__(self, arm: object, host: str) -> None:
+        self._arm = arm
+        self._host = host
+        self._servo_worker: ServoWorker | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._arm, name)
+
+    def start_servo_pose(self, arm_id: int, **kwargs: object) -> None:
+        if arm_id != 2:
+            raise ValueError("此放置流程的隔离 ServoPose 仅允许右臂 arm_id=2")
+        self.dispose_servo_worker()
+        worker = ServoWorker(self._host)
+        try:
+            worker.start(arm_id=2, **kwargs)
+        except Exception:
+            worker.close()
+            raise
+        self._servo_worker = worker
+
+    def push_servo_pose(self, arm_id: int, waypoint: list[float]) -> None:
+        if arm_id != 2 or self._servo_worker is None:
+            raise RuntimeError("ServoPose push requires an active isolated right-arm session")
+        self._servo_worker.push(waypoint)
+
+    def stop_servo_pose(self, arm_id: int) -> None:
+        if arm_id != 2:
+            raise ValueError("此放置流程的隔离 ServoPose 仅允许右臂 arm_id=2")
+        worker = self._servo_worker
+        self._servo_worker = None
+        if worker is None:
+            return
+        try:
+            worker.stop()
+        finally:
+            worker.close()
+
+    def dispose_servo_worker(self) -> None:
+        worker = self._servo_worker
+        self._servo_worker = None
+        if worker is not None:
+            worker.close()
+
+    def close(self) -> None:
+        self.dispose_servo_worker()
+        self._arm.close()  # type: ignore[attr-defined]
+
+
+def push_servo_pose_with_timeout(
+    arm: object, waypoint: list[float], *, timeout_s: float = 0.5,
+) -> None:
+    """Validate and send one ServoPose frame through the public SDK API."""
+    if len(waypoint) != 6 or not all(math.isfinite(value) for value in waypoint):
+        raise ValueError(f"ServoPose target must contain six finite values: {waypoint!r}")
+    # ``timeout_s`` is retained in the signature so callers keep one common
+    # interface; the SDK owns its command transport and ServoPose semantics.
+    _ = timeout_s
+    arm.push_servo_pose(2, waypoint)  # type: ignore[attr-defined]
 
 
 def write_control_snapshot(arm: object, output_file: object, event: str) -> None:
@@ -650,7 +905,7 @@ def move_in_active_session(
         alpha = smoothstep5(index / float(steps))
         waypoint = [start[axis] + alpha * (target[axis] - start[axis]) for axis in range(3)]
         waypoint += quat_to_rotvec(slerp(q0, q1, alpha))
-        arm.push_servo_pose(2, waypoint)  # type: ignore[attr-defined]
+        push_servo_pose_with_timeout(arm, waypoint)
         if diagnostic is not None and (index == 1 or index % 10 == 0 or index == steps):
             diagnostic(f"servo_push_waypoint_{index}_of_{steps}")  # type: ignore[operator]
         deadline += period
@@ -662,7 +917,7 @@ def move_in_active_session(
     settle_push_count = 0
     while time.monotonic() < settle_deadline:
         settle_push_count += 1
-        arm.push_servo_pose(2, target)  # type: ignore[attr-defined]
+        push_servo_pose_with_timeout(arm, target)
         final_pose = current_pose(arm, 2)
         if (
             position_error_m(target, final_pose) <= position_tolerance
@@ -692,6 +947,8 @@ def move_continuous_linear_step(
     linear_accel_mps2: float,
     initial_speed_mps: float,
     force_monitor: object | None = None,
+    push_diagnostic: object | None = None,
+    decelerate_to_stop: bool = False,
 ) -> float:
     """Stream one search increment at constant command velocity.
 
@@ -701,6 +958,9 @@ def move_continuous_linear_step(
     caller samples only after the stream has crossed each 1-mm checkpoint.
     Acceleration is carried across checkpoints, so a low configured
     acceleration produces one smooth ramp rather than 1-mm stop/start ramps.
+    ``decelerate_to_stop`` is for a standalone approach leg: it uses a
+    trapezoidal (or triangular) profile and reaches zero command velocity at
+    the endpoint.
     """
     start = command_for(command_start_rpy)
     target = command_for(target_rpy)
@@ -710,29 +970,70 @@ def move_continuous_linear_step(
     hz = 50.0
     period = 1.0 / hz
     speed0 = min(max(initial_speed_mps, 0.0), linear_speed_mps)
-    speed1 = min(linear_speed_mps, math.sqrt(speed0 * speed0 + 2.0 * linear_accel_mps2 * distance))
-    accel_time = (speed1 - speed0) / linear_accel_mps2
-    accel_distance = (speed0 + speed1) * accel_time / 2.0
-    cruise_distance = max(0.0, distance - accel_distance)
-    duration = accel_time + cruise_distance / linear_speed_mps
+    if decelerate_to_stop:
+        # Each side of a full-speed ramp consumes v²/(2a).  If the leg is
+        # shorter, use a triangular profile whose peak exactly fits distance.
+        full_ramp_distance = linear_speed_mps * linear_speed_mps / linear_accel_mps2
+        speed1 = (
+            linear_speed_mps
+            if distance >= full_ramp_distance
+            else math.sqrt(distance * linear_accel_mps2)
+        )
+        accel_time = speed1 / linear_accel_mps2
+        accel_distance = speed1 * accel_time / 2.0
+        cruise_distance = max(0.0, distance - 2.0 * accel_distance)
+        cruise_time = cruise_distance / speed1 if speed1 > 0.0 else 0.0
+        duration = 2.0 * accel_time + cruise_time
+    else:
+        speed1 = min(linear_speed_mps, math.sqrt(speed0 * speed0 + 2.0 * linear_accel_mps2 * distance))
+        accel_time = (speed1 - speed0) / linear_accel_mps2
+        accel_distance = (speed0 + speed1) * accel_time / 2.0
+        cruise_distance = max(0.0, distance - accel_distance)
+        duration = accel_time + cruise_distance / linear_speed_mps
     steps = max(1, math.ceil(duration * hz))
     q0, q1 = rotvec_to_quat(start[3:]), rotvec_to_quat(target[3:])
     deadline = time.monotonic()
     for index in range(1, steps + 1):
         elapsed = min(index * duration / steps, duration)
-        if elapsed <= accel_time:
+        if decelerate_to_stop:
+            if elapsed <= accel_time:
+                travelled = linear_accel_mps2 * elapsed * elapsed / 2.0
+            elif elapsed <= accel_time + cruise_time:
+                travelled = accel_distance + speed1 * (elapsed - accel_time)
+            else:
+                decel_elapsed = elapsed - accel_time - cruise_time
+                travelled = (
+                    accel_distance + cruise_distance
+                    + speed1 * decel_elapsed
+                    - linear_accel_mps2 * decel_elapsed * decel_elapsed / 2.0
+                )
+        elif elapsed <= accel_time:
             travelled = speed0 * elapsed + linear_accel_mps2 * elapsed * elapsed / 2.0
         else:
             travelled = accel_distance + linear_speed_mps * (elapsed - accel_time)
         alpha = min(1.0, travelled / distance)
         waypoint = [start[axis] + alpha * (target[axis] - start[axis]) for axis in range(3)]
         waypoint += quat_to_rotvec(slerp(q0, q1, alpha))
-        arm.push_servo_pose(2, waypoint)  # type: ignore[attr-defined]
+        if push_diagnostic is not None:
+            push_diagnostic(  # type: ignore[operator]
+                "servo_push_before", waypoint_index=index, waypoint_count=steps,
+                waypoint_xyz_rotvec=waypoint,
+            )
+        try:
+            push_servo_pose_with_timeout(arm, waypoint)
+        except Exception as exc:
+            if push_diagnostic is not None:
+                push_diagnostic(  # type: ignore[operator]
+                    "servo_push_failed", waypoint_index=index, waypoint_count=steps,
+                    waypoint_xyz_rotvec=waypoint,
+                    exception_type=type(exc).__name__, exception=str(exc),
+                )
+            raise
         if force_monitor is not None:
             force_monitor(alpha)  # type: ignore[operator]
         deadline += period
         time.sleep(max(0.0, deadline - time.monotonic()))
-    return speed1
+    return 0.0 if decelerate_to_stop else speed1
 
 
 def move_wiggle_quick(
@@ -829,6 +1130,231 @@ def placement_main(argv: list[str] | None = None) -> int:
         log_file.write(json.dumps(record, ensure_ascii=False) + "\n")
         log_file.flush()
 
+    def is_servo_connection_loss(exc: Exception) -> bool:
+        """Only recover the transient command-port loss, never motion/contact errors."""
+        message = str(exc)
+        return (
+            isinstance(exc, ServoWorkerTimeout)
+            or
+            ("tcp://" in message and ":5600 unavailable" in message)
+            or message == "timeout waiting for response"
+            or message.startswith("socket error:")
+        )
+
+    def reconnect_servo_arm(label: str, recovery_index: int) -> None:
+        """Replace the ZMQ client after its command port disappeared."""
+        nonlocal arm
+        assert arm is not None
+        # A killed worker only drops its client connection; it does not prove
+        # the controller retired the previous ServoPose task.  Issue an
+        # explicit public-SDK stop from a fresh worker and observe task end
+        # before a recovery session is ever allowed to start.
+        if isinstance(arm, ServoArmProxy):
+            arm.dispose_servo_worker()
+        stop_worker = ServoWorker(args.arm_host)
+        try:
+            log_event(
+                "servo_recovery_stop_stale_session_sent", label=label,
+                recovery_index=recovery_index,
+            )
+            stop_worker.stop()
+        except Exception as stop_exc:
+            log_event(
+                "servo_recovery_stop_stale_session_error", label=label,
+                recovery_index=recovery_index,
+                exception_type=type(stop_exc).__name__, exception=str(stop_exc),
+            )
+            raise RuntimeError(
+                f"{label} 恢复前无法停止旧 ServoPose 会话：{stop_exc}"
+            ) from stop_exc
+        finally:
+            stop_worker.close()
+        wait_for_right_task_stopped(
+            arm, log_file,
+            confirmed_event="servo_recovery_stale_session_stopped",
+            timeout_event="servo_recovery_stale_session_stop_timeout",
+            cancel_if_still_running_after_s=0.5,
+            event_logger=log_event,
+        )
+        deadline = time.monotonic() + 10.0
+        last_error: Exception | None = None
+        try:
+            arm.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        while time.monotonic() < deadline:
+            candidate = None
+            try:
+                candidate = sdk.Arm(host=args.arm_host)
+                ensure_ready(candidate, 2)
+                arm = ServoArmProxy(candidate, args.arm_host)
+                log_event(
+                    "servo_reconnected", label=label,
+                    recovery_index=recovery_index,
+                )
+                return
+            except Exception as exc:
+                last_error = exc
+                if candidate is not None:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+                time.sleep(0.25)
+        raise RuntimeError(
+            f"{label} 的 ServoPose 控制端在 10 秒内未恢复：{last_error}"
+        )
+
+    def hold_servo_target_until_settled(
+        label: str, target_rpy: list[float], *, timeout_s: float = 15.0,
+        position_tolerance_m: float = 0.001,
+        orientation_tolerance_rad: float = math.radians(1.0),
+        stable_samples_required: int = 10,
+    ) -> None:
+        """Keep streaming an endpoint until the physical TCP is stably there."""
+        assert arm is not None
+        target = command_for(target_rpy)
+        deadline = time.monotonic() + timeout_s
+        stable_samples = 0
+        last_position_error_m = float("inf")
+        last_orientation_error_rad = float("inf")
+        while time.monotonic() < deadline:
+            push_servo_pose_with_timeout(arm, target)
+            actual = current_pose(arm, 2)
+            last_position_error_m = position_error_m(target, actual)
+            last_orientation_error_rad = orientation_error_rad(target, actual)
+            settled = (
+                last_position_error_m <= position_tolerance_m
+                and last_orientation_error_rad <= orientation_tolerance_rad
+            )
+            stable_samples = stable_samples + 1 if settled else 0
+            if stable_samples >= stable_samples_required:
+                log_event(
+                    "servo_endpoint_physically_confirmed", label=label,
+                    position_error_mm=round(last_position_error_m * 1000.0, 3),
+                    orientation_error_deg=round(math.degrees(last_orientation_error_rad), 3),
+                    stable_samples=stable_samples,
+                )
+                return
+            time.sleep(0.02)
+        raise TargetNotReached(
+            f"{label} 未在 {timeout_s:.1f}s 内物理到位："
+            f"位置误差={last_position_error_m * 1000.0:.1f}mm，"
+            f"姿态误差={math.degrees(last_orientation_error_rad):.2f}°。"
+        )
+
+    def move_continuous_with_recovery(
+        label: str,
+        start_rpy: list[float],
+        target_rpy: list[float],
+        *,
+        linear_speed_mps: float,
+        linear_accel_mps2: float,
+        initial_speed_mps: float,
+        force_monitor: object | None = None,
+        push_diagnostic: object | None = None,
+        near_target_mm: float = 1.0,
+        recovery_speed_mps: float | None = None,
+        decelerate_to_stop: bool = False,
+        confirm_physical_endpoint: bool = False,
+    ) -> float:
+        """Finish one absolute world-frame leg across transient 5600 disconnects.
+
+        A resumed stream always begins from the newly measured TCP pose, never
+        from the last command waypoint.  This prevents a stale command from
+        producing a jump after the controller reconnects.
+        """
+        nonlocal arm, continuous_servo_stopped, servo_started
+        assert arm is not None
+        segment_start = list(start_rpy)
+        speed0 = initial_speed_mps
+        full_distance_m = position_error_m(
+            command_for(target_rpy), command_for(start_rpy),
+        )
+        for recovery_index in range(MAX_SERVO_RECOVERY_ATTEMPTS + 1):
+            try:
+                remaining_before_m = position_error_m(
+                    command_for(target_rpy), command_for(segment_start),
+                )
+                completed_fraction = (
+                    min(1.0, max(0.0, 1.0 - remaining_before_m / full_distance_m))
+                    if full_distance_m > 1e-9 else 1.0
+                )
+                segment_force_monitor = None
+                if force_monitor is not None:
+                    segment_force_monitor = lambda alpha: force_monitor(  # type: ignore[operator]
+                        completed_fraction + alpha * (1.0 - completed_fraction)
+                    )
+                final_speed = move_continuous_linear_step(
+                    arm, segment_start, target_rpy,
+                    linear_speed_mps=(
+                        recovery_speed_mps
+                        if recovery_index and recovery_speed_mps is not None
+                        else linear_speed_mps
+                    ),
+                    linear_accel_mps2=linear_accel_mps2,
+                    initial_speed_mps=speed0,
+                    force_monitor=segment_force_monitor,
+                    push_diagnostic=push_diagnostic,
+                    decelerate_to_stop=decelerate_to_stop,
+                )
+                if confirm_physical_endpoint:
+                    hold_servo_target_until_settled(label, target_rpy)
+                return final_speed
+            except Exception as exc:
+                if (
+                    not is_servo_connection_loss(exc)
+                    or recovery_index >= MAX_SERVO_RECOVERY_ATTEMPTS
+                ):
+                    raise
+                log_event(
+                    "servo_disconnect", label=label,
+                    recovery_index=recovery_index + 1,
+                    exception_type=type(exc).__name__, exception=str(exc),
+                    last_command_start_xyz_rpy=segment_start,
+                    target_xyz_rpy=target_rpy,
+                )
+                print(
+                    f"{label} ServoPose 连接短暂断开；读取实际位姿后恢复剩余路径 "
+                    f"({recovery_index + 1}/{MAX_SERVO_RECOVERY_ATTEMPTS})。",
+                    flush=True,
+                )
+                reconnect_servo_arm(label, recovery_index + 1)
+                actual = current_pose(arm, 2)
+                actual_rpy = actual[:3] + rotvec_to_rpy(actual[3:])
+                remaining_mm = position_error_m(command_for(target_rpy), actual) * 1000.0
+                log_event(
+                    "servo_recovery_pose", label=label,
+                    recovery_index=recovery_index + 1,
+                    actual_xyz_rpy=actual_rpy, target_xyz_rpy=target_rpy,
+                    remaining_mm=round(remaining_mm, 3),
+                )
+                arm.start_servo_pose(  # type: ignore[attr-defined]
+                    2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+                    input_frequency_hz=50.0,
+                )
+                servo_started = True
+                continuous_servo_stopped = False
+                if remaining_mm <= near_target_mm:
+                    log_event(
+                        "servo_resume_skipped_near_target", label=label,
+                        recovery_index=recovery_index + 1,
+                        remaining_mm=round(remaining_mm, 3),
+                        threshold_mm=near_target_mm,
+                    )
+                    if confirm_physical_endpoint:
+                        hold_servo_target_until_settled(label, target_rpy)
+                    return 0.0
+                segment_start = actual_rpy
+                speed0 = 0.0
+                log_event(
+                    "servo_resume", label=label, recovery_index=recovery_index + 1,
+                    restart_xyz_rpy=segment_start, target_xyz_rpy=target_rpy,
+                    remaining_mm=round(remaining_mm, 3),
+                    speed_mm_s=round((recovery_speed_mps or linear_speed_mps) * 1000.0, 3),
+                )
+        raise AssertionError("unreachable")
+
     log_event(
         "run_started",
         initial_motion=args.initial_motion,
@@ -842,8 +1368,9 @@ def placement_main(argv: list[str] | None = None) -> int:
         quick_endpoint_wait_s=args.quick_endpoint_wait_s,
     )
     try:
-        arm = sdk.Arm(host=args.arm_host)
-        ensure_ready(arm, 2)
+        raw_arm = sdk.Arm(host=args.arm_host)
+        ensure_ready(raw_arm, 2)
+        arm = ServoArmProxy(raw_arm, args.arm_host)
         write_control_snapshot(arm, log_file, "script_connected")
         sensor = sdk.ForceSensor(host=args.force_host, hand=2)
         if args.reset_right_task_before_servo:
@@ -865,6 +1392,110 @@ def placement_main(argv: list[str] | None = None) -> int:
             )
         else:
             move_to_saved_joints_servo(arm, saved_joints_deg)
+        # The taught joint pose is a safe landmark.  Start the legacy Hole-A
+        # search only after the requested world-frame approach from that pose.
+        def pre_search_approach_leg(
+            label: str, axis: int, distance_mm: float,
+        ) -> None:
+            actual = current_pose(arm, 2)
+            start = actual[:3] + rotvec_to_rpy(actual[3:])
+            target = list(start)
+            target[axis] += distance_mm / 1000.0
+            axis_name = "XYZ"[axis]
+            direction = "+" if distance_mm > 0.0 else "−"
+            print(
+                f"搜索前接近 {label}：沿世界 {axis_name}{direction} "
+                f"{abs(distance_mm):.1f}mm，"
+                f"{args.pre_search_approach_speed_mm_s:.1f}mm/s。"
+            )
+            log_event(
+                "pre_search_approach_leg_start", label=label, axis=axis_name,
+                distance_mm=distance_mm,
+                speed_mm_s=args.pre_search_approach_speed_mm_s,
+                start_xyz_rpy=start, target_xyz_rpy=target,
+                force_monitoring_enabled=False,
+            )
+            def push_diagnostic(event: str, **fields: object) -> None:
+                """Persist every approach push and the exact failed waypoint."""
+                log_event(
+                    f"pre_search_{event}", label=label, axis=axis_name,
+                    **fields,
+                )
+                if event == "servo_push_failed":
+                    try:
+                        write_control_snapshot(
+                            arm, log_file,
+                            f"pre_search_{label}_servo_push_failed",
+                        )
+                    except Exception as snapshot_exc:
+                        log_event(
+                            "pre_search_failure_snapshot_failed", label=label,
+                            exception_type=type(snapshot_exc).__name__,
+                            exception=str(snapshot_exc),
+                        )
+
+            move_continuous_with_recovery(
+                f"pre_search_{label}", start, target,
+                linear_speed_mps=args.pre_search_approach_speed_mm_s / 1000.0,
+                linear_accel_mps2=0.02, initial_speed_mps=0.0,
+                push_diagnostic=push_diagnostic,
+                decelerate_to_stop=True,
+                confirm_physical_endpoint=True,
+            )
+            finished = current_pose(arm, 2)
+            log_event(
+                "pre_search_approach_leg_completed", label=label,
+                actual_end_xyz_rpy=finished[:3] + rotvec_to_rpy(finished[3:]),
+            )
+
+        servo_guard = right_servo_guard()
+        servo_guard.__enter__()
+        try:
+            log_event("pre_search_servo_session_starting")
+            arm.start_servo_pose(  # type: ignore[attr-defined]
+                2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+                input_frequency_hz=50.0,
+            )
+            log_event("pre_search_servo_session_started")
+            pre_search_approach_leg(
+                "initial_descend", 2, -args.pre_search_initial_descend_mm
+            )
+            pre_search_approach_leg("forward", 0, args.pre_search_forward_mm)
+            pre_search_approach_leg("descend", 2, -args.pre_search_descend_mm)
+        except Exception as exc:
+            log_event(
+                "pre_search_servo_session_error",
+                exception_type=type(exc).__name__, exception=str(exc),
+            )
+            try:
+                write_control_snapshot(arm, log_file, "pre_search_servo_session_error")
+            except Exception as snapshot_exc:
+                log_event(
+                    "pre_search_failure_snapshot_failed",
+                    exception_type=type(snapshot_exc).__name__, exception=str(snapshot_exc),
+                )
+            raise
+        finally:
+            primary_error_active = sys.exc_info()[0] is not None
+            try:
+                arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                log_event("pre_search_servo_session_stop_sent")
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_pre_search_approach_stop_confirmed",
+                    timeout_event="right_pre_search_approach_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                    event_logger=log_event,
+                )
+            except Exception as stop_exc:
+                log_event(
+                    "pre_search_servo_session_stop_error",
+                    exception_type=type(stop_exc).__name__, exception=str(stop_exc),
+                )
+                if not primary_error_active:
+                    raise
+            servo_guard.__exit__(None, None, None)
+            servo_guard = None
         # The taught pose is the recovery landmark, not the force-baseline
         # pose.  Every retry returns here, then presses the configured extra
         # distance deeper than the preceding attempt before rebuilding the
@@ -960,13 +1591,11 @@ def placement_main(argv: list[str] | None = None) -> int:
         log_event("search_centre_ready", pose_xyz_rpy=centre)
 
         def post_entry_relief_if_needed() -> None:
-            """After a confirmed insertion, always make the fixed back-off move."""
+            """After insertion, back off, then descend under raw-Fx monitoring."""
             nonlocal continuous_servo_stopped
-            if args.post_entry_relief_mm <= 0.0:
-                return
             # The original search stream has already been stopped on the
             # continuous-monitor success paths.  If a non-continuous success
-            # reached this handler, stop it before making the fixed back-off.
+            # reached this handler, stop it before making the post-entry moves.
             if servo_started:
                 if not continuous_servo_stopped:
                     arm.stop_servo_pose(2)  # type: ignore[attr-defined]
@@ -980,52 +1609,211 @@ def placement_main(argv: list[str] | None = None) -> int:
                     timeout_event="right_pre_relief_stop_wait_timeout",
                     cancel_if_still_running_after_s=0.5,
                 )
-            actual = current_pose(arm, 2)
-            relief_start = actual[:3] + rotvec_to_rpy(actual[3:])
-            relief_target = list(relief_start)
-            # Always move opposite to the configured search direction.  For
-            # this profile (world X-negative), that is the requested +X move.
-            relief_target[search_axis_index] -= (
-                search_direction_sign * args.post_entry_relief_mm / 1000.0
+            if args.post_entry_relief_mm > 0.0:
+                actual = current_pose(arm, 2)
+                relief_start = actual[:3] + rotvec_to_rpy(actual[3:])
+                relief_target = list(relief_start)
+                # Always move opposite to the configured search direction.
+                relief_target[search_axis_index] -= (
+                    search_direction_sign * args.post_entry_relief_mm / 1000.0
+                )
+                print(
+                    f"进洞确认后，沿世界 {args.search_axis.upper()}"
+                    f"{'−' if search_direction_sign > 0.0 else '+'} 固定后拉 "
+                    f"{args.post_entry_relief_mm:.3f}mm。"
+                )
+                arm.start_servo_pose(  # type: ignore[attr-defined]
+                    2, pose_type="absolute", frame="world", tcp=[0.0] * 6, input_frequency_hz=50.0
+                )
+                continuous_servo_stopped = False
+                try:
+                    move_continuous_with_recovery(
+                        "post_entry_relief", relief_start, relief_target,
+                        linear_speed_mps=args.post_entry_relief_speed_mm_s / 1000.0,
+                        linear_accel_mps2=0.02, initial_speed_mps=0.0,
+                    )
+                finally:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    wait_for_right_task_stopped(
+                        arm, log_file,
+                        confirmed_event="right_post_entry_relief_stop_confirmed",
+                        timeout_event="right_post_entry_relief_stop_wait_timeout",
+                        cancel_if_still_running_after_s=0.5,
+                    )
+                    continuous_servo_stopped = True
+                log_event("post_entry_relief_completed", distance_mm=args.post_entry_relief_mm)
+
+            if args.post_entry_descend_mm <= 0.0:
+                return
+            descend_start_raw = current_pose(arm, 2)
+            descend_start = descend_start_raw[:3] + rotvec_to_rpy(descend_start_raw[3:])
+            descend_target = list(descend_start)
+            descend_target[2] -= args.post_entry_descend_mm / 1000.0
+            force_monitoring_enabled = args.post_entry_descend_fx_rise_n > 0.0
+            descend_fx_base: float | None = None
+            if force_monitoring_enabled:
+                time.sleep(0.25)
+                descend_fx_samples: list[float] = []
+                for index in range(args.baseline_samples):
+                    descend_fx_samples.append(read_wrench(sensor, args.sample_timeout)[0][0])
+                    if index + 1 < args.baseline_samples:
+                        time.sleep(0.05)
+                descend_fx_base = sum(descend_fx_samples) / len(descend_fx_samples)
+            print(
+                f"进洞确认后，直接沿世界 Z− 下降 {args.post_entry_descend_mm:.3f}mm；"
+                + (
+                    f"raw Fx 上升 {args.post_entry_descend_fx_rise_n:.2f}N 即停止。"
+                    if force_monitoring_enabled else "不读取力传感器。"
+                )
             )
             log_event(
-                "post_entry_relief_start",
-                distance_mm=args.post_entry_relief_mm,
-                axis=args.search_axis,
-                direction=("negative" if search_direction_sign > 0.0 else "positive"),
-                start_xyz_rpy=relief_start,
-                target_xyz_rpy=relief_target,
-                trigger="unconditional_after_confirmed_insertion",
+                "post_entry_descend_start",
+                max_distance_mm=args.post_entry_descend_mm,
+                raw_fx_monitoring_enabled=force_monitoring_enabled,
+                raw_fx_baseline_n=descend_fx_base,
+                raw_fx_rise_threshold_n=args.post_entry_descend_fx_rise_n if force_monitoring_enabled else None,
+                start_xyz_rpy=descend_start,
+                target_xyz_rpy=descend_target,
             )
-            print(
-                "进洞确认后，不检查力传感器；"
-                f"沿世界 {args.search_axis.upper()}"
-                f"{'−' if search_direction_sign > 0.0 else '+'} 固定后拉 "
-                f"{args.post_entry_relief_mm:.3f}mm。"
-            )
+            last_descend_output_at = 0.0
+
+            def monitor_descend_raw_fx(alpha: float) -> None:
+                nonlocal continuous_servo_stopped, last_descend_output_at
+                assert descend_fx_base is not None
+                force, _ = read_wrench(sensor, args.sample_timeout)
+                delta_fx = force[0] - descend_fx_base
+                descended_mm = alpha * args.post_entry_descend_mm
+                now = time.monotonic()
+                if now - last_descend_output_at >= 0.1:
+                    last_descend_output_at = now
+                    print(f"[post_entry_descend] down≈{descended_mm:.2f}mm raw dFx={delta_fx:.2f}N")
+                if delta_fx >= args.post_entry_descend_fx_rise_n:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    continuous_servo_stopped = True
+                    log_event(
+                        "post_entry_descend_fx_stop",
+                        descended_mm=round(descended_mm, 3), raw_fx_n=force[0],
+                        raw_fx_baseline_n=descend_fx_base, raw_delta_fx_n=delta_fx,
+                        threshold_n=args.post_entry_descend_fx_rise_n,
+                    )
+                    raise PostEntryFxRiseReached()
+
             arm.start_servo_pose(  # type: ignore[attr-defined]
                 2, pose_type="absolute", frame="world", tcp=[0.0] * 6, input_frequency_hz=50.0
             )
             continuous_servo_stopped = False
+            stopped_by_fx = False
             try:
-                move_continuous_linear_step(
-                    arm,
-                    relief_start,
-                    relief_target,
-                    linear_speed_mps=args.post_entry_relief_speed_mm_s / 1000.0,
-                    linear_accel_mps2=0.02,
-                    initial_speed_mps=0.0,
+                move_continuous_with_recovery(
+                    "post_entry_descend", descend_start, descend_target,
+                    linear_speed_mps=args.post_entry_descend_speed_mm_s / 1000.0,
+                    linear_accel_mps2=0.02, initial_speed_mps=0.0,
+                    force_monitor=monitor_descend_raw_fx if force_monitoring_enabled else None,
                 )
+            except PostEntryFxRiseReached:
+                stopped_by_fx = True
+                print("进洞后下降：raw Fx 上升达到阈值，已停止。")
             finally:
                 arm.stop_servo_pose(2)  # type: ignore[attr-defined]
                 wait_for_right_task_stopped(
                     arm, log_file,
-                    confirmed_event="right_post_entry_relief_stop_confirmed",
-                    timeout_event="right_post_entry_relief_stop_wait_timeout",
+                    confirmed_event="right_post_entry_descend_stop_confirmed",
+                    timeout_event="right_post_entry_descend_stop_wait_timeout",
                     cancel_if_still_running_after_s=0.5,
                 )
                 continuous_servo_stopped = True
-            log_event("post_entry_relief_completed", distance_mm=args.post_entry_relief_mm)
+            log_event(
+                "post_entry_descend_completed", max_distance_mm=args.post_entry_descend_mm,
+                stopped_by_raw_fx_rise=stopped_by_fx,
+            )
+
+        def move_from_first_hole_to_second_hole() -> None:
+            """Move from the confirmed first hole to the taught second-hole offset.
+
+            Each leg starts from the measured TCP pose, intentionally has no
+            force read and does not assert endpoint arrival: a contact-limited
+            final Z- descent therefore ends quietly rather than failing solely
+            because the full 50-mm command was not physically reached.
+            """
+            nonlocal continuous_servo_stopped
+            if servo_started:
+                if not continuous_servo_stopped:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    continuous_servo_stopped = True
+                wait_for_right_task_stopped(
+                    arm, log_file,
+                    confirmed_event="right_pre_second_hole_stop_confirmed",
+                    timeout_event="right_pre_second_hole_stop_wait_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                )
+
+            def run_leg(label: str, axis: int, distance_mm: float, speed_mm_s: float) -> None:
+                nonlocal continuous_servo_stopped
+                actual = current_pose(arm, 2)
+                start = actual[:3] + rotvec_to_rpy(actual[3:])
+                target = list(start)
+                target[axis] += distance_mm / 1000.0
+                axis_name = "XYZ"[axis]
+                direction = "+" if distance_mm > 0.0 else "−"
+                print(
+                    f"第二洞路径 {label}：沿世界 {axis_name}{direction} "
+                    f"{abs(distance_mm):.1f}mm，{speed_mm_s:.1f}mm/s。"
+                )
+                log_event(
+                    "second_hole_leg_start", label=label, axis=axis_name,
+                    distance_mm=distance_mm, speed_mm_s=speed_mm_s,
+                    start_xyz_rpy=start, target_xyz_rpy=target,
+                    force_monitoring_enabled=False,
+                )
+                arm.start_servo_pose(  # type: ignore[attr-defined]
+                    2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+                    input_frequency_hz=50.0,
+                )
+                continuous_servo_stopped = False
+                try:
+                    move_continuous_with_recovery(
+                        f"second_hole_{label}", start, target,
+                        linear_speed_mps=speed_mm_s / 1000.0,
+                        linear_accel_mps2=0.02, initial_speed_mps=0.0,
+                        near_target_mm=(3.0 if label == "descend_into_second_hole" else 2.0),
+                        recovery_speed_mps=(0.003 if label == "descend_into_second_hole" else None),
+                    )
+                finally:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    wait_for_right_task_stopped(
+                        arm, log_file,
+                        confirmed_event=f"right_second_hole_{label}_stop_confirmed",
+                        timeout_event=f"right_second_hole_{label}_stop_wait_timeout",
+                        cancel_if_still_running_after_s=0.5,
+                    )
+                    continuous_servo_stopped = True
+                completed = current_pose(arm, 2)
+                completed_rpy = completed[:3] + rotvec_to_rpy(completed[3:])
+                log_event(
+                    "second_hole_leg_completed", label=label,
+                    actual_end_xyz_rpy=completed_rpy,
+                )
+
+            print("第一洞确认成功；执行后续路径（不读取力传感器）。")
+            run_leg("settle_down_after_first_hole", 2, -10.0,
+                    args.second_hole_descend_speed_mm_s)
+            print("第一洞后下探完成；停留 0.5 秒。")
+            log_event("second_hole_pause", label="after_first_hole_down", duration_s=0.5)
+            time.sleep(0.5)
+            run_leg("lift_from_first_hole", 2, args.second_hole_lift_mm,
+                    args.second_hole_lateral_speed_mm_s)
+            run_leg("shift_to_second_hole", 1, args.second_hole_y_offset_mm,
+                    args.second_hole_lateral_speed_mm_s)
+            run_leg("descend_into_second_hole", 2, -args.second_hole_descend_mm,
+                    args.second_hole_descend_speed_mm_s)
+            print("第二洞下降完成；停留 0.5 秒。")
+            log_event("second_hole_pause", label="after_second_hole_down", duration_s=0.5)
+            time.sleep(0.5)
+            run_leg("lift_after_second_hole", 2, args.second_hole_lift_mm,
+                    args.second_hole_lateral_speed_mm_s)
+            run_leg("shift_x_negative_after_second_hole", 0, -110.0,
+                    args.second_hole_x_return_speed_mm_s)
+            print("第二洞后续路径结束。")
 
         # Keep the single log open until the ServoPose session has stopped.
         if True:
@@ -1552,8 +2340,8 @@ def placement_main(argv: list[str] | None = None) -> int:
                     f"{args.fast_linear_speed_mm_s:.1f}mm/s；力监测 "
                     f"{args.continuous_force_monitor_hz:.1f}Hz。"
                 )
-                move_continuous_linear_step(
-                    arm,
+                move_continuous_with_recovery(
+                    "first_hole_single_continuous_search",
                     centre,
                     single_target,
                     linear_speed_mps=args.fast_linear_speed_mm_s / 1000.0,
@@ -1610,8 +2398,8 @@ def placement_main(argv: list[str] | None = None) -> int:
                 )
                 back_target_timed_out = False
                 if args.continuous_straight_search:
-                    continuous_command_speed_mps = move_continuous_linear_step(
-                        arm,
+                    continuous_command_speed_mps = move_continuous_with_recovery(
+                        "first_hole_continuous_search",
                         continuous_command_target,
                         centre,
                         linear_speed_mps=linear_speed_mps,
@@ -1959,7 +2747,7 @@ def placement_main(argv: list[str] | None = None) -> int:
         raise RuntimeError(f"在最大后拉 {args.max_back_mm:.1f}mm 内未检测到进洞特征。")
     except PlacementContactReached:
         log_event("insertion_decision", result="entered_by_validated_release")
-        post_entry_relief_if_needed()
+        move_from_first_hole_to_second_hole()
         return 0
     except Exception as exc:
         log_event("run_error", error_type=type(exc).__name__, message=str(exc))
@@ -2015,18 +2803,31 @@ def placement_main(argv: list[str] | None = None) -> int:
 # The workpiece-profile entry point is intentionally kept in this file.  It
 # translates the minimal JSON profile directly into this module's arguments;
 # no subprocess and no call to place_hole_a_wiggle.py is involved.
-SINGLE_SEARCH_SPEED_MM_S = 10.0
+SINGLE_SEARCH_SPEED_MM_S = 15.0
 MAX_SEARCH_ATTEMPTS = 6
 PRE_SEARCH_PRESS_MM = 1.0
 RETRY_SEARCH_PRESS_INCREMENT_MM = 1.5
 PRE_SEARCH_PRESS_SPEED_MM_S = 1.0
 RETRY_LIFT_MM = 30.0
 RETRY_LIFT_SPEED_MM_S = 10.0
-POST_ENTRY_RELIEF_MM = 1.8
+POST_ENTRY_RELIEF_MM = 0.0
 POST_ENTRY_RELIEF_OPPOSING_FORCE_N = 1.5
 POST_ENTRY_RELIEF_CONFIRM_FRAMES = 2
 POST_ENTRY_RELIEF_OBSERVATION_FRAMES = 3
 POST_ENTRY_RELIEF_SPEED_MM_S = 1.0
+POST_ENTRY_DESCEND_MM = 10.0
+POST_ENTRY_DESCEND_FX_RISE_N = 0.0
+POST_ENTRY_DESCEND_SPEED_MM_S = 1.0
+PRE_SEARCH_INITIAL_DESCEND_MM = 10.0
+PRE_SEARCH_FORWARD_MM = 142.0
+PRE_SEARCH_DESCEND_MM = 20.0
+PRE_SEARCH_APPROACH_SPEED_MM_S = 25.0
+SECOND_HOLE_LIFT_MM = 40.0
+SECOND_HOLE_Y_OFFSET_MM = 30.0
+SECOND_HOLE_DESCEND_MM = 48.0
+SECOND_HOLE_LATERAL_SPEED_MM_S = 10.0
+SECOND_HOLE_X_RETURN_SPEED_MM_S = 25.0
+SECOND_HOLE_DESCEND_SPEED_MM_S = 5.0
 WORKPIECE_CONFIGS = {
     1: Path(__file__).resolve().parent / "place_hole_a_wiggle_new_workpiece_1.json",
     2: Path(__file__).resolve().parent / "place_hole_a_wiggle_new_workpiece_2.json",
@@ -2098,7 +2899,7 @@ def lift_after_exhausted_search(
     servo_guard = None
     servo_started = False
     try:
-        arm = sdk.Arm(host=arm_host or "192.168.88.1")
+        arm = sdk.Arm(host=arm_host or os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
         ensure_ready(arm, 2)
         start = current_pose(arm, 2)
         start_rpy = start[:3] + rotvec_to_rpy(start[3:])
@@ -2177,6 +2978,19 @@ def profile_argv(
         "--post-entry-relief-confirm-frames", str(POST_ENTRY_RELIEF_CONFIRM_FRAMES),
         "--post-entry-relief-observation-frames", str(POST_ENTRY_RELIEF_OBSERVATION_FRAMES),
         "--post-entry-relief-speed-mm-s", str(POST_ENTRY_RELIEF_SPEED_MM_S),
+        "--post-entry-descend-mm", str(POST_ENTRY_DESCEND_MM),
+        "--post-entry-descend-fx-rise-n", str(POST_ENTRY_DESCEND_FX_RISE_N),
+        "--post-entry-descend-speed-mm-s", str(POST_ENTRY_DESCEND_SPEED_MM_S),
+        "--pre-search-initial-descend-mm", str(PRE_SEARCH_INITIAL_DESCEND_MM),
+        "--pre-search-forward-mm", str(PRE_SEARCH_FORWARD_MM),
+        "--pre-search-descend-mm", str(PRE_SEARCH_DESCEND_MM),
+        "--pre-search-approach-speed-mm-s", str(PRE_SEARCH_APPROACH_SPEED_MM_S),
+        "--second-hole-lift-mm", str(SECOND_HOLE_LIFT_MM),
+        "--second-hole-y-offset-mm", str(SECOND_HOLE_Y_OFFSET_MM),
+        "--second-hole-descend-mm", str(SECOND_HOLE_DESCEND_MM),
+        "--second-hole-lateral-speed-mm-s", str(SECOND_HOLE_LATERAL_SPEED_MM_S),
+        "--second-hole-x-return-speed-mm-s", str(SECOND_HOLE_X_RETURN_SPEED_MM_S),
+        "--second-hole-descend-speed-mm-s", str(SECOND_HOLE_DESCEND_SPEED_MM_S),
         "--initial-right-joints-deg", *(str(value) for value in joints),
     ]
     for key in ("search_axis", "search_direction"):

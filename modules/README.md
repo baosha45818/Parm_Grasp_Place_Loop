@@ -7,8 +7,9 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 .venv/bin/python \
   modules/modular_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
-  --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1  
+  --gripper-host 192.168.3.11 \
+  --arm-host 192.168.3.11 \
+  --head-host 192.168.3.22
 ```
 
 该入口固定使用 `module_2_left_inspect_apart`，并保持旧总控已验证的双臂
@@ -49,4 +50,3 @@ Module 3 子模块固定为：
 
 Module 5 Left Pick、Module 8-2 Right Handoff、Module 9 Right Place 和
 Module 10 Right Idle 均有模块化总控入口。
-

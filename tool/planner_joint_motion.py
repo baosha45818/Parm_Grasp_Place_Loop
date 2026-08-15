@@ -7,6 +7,8 @@ import argparse
 import math
 from typing import Sequence
 
+from planner_task_retry import retry_task_creation
+
 
 LEFT_JOINT_NAMES = [f"left_arm_joint{index}" for index in range(1, 8)]
 RIGHT_JOINT_NAMES = [f"right_arm_joint{index}" for index in range(1, 8)]
@@ -76,7 +78,7 @@ def plan_and_execute(
         with Planner(host=args.planner_host) as planner:
             # The deployed planner supports RRTStar, while this SDK's public
             # helper still locally restricts the planner names.
-            result = planner._trajectory.send_payload({
+            payload = {
                 "waypoints": [{
                     "name": f"{arm}_joint_target",
                     "type": "joint",
@@ -91,7 +93,11 @@ def plan_and_execute(
                     "max_vel_factor": float(args.speed),
                     "max_acc_factor": float(args.speed),
                 },
-            }, timeout=60.0)
+            }
+            result = retry_task_creation(
+                lambda: planner._trajectory.send_payload(payload, timeout=60.0),
+                label=f"{arm_label} {planner_name.upper()} 关节规划",
+            )
     except Exception as exc:
         raise RuntimeError(
             f"规划器不可用或规划失败（{args.planner_host}:5604）。"

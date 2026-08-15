@@ -196,8 +196,8 @@ def parse_args() -> argparse.Namespace:
         help="仅选择真实工件对应的 STL 与固定坐标轴变换；不改变统一视觉流程",
     )
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument("--gripper-hand", type=int, default=1)
     parser.add_argument("--execute-url", default="http://127.0.0.1:5667/middle/waypoint/execute")
     parser.add_argument("--sam2-url", default=os.environ.get(

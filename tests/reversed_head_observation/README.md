@@ -42,7 +42,7 @@ python3 -m tests.reversed_head_observation.estimate_pose_head_d435 \
   --output-dir /home/dainanjun/Public/Parm_Grasp_Place_Loop/output/reversed_head_pose_d435
 ```
 
-该入口连接头部 Intel RealSense D435i（序列号 `261222076212`），不会连接胸前
+该入口连接头部 Intel RealSense D435i（序列号 `261722072445`），不会连接胸前
 Femto Bolt。默认校验云台命令角 `pitch=2°, yaw=26.5°`，并输出
 `head_d435i_color_optical_frame` 下的工件位姿。
 

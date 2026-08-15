@@ -12,9 +12,9 @@
 | D405 腕部标定 | `deploy/calibration/output/wrist1/calibration_wrist1.json` | 将 D405 点云转换到 `arm1_base` |
 | Femto Bolt 激光外参 | `deploy/calibration/output/laser/calibration_laser.json` | 将 Femto 点云转换到 `arm1_base` |
 | 夹爪 TCP 标定 | `deploy/calibration/output/tcp_grasp_tcp/calibration_translation2.json` | 将预测抓取中心转换为 EEF 位姿 |
-| D405 相机 | 序列号 `260322270242` | 腕部点云采集 |
+| D405 相机 | 序列号 `260322270600` | 左腕点云采集 |
 | Femto Bolt 相机 | 序列号 `CL8L56301LK` | 外部点云采集 |
-| arm1 控制器 | `192.168.88.1` | 观察位姿、笛卡尔运动和放置运动 |
+| arm1 控制器 | `192.168.3.11` | 观察位姿、笛卡尔运动和放置运动 |
 | 夹爪服务 | `localhost`，hand1 | 开合夹爪 |
 
 标定文件必须满足以下条件：Femto 标定的 `status` 必须为 `ACCEPTED`；夹爪 TCP 标定的 `point_is_grasp_tcp` 必须为 `true`。
@@ -143,7 +143,7 @@ Femto ROI 可通过以下工具在对齐后的彩色图上选择：
 ```python
 planner.plan_cart_trajectory(
     group="left_arm", planner="lin",
-    frame_id="body_base", ik_frame="left_hand_tool_end_link",
+    frame_id="body_base", ik_frame="left_hand_transfer_end",
     position=[x, y, z], orientation=[qx, qy, qz, qw],
     max_vel=0.1, max_acc=0.1,
 )
@@ -211,12 +211,12 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python \
   --wrist-calibration /home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/wrist1/calibration_wrist1.json \
   --laser-calibration /home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/laser/calibration_laser.json \
   --tcp-translation-calibration /home/dainanjun/qiuguolin/graspnet/deploy/calibration/output/tcp_grasp_tcp/calibration_translation2.json \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.3.11 \
   --arm-id 1 \
   --move-observation \
   --movej-speed 0.1 \
   --observation-joints-deg -6.25 -21.348 12.599 78.268 4.039 56.382 -11.374 \
-  --d405-serial 260322270242 \
+  --d405-serial 260322270600 \
   --d405-frame-count 5 \
   --d405-postprocess \
   --d405-hole-filling \

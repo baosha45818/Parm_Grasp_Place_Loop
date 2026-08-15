@@ -1,0 +1,77 @@
+# Module 8-1 工件 1 的直接抓取参数。数组顺序就是候选搜索优先级；长度单位为 m。
+
+[meta]
+# 本文件对应的工件，必须和命令行 --workpiece 一致。
+workpiece = "workpiece_1"
+
+[grasp_geometry]
+# 视觉语义原点沿工件自身 X/Y/Z 到几何抓取点的偏移 [m]。
+grasp_point_semantic_offset_m = [-0.03, 0.0, 0.02130022645]
+# 到抓取点后沿 TCP 自身 X/Y/Z 的目标位置补偿 [m]。
+tcp_local_offset_at_grasp_m = [0.010, 0.0, 0.006]
+# TCP 绕工件局部 +Y 的偏航补偿 [deg]。
+tcp_yaw_toward_workpiece_y_deg = 0.0
+# 初次闭爪未确认抓住时，原地沿 body_base +Z 复抓的高度 [m]。
+grasp_retry_z_step_m = 0.007
+
+[approach]
+# 后方抓取线入口到抓取点的最小退后距离 [m]。
+line_entry_clearance_m = 0.02
+# 后方抓取线允许扫描的最大退后距离 [m]。
+line_max_rear_distance_m = 0.06
+# 后方抓取线离散候选数量。
+line_scan_count = 15
+# 后方对齐和 RRT 段使用的路径规划器。
+planner = "rrtstar"
+# 后方点到抓取点的最终接近方式：servo 为控制器直线段，rrt 为规划轨迹。
+final_approach_mode = "servo"
+
+[servo]
+# 最终 ServoPose 直线段最大线速度 [m/s]。
+servo_linear_speed_mps = 0.1
+# 最终 ServoPose 直线段最大角速度 [rad/s]。
+servo_angular_speed_radps = 0.3
+# 最终 ServoPose 直线段最大线加速度 [m/s²]。
+servo_max_linear_accel_mps2 = 0.1
+# 最终 ServoPose 直线段最大角加速度 [rad/s²]。
+servo_max_angular_accel_radps2 = 0.6
+# ServoPose 命令推送频率 [Hz]。
+servo_hz = 50.0
+# ServoPose 到点位置容差 [m]。
+servo_position_tolerance_m = 0.0005
+# ServoPose 到点姿态容差 [rad]。
+servo_orientation_tolerance_rad = 0.035
+# ServoPose 等待末端稳定到点的超时 [s]。
+servo_settle_timeout_s = 8.0
+
+[planning]
+# RRTstar 规划速度比例。
+max_vel = 0.1
+# RRTstar 规划加速度比例。
+max_acc = 0.1
+# 执行已规划轨迹时的采样频率倍率。
+trajectory_execution_speed_scale = 2.0
+# 轨迹首点与实时状态不同步时的重新规划次数。
+start_sync_retries = 3
+
+[gripper]
+# 夹爪动作及状态确认超时 [s]。
+gripper_timeout_s = 5.0
+# 夹爪位置确认容差。
+gripper_position_tolerance = 5.0
+# 确认抓住时允许的最小夹爪最终位置。
+grasp_position_min = 15.0
+# 确认抓住时允许的最大夹爪最终位置。
+grasp_position_max = 100.0
+
+[post_grasp]
+# 确认抓住后沿 body_base +Z 上抬候选 [m]；按从左到右顺序尝试。
+q1_post_grasp_lift_m = [0.15, 0.1, 0.05, 0.01, 0.005]
+# 后方对齐/抓取点校验允许的 TCP XY 误差 [m]。
+q1_xy_tolerance_m = 0.0005
+# 后方对齐/抓取点校验允许的 TCP Z 误差 [m]。
+q1_z_tolerance_m = 0.0005
+# 后方对齐/抓取点校验允许的 TCP 姿态误差 [rad]。
+q1_pitch_tolerance_rad = 0.0017453292519943296
+# TCP Z 与姿态校正的最大尝试次数。
+z_pitch_correction_attempts = 8

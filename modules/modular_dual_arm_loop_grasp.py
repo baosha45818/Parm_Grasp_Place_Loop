@@ -54,8 +54,8 @@ RIGHT_IDLE_POSE = (
     ROOT / "modules/module_10_right_idle/right_idle_pose.json"
 )
 BASE_MOTION_SPEED = 0.1
-DEFAULT_LEFT_SPEED = 0.2
-DEFAULT_RIGHT_SPEED = 0.1
+DEFAULT_LEFT_SPEED = 0.3
+DEFAULT_RIGHT_SPEED = 0.3
 
 # multiprocessing spawn 会在子进程重新导入 target 所在模块；因此必须在模块
 # 顶层就让旧调度器目录可被标准 import 找到，不能使用临时动态模块名。
@@ -77,6 +77,7 @@ from modules.module_0_prepare.ensure_sam2_service import ensure_sam2_service, sa
 from modules.module_0_prepare.preflight_robot_infrastructure import (
     preflight_robot_infrastructure,
 )
+from xianxin_runtime import configure_environment
 
 
 def load_scheduler():
@@ -489,6 +490,7 @@ def extract_graspnet_visualization_argument() -> None:
 
 
 def main() -> None:
+    configure_environment()
     # 必须先消费选择参数：后续 Module 5-2/8-2/9 的入口绑定依赖此环境值。
     # 工件类型不可由历史默认值猜测，必须由本次调用显式给出。
     # The managed production entry owns SAM2 for the complete Loop lifetime.
@@ -547,6 +549,7 @@ def main() -> None:
         planner_host=readiness_args.planner_host,
         arm_host=readiness_args.arm_host,
         gripper_host=readiness_args.gripper_host,
+        force_sensor_host=os.environ["PARM_FORCE_SENSOR_HOST"],
         left_only=bool(getattr(readiness_args, "left_only", False)),
     )
     print(

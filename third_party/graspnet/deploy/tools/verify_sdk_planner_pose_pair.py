@@ -53,7 +53,7 @@ def raw_transform(response: dict) -> tuple[np.ndarray, dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="localhost")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--interval-s", type=float, default=0.2)

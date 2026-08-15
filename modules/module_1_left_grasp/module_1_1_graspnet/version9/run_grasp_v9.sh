@@ -34,7 +34,7 @@ if [ "${V9_ALLOW_EXECUTE:-0}" = "1" ]; then
     --weight-contiguous-single-band
     --max-weight-retries 20
     --max-operator-declines 20
-    --force-sensor-host 127.0.0.1 --force-sensor-hand 1
+    --force-sensor-host 192.168.3.22 --force-sensor-hand 1
     --postgrasp-lift-joints-deg -4.081 -52.722 3.637 100.478 -10.051 53.969 8.843
     --place-joints-deg 49.671 -56.037 -115.398 72.201 9.075 53.369 11.563
     --stop-after-graspup
@@ -51,19 +51,19 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" V9_GRASPNET_SOURCE_RO
   --tcp-translation-calibration "$V9_GRASPNET_SOURCE_ROOT/deploy/calibration/output/tcp_grasp_tcp/calibration_translation2.json" \
   --output-dir "$MODULE_DIR/output" \
   --planner-bridge-calibration "$V9_GRASPNET_SOURCE_ROOT/deploy/calibration/output/planner_tf_bridge.json" \
-  --planner-host 127.0.0.1 --planner-trajectory-port 5605 --planner-tf-port 5614 --planner-waypoint-port 5615 \
+  --planner-host 127.0.0.1 --planner-trajectory-port 5604 --planner-tf-port 5609 --planner-waypoint-port 5610 \
   --planner-execute-url http://127.0.0.1:5667/middle/waypoint/execute \
   --planner-base-frame body_base --planner-tool-frame left_hand_transfer_end --planner-group left_arm \
   --planner-max-vel 0.05 --planner-max-acc 0.05 --planner-pregrasp-mode rrtstar --planner-descend-mode lin \
-  --arm-host 192.168.88.1 --arm-id 1 --move-observation \
-  --d405-serial 260322270242 --d405-frame-count 5 --d405-postprocess --d405-hole-filling \
+  --arm-host 192.168.3.11 --arm-id 1 --move-observation \
+  --d405-serial 260322270600 --d405-frame-count 5 --d405-postprocess --d405-hole-filling \
   --d405-z-min 0.10 --d405-z-max 1.20 --d405-x-abs-max 0.80 --d405-y-abs-max 0.80 \
   --femto-serial CL8L56301LK --femto-z-min 0.20 --femto-z-max 2.00 --femto-x-abs-max 1.20 --femto-y-abs-max 1.20 \
   --roi 0 0 512 336 --femto-roi 175 281 488 228 \
   --collision-thresh 0.5 --collision-voxel-size 0.005 --collision-approach-dist 0.01 \
   --min-grasp-approach-angle-deg 70 --min-grasp-edge-clearance-m 0.004 \
   --pregrasp-height-m 0.10 --grasp-downward-probe-m 0.01 \
-  --gripper-host localhost --gripper-hand 1 --gripper-open-width-m 0.078 --gripper-width-margin-m 0.005 \
+  --gripper-host 192.168.3.11 --gripper-hand 1 --gripper-open-width-m 0.078 --gripper-width-margin-m 0.005 \
   --gripper-force 60 --gripper-close-force 100 \
   "${PLAN_ONLY_ARGS[@]}" \
   "${FULL_V7_EXECUTION_ARGS[@]}" \

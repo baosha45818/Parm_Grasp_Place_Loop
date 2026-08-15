@@ -27,8 +27,9 @@ class _FakeGripper:
         }
     }
 
-    def __init__(self, *, host: str):
+    def __init__(self, *, host: str, status_port: int = 7702):
         self.host = host
+        self.status_port = status_port
 
     def __enter__(self):
         return self

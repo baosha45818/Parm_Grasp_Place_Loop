@@ -20,10 +20,14 @@ python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge
 
 ```bash
 python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/tabletop_pointcloud_workpiece_pose.py --workpiece 1
+
+
 python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/tabletop_pointcloud_workpiece_pose.py --workpiece 2
 ```
 
 默认使用 `/home/dainanjun/Public/Parm_Grasp_Place_Loop/.venv/bin/python`，会将头部移至已标定的 `pitch=38.5°`、`yaw=0°`。每次运行的 RGB-D、SAM2 掩码、调试图、`mask_pose.json` 和元数据会按工件写入 `/home/dainanjun/Public/Parm_Grasp_Place_Loop/output/module_4_2/workpiece_1/<序号>/` 或 `workpiece_2/<序号>/`。离线调试已在观察位的相机时可增加 `--skip-head-move`。
+
+`mask_pose.json` 中每个 `workpieces` 条目还会输出 `orientation`：`FRONT` 表示语义配置 `positive_face.upward_axis` 指向桌面上方，`BACK` 表示其反向朝上，`OTHER` 表示两种假设的深度评分差距不足或其中一面没有通过几何约束。`face_hypotheses` 保留正、反两套候选的评分，阈值可用 `--minimum-face-margin-mm` 调整。
 
 
 可用环境变量覆盖部署位置：`POSE_ESTIMATION_PYTHON`、`POSE_ESTIMATION_SAM2_SOCKET`、`POSE_ESTIMATION_SAM2_BIN`；所有业务参数也可由脚本的 CLI 覆盖，例如 `--calibration`、`--stl`、`--semantic-calibration`、`--capture-root`。

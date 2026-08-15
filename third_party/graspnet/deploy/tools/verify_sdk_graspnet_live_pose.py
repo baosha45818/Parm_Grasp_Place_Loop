@@ -72,7 +72,7 @@ def main() -> None:
     parser.add_argument("--alignment", type=Path,
                         default=REPO / "deploy/calibration/output/left_kinematics_sdk_20260728_candidate.yaml")
     parser.add_argument("--samples", type=int, default=5)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--planner-trajectory-port", type=int, default=5605)
     parser.add_argument("--planner-tf-port", type=int, default=5614)

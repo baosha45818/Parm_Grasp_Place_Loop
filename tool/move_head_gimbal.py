@@ -10,7 +10,9 @@ import time
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--host", default="127.0.0.1")
+    # 云台 driver 部署在独立控制器上；与 arm_head_teach.py 的现场默认值一致。
+    # 本机 127.0.0.1:7705 没有云台服务，故会产生误导性的“no server listening”。
+    parser.add_argument("--host", default="192.168.3.22")
     parser.add_argument("--pitch", type=float, required=True)
     parser.add_argument("--yaw", type=float, required=True)
     parser.add_argument("--settle-s", type=float, default=1.0)
@@ -38,22 +40,34 @@ def main() -> int:
             time.sleep(0.3)
         head.move_to(pitch=args.pitch, yaw=args.yaw)
         deadline = time.monotonic() + args.timeout_s
+        last_state = None
+        last_pitch = None
+        last_yaw = None
         while time.monotonic() < deadline:
             state = head.get_state() or {}
             try:
-                # 当前 SDK 的 pitch 状态符号与 move_to 指令相反。
-                pitch = -float(state["pitch"]["position"])
+                # parm_sdk 20260811 reports the same command convention as
+                # move_to(): positive pitch is looking down.
+                pitch = float(state["pitch"]["position"])
                 yaw = float(state["yaw"]["position"])
             except (KeyError, TypeError, ValueError):
                 time.sleep(0.05)
                 continue
+            last_state = state
+            last_pitch = pitch
+            last_yaw = yaw
             if abs(pitch - args.pitch) <= 0.5 and abs(yaw - args.yaw) <= 0.5:
                 if args.settle_s:
                     time.sleep(args.settle_s)
                 print(f"[head] 已到观察位: pitch={pitch:.2f}deg, yaw={yaw:.2f}deg")
                 return 0
             time.sleep(0.05)
-    raise RuntimeError("云台未在超时内到达指定观察位")
+    raise RuntimeError(
+        "云台未在超时内到达指定观察位："
+        f"目标 pitch={args.pitch:.2f}°, yaw={args.yaw:.2f}°；"
+        f"最后反馈 pitch={last_pitch!r}°, yaw={last_yaw!r}°；"
+        f"最后状态={last_state}"
+    )
 
 
 if __name__ == "__main__":

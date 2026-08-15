@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""独立执行左臂正反两面放置，只消费 Module 2 Inspect 的 JSON 结果。"""
+"""执行左臂放置，消费 Inspect 位姿或显式的无 Inspect DIRECT 交接。"""
 
 from __future__ import annotations
 
@@ -124,8 +124,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inspection-result", type=Path, required=True)
     parser.add_argument("--result-file", type=Path, required=True)
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument("--gripper-hand", type=int, default=1, choices=(1, 2))
     parser.add_argument(
         "--execute-url",
@@ -153,6 +153,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--graspup-lift-m", type=float, default=GRASPUP_LIFT_M)
+    parser.add_argument(
+        "--pre-place-middle-joints-deg",
+        nargs=7,
+        type=float,
+        help=(
+            "可选的放置前中间关节位。提供后先 RRTStar 到该位，"
+            "再直接 RRTStar 到 graspup_top，不经 graspup。"
+        ),
+    )
     parser.add_argument(
         "--target-xy-radius-m",
         type=float,
@@ -501,6 +510,10 @@ def main() -> int:
         args.graspup_lift_m, GRASPUP_LIFT_M, atol=1e-9
     ):
         raise ValueError("--graspup-lift-m 当前必须为原版固定值 0.10m")
+    if args.pre_place_middle_joints_deg is not None and not np.all(
+        np.isfinite(args.pre_place_middle_joints_deg)
+    ):
+        raise ValueError("--pre-place-middle-joints-deg 必须包含七个有限角度")
     if not np.isfinite(args.target_xy_radius_m) or args.target_xy_radius_m < 0.0:
         raise ValueError("--target-xy-radius-m 必须是非负的有限值")
     if args.offline_start_tolerance_deg <= 0.0:
@@ -530,28 +543,41 @@ def main() -> int:
         })
         return 0
 
-    validate_inspection_success(inspection)
-    # T_tool_object remains the transfer-end relation used to construct
-    # Cartesian placement targets.  Face selection below deliberately uses
-    # the separately captured ICP-time left_eef relation.
+    direct_only_without_inspect = bool(inspection.get("direct_only_without_inspect"))
+    if not direct_only_without_inspect:
+        validate_inspection_success(inspection)
+    # Normal mode uses ICP's transfer-end relation to construct Cartesian
+    # targets. DIRECT-only mode deliberately has no ICP pose; it plans to a
+    # fixed, calibrated left_eef target from the workpiece TOML instead.
     classification = "FRONT"
     branch = FRONT_PROFILE.placement_branch
     profile = FRONT_PROFILE
-    T_tool_object = np.asarray(inspection["T_tool_object"], dtype=float)
+    T_tool_object = (
+        np.eye(4, dtype=float)
+        if direct_only_without_inspect
+        else np.asarray(inspection["T_tool_object"], dtype=float)
+    )
     post_graspup_planner = {
         "rrtconnect": "ompl",
         "rrtstar": "rrtstar",
     }[args.post_graspup_planner]
+    left_placement_frame = (
+        "left_eef" if direct_only_without_inspect else "left_hand_transfer_end"
+    )
     planning_scheduler_log = {
         "mode": "sliding_window",
         "max_inflight": int(args.placement_planning_inflight),
         "planner": post_graspup_planner,
         "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
         "face_priority_policy": (
+            "direct_only_without_inspect_fixed_left_eef_target"
+            if direct_only_without_inspect else
             "object_plus_z_vs_left_eef_x_selects_face_candidate_order; "
             "workpiece1_axis_candidates_fall_back_to_direct_place; "
             "workpiece1_non_axial_uses_direct_place"
         ),
+        "inspect_skipped": direct_only_without_inspect,
+        "left_placement_frame": left_placement_frame,
     }
     tool_z_rejected_count = 0
 
@@ -561,7 +587,7 @@ def main() -> int:
         base_frame="body_base",
         left_group="left_arm",
         right_group="right_arm",
-        left_tool_frame="left_hand_transfer_end",
+        left_tool_frame=left_placement_frame,
         right_tool_frame="right_hand_transfer_end",
         max_velocity=args.motion_speed,
         max_acceleration=args.motion_speed,
@@ -726,7 +752,7 @@ def main() -> int:
     timeout_errors: list[BaseException] = []
 
     try:
-        planner.open(required_frames={"body_base", "left_hand_transfer_end"})
+        planner.open(required_frames={"body_base", left_placement_frame})
         if not args.skip_motion:
             # Module 1 已完成同姿态重量分类。Module 3 的任意姿态只判断
             # 新夹爪驱动是否仍报告 gripping，不做跨姿态力传感器估重。
@@ -735,19 +761,25 @@ def main() -> int:
                 return 0
 
         workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
-        T_left_eef_object = np.asarray(inspection["T_left_eef_object"], dtype=float)
-        object_z_in_left_eef = T_left_eef_object[:3, 2]
         threshold = float(workpiece_parameters.BODY_BASE_Z_FACE_SELECTION_MAX_ANGLE_DEG)
-        (
-            face_branch_mode,
-            candidate_order,
-            minus_x_angle,
-            plus_x_angle,
-        ) = select_face_candidate_order(
-            object_z_in_left_eef,
-            threshold_deg=threshold,
-            workpiece=args.workpiece,
-        )
+        if direct_only_without_inspect:
+            face_branch_mode = "direct_only_without_inspect"
+            candidate_order = "direct_only"
+            minus_x_angle = float("nan")
+            plus_x_angle = float("nan")
+        else:
+            T_left_eef_object = np.asarray(inspection["T_left_eef_object"], dtype=float)
+            object_z_in_left_eef = T_left_eef_object[:3, 2]
+            (
+                face_branch_mode,
+                candidate_order,
+                minus_x_angle,
+                plus_x_angle,
+            ) = select_face_candidate_order(
+                object_z_in_left_eef,
+                threshold_deg=threshold,
+                workpiece=args.workpiece,
+            )
         planning_scheduler_log["face_branch_mode"] = face_branch_mode
         planning_scheduler_log["candidate_order"] = candidate_order
         face_specs = [
@@ -783,28 +815,58 @@ def main() -> int:
             },
         ]
         direct_spec = None
-        if str(args.workpiece) == "1":
-            direct_xyz = workpiece_parameters.DIRECT_PLACE_TARGET_OBJECT_XYZ_M
-            direct_target_z = workpiece_parameters.DIRECT_PLACE_TARGET_Z_CANDIDATES_M
-            direct_release_z = workpiece_parameters.DIRECT_PLACE_RELEASE_Z_CANDIDATES_M
-            if direct_xyz is None or direct_target_z is None or direct_release_z is None:
-                raise RuntimeError("工件1 direct place 参数不完整")
+        if str(args.workpiece) == "1" or direct_only_without_inspect:
+            direct_object_xyz = workpiece_parameters.DIRECT_OBJECT_TARGET_XYZ_M
+            direct_object_target_z = (
+                workpiece_parameters.DIRECT_OBJECT_TARGET_Z_CANDIDATES_M
+            )
+            direct_object_release_z = (
+                workpiece_parameters.DIRECT_OBJECT_RELEASE_Z_CANDIDATES_M
+            )
+            direct_left_eef_xyz = workpiece_parameters.DIRECT_LEFT_EEF_TARGET_XYZ_M
+            direct_left_eef_target_z = (
+                workpiece_parameters.DIRECT_LEFT_EEF_TARGET_Z_CANDIDATES_M
+            )
+            direct_left_eef_release_z = (
+                workpiece_parameters.DIRECT_LEFT_EEF_RELEASE_Z_CANDIDATES_M
+            )
             direct_spec = {
                 "classification": "DIRECT",
                 "branch": "BRANCH_1_DIRECT",
                 "profile": DIRECT_PROFILE,
-                "center": np.asarray(direct_xyz, dtype=float),
-                "target_z": validate_increasing_candidates(
-                    "[direct place].target_z_candidates_m", direct_target_z,
+                "center": np.asarray(
+                    direct_left_eef_xyz if direct_only_without_inspect else direct_object_xyz,
+                    dtype=float,
+                ),
+                # 无 ICP 的 DIRECT 固定 left_eef XY，和 object DIRECT 一样
+                # 由 target_z_candidates_m 遍历高度；名义 XYZ 的 Z 不参与规划。
+                "target_z": (
+                    validate_increasing_candidates(
+                        "[direct left eef place].target_z_candidates_m",
+                        direct_left_eef_target_z,
+                    ) if direct_only_without_inspect else
+                    validate_increasing_candidates(
+                        "[direct object place].target_z_candidates_m",
+                        direct_object_target_z,
+                    )
                 ),
                 "release_z": validate_optional_increasing_candidates(
-                    "[direct place].release_z_candidates_m", direct_release_z,
+                    (
+                        "[direct left eef place].release_z_candidates_m"
+                        if direct_only_without_inspect else
+                        "[direct object place].release_z_candidates_m"
+                    ),
+                    (
+                        direct_left_eef_release_z
+                        if direct_only_without_inspect else direct_object_release_z
+                    ),
                 ),
                 # DIRECT 保持 graspup_top 的末端 RPY，不使用工件局部 RPY 候选。
                 "yaw": [0.0],
                 "roll": [0.0],
                 "pitch": [0.0],
                 "keep_graspup_top_tool_rpy": True,
+                "fixed_tool_target": direct_only_without_inspect,
             }
             if candidate_order == "direct_only":
                 face_specs = [direct_spec]
@@ -814,9 +876,13 @@ def main() -> int:
         }
         if any(spec["center"].shape != (3,) or not np.all(np.isfinite(spec["center"])) for spec in face_specs):
             raise ValueError("目标工件 XYZ 必须包含三个有限米制数值")
+        angle_text = (
+            "未执行 Inspect/ICP"
+            if direct_only_without_inspect else
+            f"+Z->left_eef-X={minus_x_angle:.1f}deg, +Z->left_eef+X={plus_x_angle:.1f}deg"
+        )
         print(
-            f"[工件{args.workpiece}候选] +Z->left_eef-X={minus_x_angle:.1f}deg, "
-            f"+Z->left_eef+X={plus_x_angle:.1f}deg, "
+            f"[工件{args.workpiece}候选] {angle_text}, "
             f"姿态判定={face_branch_mode}, 实际遍历={candidate_order}; "
             + (
                 "直接保持 graspup_top 末端 RPY 并移动工件中心。"
@@ -843,23 +909,82 @@ def main() -> int:
         normal_candidates_timed_out = threading.Event()
 
         if not args.skip_motion:
-            confirm_motion(
-                args,
-                "确认回 graspup 并沿 body_base +Z 上移0.100m路径安全，"
-                "按回车开始边运动边离线规划...",
-            )
+            if args.pre_place_middle_joints_deg is None:
+                confirm_message = (
+                    "确认回 graspup 并沿 body_base +Z 上移0.100m路径安全，"
+                    "按回车开始边运动边离线规划..."
+                )
+            else:
+                confirm_message = (
+                    "确认先回左臂反抓中间位、再到 graspup_top 的 RRTStar 路径安全，"
+                    "按回车开始边运动边离线规划..."
+                )
+            confirm_motion(args, confirm_message)
 
             def move_to_graspup_above() -> None:
                 motion_planner = PlannerRuntime(planner_cfg)
                 try:
                     motion_planner.open(
-                        required_frames={"body_base", "left_hand_transfer_end"}
+                        required_frames={"body_base", left_placement_frame}
                     )
                     motion_planner.config = replace(
                         motion_planner.config,
                         max_velocity=float(args.preset_speed),
                         max_acceleration=float(args.preset_speed),
                     )
+                    if args.pre_place_middle_joints_deg is not None:
+                        middle_joints = [
+                            float(value)
+                            for value in args.pre_place_middle_joints_deg
+                        ]
+                        if not gripper_holds_object("回左臂反抓中间位"):
+                            return
+                        motion_planner.set_next_plan_context(
+                            "left_front_buffer_regrasp", "left_reverse_grasp_middle"
+                        )
+                        print(
+                            "[运动线程] 正在 RRTStar 回左臂反抓中间位；"
+                            f"终点关节={np.round(middle_joints, 4).tolist()}",
+                            flush=True,
+                        )
+                        motion_planner.move_left_joints(
+                            middle_joints,
+                            planner="rrtstar",
+                        )
+                        wait_for_left_joint_target(
+                            args.arm_host,
+                            middle_joints,
+                            label="左臂反抓中间位",
+                        )
+                        # This hold check is deliberately adjacent to the final
+                        # middle -> graspup_top motion, so a dropped object is
+                        # never carried into the placement trajectory.
+                        if not gripper_holds_object("从反抓中间位移动到graspup_top"):
+                            return
+                        motion_planner.set_next_plan_context(
+                            "left_reverse_grasp_middle", "left_graspup_top"
+                        )
+                        print(
+                            "[运动线程] 正在 RRTStar 从左臂反抓中间位到 graspup_top",
+                            flush=True,
+                        )
+                        motion_planner.move_left_joints(
+                            GRASPUP_ABOVE_JOINTS_DEG,
+                            planner="rrtstar",
+                        )
+                        wait_for_left_joint_target(
+                            args.arm_host,
+                            GRASPUP_ABOVE_JOINTS_DEG,
+                            label="graspup_top",
+                        )
+                        approach_reached.set()
+                        print(
+                            "[运动线程] 已从左臂反抓中间位到达 graspup_top；"
+                            f"规划剩余等待上限={GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s",
+                            flush=True,
+                        )
+                        return
+
                     if not gripper_holds_object("从观察位回graspup"):
                         return
                     motion_planner.set_next_plan_context(
@@ -869,7 +994,7 @@ def main() -> int:
                     wait_for_left_graspup(args.arm_host)
                     response = motion_planner.lookup_transform(
                         "body_base",
-                        "left_hand_transfer_end",
+                        left_placement_frame,
                     )
                     if response is None:
                         raise RuntimeError("规划器没有返回 graspup 末端位姿")
@@ -968,7 +1093,7 @@ def main() -> int:
                 recovery = PlannerRuntime(planner_cfg)
                 try:
                     recovery.open(
-                        required_frames={"body_base", "left_hand_transfer_end"}
+                        required_frames={"body_base", left_placement_frame}
                     )
                     recovery.config = replace(
                         recovery.config,
@@ -985,7 +1110,7 @@ def main() -> int:
                     wait_for_left_graspup(args.arm_host)
                     response = recovery.lookup_transform(
                         "body_base",
-                        "left_hand_transfer_end",
+                        left_placement_frame,
                     )
                     if response is None:
                         raise RuntimeError("规划器没有返回 graspup 末端位姿")
@@ -1054,18 +1179,18 @@ def main() -> int:
                                 f"到达 graspup_top 失败: {approach_errors[0]}"
                             ) from approach_errors[0]
                         raise RuntimeError("到达 graspup_top 前运动线程已结束")
-            response = planner.lookup_transform("body_base", "left_hand_transfer_end")
+            response = planner.lookup_transform("body_base", left_placement_frame)
             if response is None:
                 raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
             direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
             planning_scheduler_log["direct_orientation_source"] = (
-                "body_base_T_left_hand_transfer_end_at_graspup_top"
+                f"body_base_T_{left_placement_frame}_at_graspup_top"
             )
             planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
                 direct_tool_rotation
             ).as_euler("xyz", degrees=True).tolist()
             print(
-                "[直接放置] 保持 graspup_top left_hand_transfer_end RPY="
+                f"[直接放置] 保持 graspup_top {left_placement_frame} RPY="
                 f"{np.round(planning_scheduler_log['direct_tool_rpy_deg'], 3).tolist()}",
                 flush=True,
             )
@@ -1080,7 +1205,7 @@ def main() -> int:
             candidate_planner = PlannerRuntime(planner_cfg)
             try:
                 candidate_planner.open(
-                    required_frames={"body_base", "left_hand_transfer_end"}
+                    required_frames={"body_base", left_placement_frame}
                 )
                 response = candidate_planner.plan_cartesian_pose(
                     "left",
@@ -1217,9 +1342,10 @@ def main() -> int:
                                     raise RuntimeError("direct place 缺少 graspup_top 末端旋转")
                                 target_tool = np.eye(4)
                                 target_tool[:3, :3] = direct_tool_rotation
-                                # p_object = p_tool + R_tool * t_tool_object；补偿后配置
-                                # 的 xyz 精确表示工件中心，而不是末端原点。
+                                # DIRECT-only uses a calibrated TCP point, not an
+                                # absent/guessed ICP object-to-tool transform.
                                 target_tool[:3, 3] = (
+                                    xyz if spec.get("fixed_tool_target") else
                                     xyz - direct_tool_rotation @ T_tool_object[:3, 3]
                                 )
                                 target_object = target_tool @ T_tool_object
@@ -1251,12 +1377,20 @@ def main() -> int:
                                 "object_local_roll_index": roll_index,
                                 "object_local_pitch_deg": pitch,
                                 "object_local_pitch_index": pitch_index,
-                                "target_object_xyz": xyz.tolist(),
+                                "target_object_xyz": (
+                                    None if spec.get("fixed_tool_target") else xyz.tolist()
+                                ),
                                 "target_tool_xyz": target_tool[:3, 3].tolist(),
                                 "placement_point": {
                                     "frame_id": "body_base",
-                                    "object_xyz_m": xyz.tolist(),
+                                    "object_xyz_m": (
+                                        None if spec.get("fixed_tool_target") else xyz.tolist()
+                                    ),
                                     "tool_xyz_m": target_tool[:3, 3].tolist(),
+                                    "target_kind": (
+                                        "fixed_left_eef"
+                                        if spec.get("fixed_tool_target") else "object_center"
+                                    ),
                                 },
                                 "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
                                 "planning_submission_order": planning_submission_count + 1,
@@ -1286,7 +1420,7 @@ def main() -> int:
                                     "planning_inflight_at_rejection": len(in_flight),
                                     "error": (
                                         "目标末端约束不满足："
-                                        "left_hand_transfer_end +Z 在 body_base 的 "
+                                        f"{left_placement_frame} +Z 在 body_base 的 "
                                         "Z 投影必须为负"
                                     ),
                                     "target_tool_positive_z_in_body_base": (
@@ -1300,7 +1434,7 @@ def main() -> int:
                                 append_placement_trace(rejected_attempt)
                                 print(
                                     "[跳过放置候选] "
-                                    "left_hand_transfer_end +Z="
+                                    f"{left_placement_frame} +Z="
                                     f"{np.round(target_tool[:3, 2], 6).tolist()}, "
                                     f"body_base Z投影={target_tool[2, 2]:+.6f}（必须<0）",
                                     flush=True,
@@ -1460,19 +1594,19 @@ def main() -> int:
                                 ) from approach_errors[0]
                             raise RuntimeError("到达 graspup_top 前运动线程已结束")
                 response = planner.lookup_transform(
-                    "body_base", "left_hand_transfer_end"
+                    "body_base", left_placement_frame
                 )
                 if response is None:
                     raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
                 direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
                 planning_scheduler_log["direct_orientation_source"] = (
-                    "body_base_T_left_hand_transfer_end_at_graspup_top"
+                    f"body_base_T_{left_placement_frame}_at_graspup_top"
                 )
                 planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
                     direct_tool_rotation
                 ).as_euler("xyz", degrees=True).tolist()
                 direct_target_z = validate_increasing_candidates(
-                    "[direct place].target_z_candidates_m",
+                    "[direct object place].target_z_candidates_m",
                     direct_spec["target_z"],
                 )
                 direct_release_z = list(direct_spec["release_z"])
@@ -1533,7 +1667,7 @@ def main() -> int:
                             "rejected_before_planning": True,
                             "planning_inflight_at_rejection": 0,
                             "error": (
-                                "目标末端约束不满足：left_hand_transfer_end +Z "
+                                f"目标末端约束不满足：{left_placement_frame} +Z "
                                 "在 body_base 的 Z 投影必须为负"
                             ),
                             "target_tool_positive_z_in_body_base": (
@@ -1641,7 +1775,7 @@ def main() -> int:
             if tool_z_rejected_count and planning_submission_count == 0:
                 raise RuntimeError(
                     "全部放置候选均不满足末端朝下约束："
-                    "left_hand_transfer_end +Z 在 body_base 的 Z 投影必须<0"
+                    f"{left_placement_frame} +Z 在 body_base 的 Z 投影必须<0"
                 )
             raise RuntimeError("全部 XY/Z/yaw/局部X候选均规划失败")
 
@@ -1719,21 +1853,25 @@ def main() -> int:
                 return 0
             planner.execute_planned_result(selected_plan)
 
+        fixed_left_eef_target = direct_only_without_inspect
         selected_object = np.eye(4)
         selected_object[:3, :3] = Rotation.from_quat(
             selected["target_object_pose"]["orientation_xyzw"]
         ).as_matrix()
         selected_object[:3, 3] = selected["target_object_pose"]["position"]
         selected_object_z = float(selected_object[2, 3])
+        selected_tool_z = float(selected["target_tool_pose"]["position"][2])
         active_release_z = [
             float(value)
             for value in release_z_candidates
-            if float(value) <= selected_object_z + 1e-9
+            if float(value) <= (
+                selected_tool_z if fixed_left_eef_target else selected_object_z
+            ) + 1e-9
         ]
         release_motion_required = bool(release_z_candidates)
         if release_motion_required and not active_release_z:
             raise RuntimeError(
-                "松爪 Z 候选中没有不高于已选放置 Z 的候选"
+                "松爪 Z 候选中没有不高于已选放置目标 Z 的候选"
             )
         release_attempts = []
         release_succeeded = not release_motion_required
@@ -1752,7 +1890,12 @@ def main() -> int:
             }
             release_attempts.append(record)
             append_placement_trace(record)
-            print("[松爪位] release_z_candidates_m=[]；跳过第二段 LIN，直接松爪。", flush=True)
+            release_frame = "left_eef" if fixed_left_eef_target else "object_center"
+            print(
+                f"[松爪位] {release_frame} release_z_candidates_m=[]；"
+                "跳过第二段 LIN，直接松爪。",
+                flush=True,
+            )
         elif not args.skip_motion:
             confirm_motion(
                 args,
@@ -1760,17 +1903,30 @@ def main() -> int:
                 "按回车开始...",
             )
         for release_z in active_release_z:
-            release_object = selected_object.copy()
-            release_object[2, 3] = release_z
-            release_tool = release_object @ np.linalg.inv(T_tool_object)
+            if fixed_left_eef_target:
+                release_object = None
+                release_tool = target_tool.copy()
+                release_tool[2, 3] = release_z
+            else:
+                release_object = selected_object.copy()
+                release_object[2, 3] = release_z
+                release_tool = release_object @ np.linalg.inv(T_tool_object)
             record = {
                 "record_type": "release_descent",
                 "placement_point": {
                     "frame_id": "body_base",
-                    "object_xyz_m": release_object[:3, 3].tolist(),
+                    "object_xyz_m": (
+                        None if release_object is None else release_object[:3, 3].tolist()
+                    ),
                     "tool_xyz_m": release_tool[:3, 3].tolist(),
+                    "target_kind": (
+                        "fixed_left_eef" if fixed_left_eef_target else "object_center"
+                    ),
                 },
-                "object_z_m": release_z,
+                "release_z_m": release_z,
+                "release_z_frame": (
+                    "left_eef" if fixed_left_eef_target else "object_center"
+                ),
                 "target_tool_xyz": release_tool[:3, 3].tolist(),
                 "succeeded": False,
                 "error": None,

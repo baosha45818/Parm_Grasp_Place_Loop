@@ -1,5 +1,5 @@
 {
-  "reference_color_size_wh": [1280, 720],
-  "safe_roi_xywh": [0, 180, 760, 540],
-  "description": "Left-to-central tabletop work zone in the 1280x720 head RGB image. This is the former 848x480 ROI mapped by the same normalized bounds: x=0..760 and y=180..720."
+  "reference_color_size_wh": [848, 480],
+  "safe_roi_polygon_px": [[181, 128], [500, 128], [504, 170], [504, 245], [511, 286], [511, 374], [524, 462], [488, 462], [420, 466], [287, 466], [175, 458], [90, 458], [120, 330], [170, 205]],
+  "description": "Calibrated left-side Buffer tabletop work zone in the 848x480 head RGB image, following the red annotated boundary. Coordinates are scaled to the captured RGB resolution before use."
 }

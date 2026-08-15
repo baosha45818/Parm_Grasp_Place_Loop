@@ -107,7 +107,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples-dir", type=Path, required=True)
     parser.add_argument("--live", action="store_true", help="also read the current SDK/Planner pose; read-only")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="localhost")
     parser.add_argument("--planner-trajectory-port", type=int, default=5605)
     parser.add_argument("--planner-tf-port", type=int, default=5614)

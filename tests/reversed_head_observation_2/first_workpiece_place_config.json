@@ -2,10 +2,10 @@
   "schema_version": 1,
   "strategy": "reuse_first_workpiece_module9_force_servo",
   "right_place_ready_joints_deg": [
-    102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196
+    22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054
   ],
   "module9_initial_right_joints_deg": [
-    22.43, 23.33, 0.52, 66.99, -62.20, -64.44, 25.51
+    22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054
   ],
   "module9_planner_config": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/config.hole_a_first_live_fast_return.json",
   "right_idle_pose": "/home/dainanjun/zhuyiming/push_T/saved_poses/3.json",

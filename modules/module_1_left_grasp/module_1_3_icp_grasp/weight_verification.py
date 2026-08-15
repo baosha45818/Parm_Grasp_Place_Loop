@@ -26,7 +26,7 @@ class WeightQualityRejected(RuntimeError):
 
 @dataclass(frozen=True)
 class WeightCheckConfig:
-    host: str = "127.0.0.1"
+    host: str = "192.168.3.22"
     hand: int = 1
     samples: int = 31
     timeout_s: float = 3.0

@@ -1,7 +1,7 @@
 {
   "status": "ACCEPTED_COMPOSED",
   "transform_convention": "p_body_base = T_body_base_head_camera @ p_head_camera",
-  "camera": "Intel RealSense D435i, serial 261222076212, 848x480",
+  "camera": "Intel RealSense D435i, serial 261722072445, 848x480",
   "head_pose_deg": {"pitch": 38.5, "yaw": 0.0},
   "source": "/home/dainanjun/zhuyiming/calibration/output/sdk_base_alignment/sdk_base_to_planner_alignment.json",
   "composition": "T_body_base_head_camera = T_body_base_sdk_base @ T_sdk_base_head_camera",

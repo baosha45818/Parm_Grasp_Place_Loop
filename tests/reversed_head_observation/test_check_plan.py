@@ -78,13 +78,13 @@ class PlanValidationTests(unittest.TestCase):
     def test_task_busy_error_is_runtime_error(self):
         self.assertTrue(issubclass(TaskBusyError, RuntimeError))
 
-    def test_observation_hold_gate_requires_gripping_and_opening(self):
+    def test_observation_hold_gate_accepts_settled_or_active_grasp(self):
         self.assertTrue(
             left_gripper_holds_object(
                 {"motion_state": "gripping", "position": 20.1}, 20.0
             )
         )
-        self.assertFalse(
+        self.assertTrue(
             left_gripper_holds_object(
                 {"motion_state": "arrived", "position": 55.0}, 20.0
             )
@@ -159,9 +159,9 @@ class PlanValidationTests(unittest.TestCase):
         )
         self.assertEqual(result["goal_error_deg"], 0.0)
 
-    def test_head_feedback_accounts_for_sdk_pitch_sign(self):
+    def test_head_feedback_uses_current_sdk_pitch_sign(self):
         state = {
-            "pitch": {"position": -HEAD_TARGET_DEG["pitch"]},
+            "pitch": {"position": HEAD_TARGET_DEG["pitch"]},
             "yaw": {"position": HEAD_TARGET_DEG["yaw"]},
         }
         self.assertTrue(head_target_reached(state))

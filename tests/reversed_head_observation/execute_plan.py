@@ -293,7 +293,13 @@ def left_gripper_holds_object(state: object, position_min_percent: float) -> boo
         position = float(state.get("position"))
     except (TypeError, ValueError):
         return False
-    return motion_state == "gripping" and position > float(position_min_percent)
+    # The field controller reports ``arrived`` after a close command has
+    # settled against a workpiece.  Retain the opening threshold so a fully
+    # closed empty gripper is not accepted as holding an object.
+    return (
+        motion_state in {"gripping", "arrived"}
+        and position > float(position_min_percent)
+    )
 
 
 def read_left_gripper_hold(
@@ -309,7 +315,7 @@ def read_left_gripper_hold(
         "[观察位夹爪复检] "
         f"motion_state={state.get('motion_state')!r} "
         f"position={state.get('position')!r} held={held} "
-        f"(要求 gripping 且 position > {position_min_percent:.1f}%)",
+        f"(要求 gripping/arrived 且 position > {position_min_percent:.1f}%)",
         flush=True,
     )
     return held, state
@@ -379,8 +385,8 @@ def head_target_reached(
     pitch = state.get("pitch") or {}
     yaw = state.get("yaw") or {}
     try:
-        # 当前 SDK 下发 pitch 前会取反，但状态读取没有把符号转回来。
-        expected_pitch_feedback = -float(HEAD_TARGET_DEG["pitch"])
+        # parm_sdk 20260811 的状态和 move_to() 使用同一命令坐标系。
+        expected_pitch_feedback = float(HEAD_TARGET_DEG["pitch"])
         return (
             abs(float(pitch["position"]) - expected_pitch_feedback) <= tolerance_deg
             and abs(float(yaw["position"]) - float(HEAD_TARGET_DEG["yaw"]))
@@ -436,7 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--driver-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument("--speed", type=float, default=0.05)
     parser.add_argument("--auto-confirm", action="store_true")

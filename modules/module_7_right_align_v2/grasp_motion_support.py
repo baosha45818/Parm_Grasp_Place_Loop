@@ -24,8 +24,15 @@ import time
 PUSH_T_DIR = Path(__file__).resolve().parent
 if str(PUSH_T_DIR) not in sys.path:
     sys.path.insert(0, str(PUSH_T_DIR))
+LOOP_ROOT = PUSH_T_DIR.parents[2]
+if str(LOOP_ROOT) not in sys.path:
+    sys.path.insert(0, str(LOOP_ROOT))
 
-from move_by_eef_pose import compose_pose, inverse_pose, pose_from_lookup_transform, rotate_vector
+from tool.planner_task_retry import retry_task_creation
+from move_by_eef_pose import (
+    compose_pose, inverse_pose, planner_relative_pose, pose_from_lookup_transform,
+    rotate_vector,
+)
 from move_by_joints import (
     ensure_ready, finite, import_sdk, move_l as servo_move_l,
     rotvec_to_quat, rotvec_to_rpy, rpy_to_rotvec,
@@ -35,7 +42,8 @@ from planning_log import planner_start_pose, planning_event
 
 DEFAULT_LINE_ENTRY_CLEARANCE_M = 0.020
 DEFAULT_LINE_MAX_REAR_DISTANCE_M = 0.060
-RIGHT_EEF_FROM_TRANSFER_BASE = [0.274, 0.0, -0.05075, 0.0, 0.0, 0.0]
+DRIVER_EEF_FRAME = "right_hand_transfer_base"
+RIGHT_EEF_FRAME = "right_eef"
 DEFAULT_Q1_XY_TOLERANCE_M = 0.0005
 DEFAULT_Q1_Z_TOLERANCE_M = 0.0005
 DEFAULT_Q1_PITCH_TOLERANCE_RAD = math.radians(0.1)
@@ -336,10 +344,13 @@ def can_plan_target(
         "ik_pose_xyz_rotvec": target_for_ik,
     }
     try:
-        result = planner.plan_cart_trajectory(
-            group=group, planner=planner_kind, frame_id=frame_id, ik_frame=ik_frame,
-            position=target_for_ik[:3], orientation=rotvec_to_quat(target_for_ik[3:]),
-            max_vel=max_vel, max_acc=max_acc, timeout=timeout_s,
+        result = retry_task_creation(
+            lambda: planner.plan_cart_trajectory(
+                group=group, planner=planner_kind, frame_id=frame_id, ik_frame=ik_frame,
+                position=target_for_ik[:3], orientation=rotvec_to_quat(target_for_ik[3:]),
+                max_vel=max_vel, max_acc=max_acc, timeout=timeout_s,
+            ),
+            label=f"右臂 {planner_kind.upper()} 可达性预检",
         )
         data = result.get("data") or {}
         trajectory, planned_arm_id = data.get("trajectory"), data.get("arm_id")
@@ -440,9 +451,9 @@ def parse_args() -> argparse.Namespace:
         "--tcp-yaw-toward-workpiece-y-deg", type=float, default=-3.0,
         help="TCP 相对工件的本地 +Z 偏转（度；默认 -3）",
     )
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
-    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
     parser.add_argument("--planner", choices=("ompl",), default="ompl", help="固定使用 table-aware RRTConnect")
     parser.add_argument("--final-approach-mode", choices=("servo", "rrt"), default="servo",
@@ -520,7 +531,6 @@ def main() -> int:
         # right_eef is a native planner frame; its target pose needs no
         # application-level virtual-TCP conversion.
         tcp_offset = [0.0] * 6
-        servo_eef_offset = RIGHT_EEF_FROM_TRANSFER_BASE
         correction = [0.0] * 3
     except ValueError as exc:
         print(f"错误: {exc}", file=sys.stderr)
@@ -576,7 +586,15 @@ def main() -> int:
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         gripper = sdk.Gripper(host=args.gripper_host)
-        group, ik_frame = "right_arm", "right_eef"
+        group, ik_frame = "right_arm", RIGHT_EEF_FRAME
+        servo_eef_offset = planner_relative_pose(
+            planner, args.frame_id, DRIVER_EEF_FRAME, RIGHT_EEF_FRAME,
+        )
+        print(
+            "规划器 TF right_hand_transfer_base→right_eef="
+            f"{[round(value, 6) for value in servo_eef_offset]}；"
+            "Servo 使用该实时变换。"
+        )
         set_gripper_state(gripper, arm_id=args.arm_id, target_open=True, timeout_s=args.gripper_timeout_s, tolerance=args.gripper_position_tolerance)
 
         start_tcp = compose_pose(pose_from_lookup_transform(planner.lookup_transform(args.frame_id, ik_frame).get("data")), tcp_offset)

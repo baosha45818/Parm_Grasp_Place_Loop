@@ -28,7 +28,7 @@ export GRASPNET_V7_SOCKET="$V7_GRASPNET_SOCKET"
 export GRASPNET_V7_CAMERA_SOCKET="$V7_CAMERA_SOCKET"
 # Module 2 reads the broker path from this canonical client-side setting.
 export CAMERA_BROKER_SOCKET="$V7_CAMERA_SOCKET"
-export GRASPNET_V7_ARM_HOST="${GRASPNET_V7_ARM_HOST:-192.168.88.1}"
+export GRASPNET_V7_ARM_HOST="${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.3.11}}"
 export GRASPNET_V7_ARM_ID="${GRASPNET_V7_ARM_ID:-1}"
 export GRASPNET_V7_D405_POSTPROCESS="${GRASPNET_V7_D405_POSTPROCESS:-1}"
 export GRASPNET_V7_D405_HOLE_FILLING="${GRASPNET_V7_D405_HOLE_FILLING:-1}"
@@ -263,10 +263,13 @@ run_module_2() {
   if [[ "${LOOP_AUTO_CONFIRM_MOTION:-0}" == "1" ]]; then
     placement_gate_args+=(--auto-confirm-motion)
   fi
+  if [[ "${PARM_LOOP_SKIP_INSPECT_DIRECT:-0}" == "1" ]]; then
+    placement_gate_args+=(--skip-inspect-direct)
+  fi
   cd "$LOOP_ROOT"
   "$LOOP_ROOT/.venv/bin/python" "$MODULE2_SCRIPT" \
     --planner-host "${PARM_PLANNER_HOST:-127.0.0.1}" \
-    --arm-host "${GRASPNET_V7_ARM_HOST:-192.168.88.1}" \
+    --arm-host "${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.3.11}}" \
     --gripper-host "${PARM_GRIPPER_HOST:-127.0.0.1}" \
     --workpiece "$PARM_LOOP_WORKPIECE" \
     --weight-handoff-file "$V7_HANDOFF_FILE" \

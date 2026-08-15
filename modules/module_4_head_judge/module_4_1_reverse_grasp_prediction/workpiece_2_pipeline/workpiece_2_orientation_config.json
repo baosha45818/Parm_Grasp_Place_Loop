@@ -3,7 +3,6 @@
   "stl": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/workpiece_2/workpiece_2.stl",
   "positive_face_normal_stl": [0.0, 0.0, 1.0],
   "positive_face_definition": "The physical positive/non-reverse tabletop face has STL +Z towards the camera. For the confirmed tabletop reverse, STL +Z (= documented workpiece +Z) points into the table and STL -Z faces the camera.",
-  "minimum_score_margin_m": 0.00035,
   "minimum_reverse_icp_fitness": 0.5,
   "minimum_reverse_depth_match_fraction": 0.43,
   "reverse_full_6d_global_seeds": 16,

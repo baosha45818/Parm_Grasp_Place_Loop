@@ -39,6 +39,11 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 ```text
 <capture-dir>/sam2_masks/tabletop_orientation_result.json
+
+桌面候选区域由 `module_4_1_reverse_grasp_prediction/workpiece_2_pipeline/config/tabletop_workspace.json`
+中的 `safe_roi_polygon_px` 定义为随分辨率缩放的桌面多边形。它同时约束深度种子、
+SAM2 输出和负提示，以排除桌外地面；只有离线调试时才使用
+`sam2_tabletop_masks.py --roi X Y W H` 的矩形覆盖。
 ```
 
 ## Python 接口

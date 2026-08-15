@@ -11,7 +11,7 @@ plucky planned-trajectory execution endpoint; no ``start_servo_pose`` or
 The bridge calibration maps a deployment plan (``base`` -> ``eef_pose``) into
 its captured arm-flange frames.  At runtime the script then uses Planner TF to
 extend that result to the actual Cartesian IK TCP (normally
-``body_base`` -> ``left_hand_tool_end_link``):
+``body_base`` -> ``left_hand_transfer_end``):
 
     T_planner_base_planner_tool = T_planner_base_base
                                   @ T_base_eef
@@ -44,9 +44,23 @@ HERE = Path(__file__).resolve()
 ROOT = HERE.parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+
+def _allow_right_hand_tall_contact() -> bool:
+    """Return whether this loop is inside Module 9's expected contact window."""
+    marker = os.environ.get("PARM_RIGHT_SERVO_TALL_CONTACT_FILE")
+    return bool(marker) and Path(marker).is_file()
+
+
+def _with_right_hand_tall_contact(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add the narrow request-local ACM exception only while Module 9 is active."""
+    if _allow_right_hand_tall_contact():
+        payload["allow_right_hand_tall_contact"] = True
+    return payload
 LOOP_ROOT = Path(os.environ.get("PARM_LOOP_ROOT", str(HERE.parents[4])))
 if str(LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(LOOP_ROOT))
+from tool.planner_task_retry import retry_task_creation
 # Use the SDK installed in the GraspNet virtualenv.  In particular, do not
 # prepend runtime/parm_sdk's archived 20260717 wheel: it speaks the legacy
 # gripper protocol and maps schema-3 left_gripper/right_gripper states to None.
@@ -235,6 +249,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     group.add_argument("--planner-execute-url", default=DEFAULT_EXECUTE_URL)
     group.add_argument("--planner-bridge-calibration", default=str(DEFAULT_BRIDGE))
+    group.add_argument(
+        "--planner-direct-pose", action="store_true",
+        help=(
+            "Plan poses already expressed in --planner-base-frame directly. "
+            "No planner_tf_bridge calibration is loaded or applied."
+        ),
+    )
     group.add_argument(
         "--planner-base-frame", default="body_base",
         help="Planner Cartesian reference frame; must match the Planner motion configuration.",
@@ -455,6 +476,11 @@ def _finite_transform(value: Any, label: str) -> np.ndarray:
 
 
 def load_bridge(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray, str, str]:
+    if bool(getattr(args, "planner_direct_pose", False)):
+        # Direct Planner calibration path: the caller has already expressed
+        # the desired IK-frame pose in planner_base_frame.  Do not read a
+        # legacy SDK-to-Planner bridge file.
+        return np.eye(4), np.eye(4), args.planner_base_frame, args.planner_tool_frame
     path = Path(args.planner_bridge_calibration)
     if not path.exists():
         raise RuntimeError(
@@ -518,6 +544,8 @@ def planner_target_transforms(
     planner: Any, args: argparse.Namespace, bridge_base_frame: str, bridge_tool_frame: str
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return fixed transforms bracketing the dynamic bridge tool pose."""
+    if bool(getattr(args, "planner_direct_pose", False)):
+        return np.eye(4), np.eye(4)
     planning_base_bridge_base = _planner_lookup_target_source(
         planner, bridge_base_frame, args.planner_base_frame
     )
@@ -530,8 +558,13 @@ def planner_target_transforms(
 def deployment_pose_to_planner_pose(
     pose: Sequence[float], bridge_base: np.ndarray, bridge_tool: np.ndarray,
     planning_base_bridge_base: np.ndarray, bridge_tool_planning_tool: np.ndarray,
-    *, direct_grasp_center: bool = False,
+    *, direct_grasp_center: bool = False, direct_pose: bool = False,
 ) -> tuple[list[float], list[float]]:
+    if direct_pose:
+        values = np.asarray(pose, dtype=np.float64)
+        if values.shape != (6,) or not np.all(np.isfinite(values)):
+            raise RuntimeError("direct Planner pose must contain six finite xyz/rotation-vector values")
+        return values[:3].tolist(), Rotation.from_rotvec(values[3:]).as_quat().tolist()
     # In direct-center mode ``pose`` is already the desired pose of the
     # Planner IK frame (left_eef), expressed in the legacy SDK base.  Only the
     # fixed base-frame alignment is needed.  Applying bridge_tool or
@@ -575,6 +608,8 @@ def _validate_planner_args(args: argparse.Namespace) -> None:
         raise RuntimeError(
             "--planner-direct-grasp-center requires --planner-tool-frame left_eef"
         )
+    if bool(getattr(args, "planner_direct_pose", False)) and not bool(getattr(args, "planner_direct_grasp_center", False)):
+        raise RuntimeError("--planner-direct-pose requires --planner-direct-grasp-center")
 
 
 def resolve_planner_tool_frame(args: argparse.Namespace, frame_ids: Sequence[str]) -> str:
@@ -608,21 +643,22 @@ def plan_cartesian(
     position, orientation = deployment_pose_to_planner_pose(
         pose, bridge_base, bridge_tool, planning_base_bridge_base, bridge_tool_planning_tool,
         direct_grasp_center=bool(getattr(args, "planner_direct_grasp_center", False)),
+        direct_pose=bool(getattr(args, "planner_direct_pose", False)),
     )
     print(f"-> Planner {mode.upper()} {label}: frame={args.planner_base_frame}, xyz={np.round(position, 4).tolist()}")
-    if mode == "rrtstar":
+    if mode == "rrtstar" or _allow_right_hand_tall_contact():
         # Match PlannerRuntime, used by the rest of the Loop.  The Parm SDK's
         # public Cartesian helper rejects "rrtstar", but the ordinary 5604
         # Planner exposes this named pipeline.  Use exactly one normal cart
         # waypoint; the server performs IK and collision-checked joint-space
         # RRTstar planning to the pregrasp pose.
-        result = planner._trajectory.send_payload(
-            {
+        def request_with_collision_policy() -> dict[str, Any]:
+            payload = {
                 "waypoints": [{
-                    "name": "graspnet_rrtstar_pregrasp",
+                    "name": f"graspnet_{mode}_pregrasp",
                     "type": "cart",
                     "group": args.planner_group,
-                    "planner": "rrtstar",
+                    "planner": mode,
                     "max_velocity_scaling_factor": float(args.planner_max_vel),
                     "max_acceleration_scaling_factor": float(args.planner_max_acc),
                     "frame_id": args.planner_base_frame,
@@ -636,19 +672,28 @@ def plan_cartesian(
                     "final_phase_ratio": 0.05,
                     "final_phase_oversample": 2.0,
                 },
-            },
-            timeout=30.0,
+            }
+            return planner._trajectory.send_payload(
+                _with_right_hand_tall_contact(payload), timeout=30.0
+            )
+
+        result = retry_task_creation(
+            request_with_collision_policy,
+            label=f"GraspNet {label} {mode.upper()} 笛卡尔规划",
         )
     else:
-        result = planner.plan_cart_trajectory(
-            group=args.planner_group,
-            planner=mode,
-            frame_id=args.planner_base_frame,
-            ik_frame=args.planner_tool_frame,
-            position=position,
-            orientation=orientation,
-            max_vel=float(args.planner_max_vel),
-            max_acc=float(args.planner_max_acc),
+        result = retry_task_creation(
+            lambda: planner.plan_cart_trajectory(
+                group=args.planner_group,
+                planner=mode,
+                frame_id=args.planner_base_frame,
+                ik_frame=args.planner_tool_frame,
+                position=position,
+                orientation=orientation,
+                max_vel=float(args.planner_max_vel),
+                max_acc=float(args.planner_max_acc),
+            ),
+            label=f"GraspNet {label} {mode.upper()} 笛卡尔规划",
         )
     return validate_trajectory(result, label)
 
@@ -677,14 +722,15 @@ def plan_cartesian_from_joint_state(
     position, orientation = deployment_pose_to_planner_pose(
         pose, bridge_base, bridge_tool, planning_base_bridge_base, bridge_tool_planning_tool,
         direct_grasp_center=bool(getattr(args, "planner_direct_grasp_center", False)),
+        direct_pose=bool(getattr(args, "planner_direct_pose", False)),
     )
     print(
         f"-> Planner offline {mode.upper()} {label}: "
         f"start(deg)={np.round(values, 3).tolist()}, "
         f"frame={args.planner_base_frame}, xyz={np.round(position, 4).tolist()}"
     )
-    result = planner._trajectory.send_payload(
-        {
+    def request_offline() -> dict[str, Any]:
+        payload = {
             "start_state": {
                 "joint_names": LEFT_JOINT_NAMES,
                 "joint_values": values,
@@ -707,8 +753,14 @@ def plan_cartesian_from_joint_state(
                 "final_phase_ratio": 0.05,
                 "final_phase_oversample": 2.0,
             },
-        },
-        timeout=30.0,
+        }
+        return planner._trajectory.send_payload(
+            _with_right_hand_tall_contact(payload), timeout=30.0
+        )
+
+    result = retry_task_creation(
+        request_offline,
+        label=f"GraspNet {label} {mode.upper()} 离线笛卡尔规划",
     )
     return validate_trajectory(result, label)
 
@@ -718,22 +770,25 @@ def plan_joint(planner: Any, args: argparse.Namespace, joints: Sequence[float], 
     if len(values) != 7 or not all(math.isfinite(value) for value in values):
         raise RuntimeError(f"{label} must contain seven finite joint values")
     print(f"-> Planner RRTStar {label}: joints(deg)={np.round(values, 3).tolist()}")
-    result = planner._trajectory.send_payload({
-        "waypoints": [{
-            "name": f"graspnet_{label}_rrtstar",
-            "type": "joint",
-            "group": args.planner_group,
-            "planner": "rrtstar",
-            "max_velocity_scaling_factor": float(args.planner_max_vel),
-            "max_acceleration_scaling_factor": float(args.planner_max_acc),
-            "joint_names": LEFT_JOINT_NAMES,
-            "joint_values": values,
-        }],
-        "topp": {
-            "max_vel_factor": float(args.planner_max_vel),
-            "max_acc_factor": float(args.planner_max_acc),
-        },
-    }, timeout=30.0)
+    result = retry_task_creation(
+        lambda: planner._trajectory.send_payload(_with_right_hand_tall_contact({
+            "waypoints": [{
+                "name": f"graspnet_{label}_rrtstar",
+                "type": "joint",
+                "group": args.planner_group,
+                "planner": "rrtstar",
+                "max_velocity_scaling_factor": float(args.planner_max_vel),
+                "max_acceleration_scaling_factor": float(args.planner_max_acc),
+                "joint_names": LEFT_JOINT_NAMES,
+                "joint_values": values,
+            }],
+            "topp": {
+                "max_vel_factor": float(args.planner_max_vel),
+                "max_acc_factor": float(args.planner_max_acc),
+            },
+        }), timeout=30.0),
+        label=f"GraspNet {label} RRTSTAR 关节规划",
+    )
     return validate_trajectory(result, label)
 
 
@@ -933,6 +988,7 @@ def check_pregrasp_distance(args: argparse.Namespace, plan: dict[str, Any]) -> N
                 planning_base_bridge_base,
                 bridge_tool_planning_tool,
                 direct_grasp_center=True,
+                direct_pose=bool(getattr(args, "planner_direct_pose", False)),
             )
             current_tool = _planner_lookup_target_source(
                 planner, args.planner_tool_frame, args.planner_base_frame
@@ -943,9 +999,14 @@ def check_pregrasp_distance(args: argparse.Namespace, plan: dict[str, Any]) -> N
             f"{args.planner_base_frame}: {distance:.3f} m (limit {maximum:.3f} m)"
         )
         if distance > maximum:
+            calibration_hint = (
+                "the direct Planner wrist calibration and selected grasp"
+                if bool(getattr(args, "planner_direct_pose", False))
+                else "the bridge calibration and selected grasp"
+            )
             raise PregraspDistanceRejected(
                 "pregrasp target exceeds --max-grasp-distance-m; verify observation pose, "
-                "camera calibration, bridge calibration, and selected grasp before retrying"
+                f"camera calibration, {calibration_hint} before retrying"
             )
         return
 

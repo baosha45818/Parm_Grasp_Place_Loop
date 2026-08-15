@@ -82,9 +82,12 @@ class PlacementParameters:
     REVERSED_ROLL_CANDIDATES_DEG: list[float]
     REVERSED_PITCH_CANDIDATES_DEG: list[float]
     REVERSED_BASE_RPY_DEG: list[float]
-    DIRECT_PLACE_TARGET_OBJECT_XYZ_M: list[float] | None
-    DIRECT_PLACE_TARGET_Z_CANDIDATES_M: list[float] | None
-    DIRECT_PLACE_RELEASE_Z_CANDIDATES_M: list[float] | None
+    DIRECT_OBJECT_TARGET_XYZ_M: list[float]
+    DIRECT_OBJECT_TARGET_Z_CANDIDATES_M: list[float]
+    DIRECT_OBJECT_RELEASE_Z_CANDIDATES_M: list[float]
+    DIRECT_LEFT_EEF_TARGET_XYZ_M: list[float]
+    DIRECT_LEFT_EEF_TARGET_Z_CANDIDATES_M: list[float]
+    DIRECT_LEFT_EEF_RELEASE_Z_CANDIDATES_M: list[float]
 
 
 def _numbers(
@@ -120,9 +123,8 @@ def load_workpiece_parameters(workpiece: str) -> PlacementParameters:
     shared = _section(payload, "shared")
     front = _section(payload, "front")
     reversed_face = _section(payload, "reversed")
-    direct_place = payload.get("direct place")
-    if direct_place is not None and not isinstance(direct_place, dict):
-        raise ValueError("放置配置 [direct place] 分组无效")
+    direct_object_place = _section(payload, "direct object place")
+    direct_left_eef_place = _section(payload, "direct left eef place")
     convention = shared.get("rotation_convention")
     if convention != "local_rpy":
         raise ValueError(
@@ -131,9 +133,6 @@ def load_workpiece_parameters(workpiece: str) -> PlacementParameters:
     weights = shared.get("allowed_handoff_weight_classes")
     if not isinstance(weights, list) or not weights or not all(isinstance(v, str) for v in weights):
         raise ValueError("放置配置 allowed_handoff_weight_classes 必须是非空字符串列表")
-    if str(workpiece) == "1" and direct_place is None:
-        raise ValueError("工件1放置配置缺少 [direct place] 分组")
-
     return PlacementParameters(
         BODY_BASE_Z_FACE_SELECTION_MAX_ANGLE_DEG=float(
             shared["body_base_z_face_selection_max_angle_deg"]
@@ -161,16 +160,22 @@ def load_workpiece_parameters(workpiece: str) -> PlacementParameters:
         REVERSED_ROLL_CANDIDATES_DEG=_numbers(reversed_face, "roll_candidates_deg"),
         REVERSED_PITCH_CANDIDATES_DEG=_numbers(reversed_face, "pitch_candidates_deg"),
         REVERSED_BASE_RPY_DEG=_numbers(reversed_face, "base_rpy_deg", count=3),
-        DIRECT_PLACE_TARGET_OBJECT_XYZ_M=(
-            _numbers(direct_place, "target_object_xyz_m", count=3)
-            if direct_place is not None else None
+        DIRECT_OBJECT_TARGET_XYZ_M=_numbers(
+            direct_object_place, "target_object_xyz_m", count=3
         ),
-        DIRECT_PLACE_TARGET_Z_CANDIDATES_M=(
-            _numbers(direct_place, "target_z_candidates_m")
-            if direct_place is not None else None
+        DIRECT_OBJECT_TARGET_Z_CANDIDATES_M=_numbers(
+            direct_object_place, "target_z_candidates_m"
         ),
-        DIRECT_PLACE_RELEASE_Z_CANDIDATES_M=(
-            _numbers(direct_place, "release_z_candidates_m", allow_empty=True)
-            if direct_place is not None else None
+        DIRECT_OBJECT_RELEASE_Z_CANDIDATES_M=_numbers(
+            direct_object_place, "release_z_candidates_m", allow_empty=True
+        ),
+        DIRECT_LEFT_EEF_TARGET_XYZ_M=_numbers(
+            direct_left_eef_place, "target_left_eef_xyz_m", count=3
+        ),
+        DIRECT_LEFT_EEF_TARGET_Z_CANDIDATES_M=_numbers(
+            direct_left_eef_place, "target_z_candidates_m"
+        ),
+        DIRECT_LEFT_EEF_RELEASE_Z_CANDIDATES_M=_numbers(
+            direct_left_eef_place, "release_z_candidates_m", allow_empty=True
         ),
     )

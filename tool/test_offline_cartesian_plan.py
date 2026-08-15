@@ -17,7 +17,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="读取当前关节角作为离线 start_state，只请求笛卡尔规划，不执行。"
     )
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--arm-id", choices=(1, 2), type=int, default=1)
     parser.add_argument("--joint-unit", choices=("deg", "rad"), default="deg")

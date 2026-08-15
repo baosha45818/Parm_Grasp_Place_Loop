@@ -3,7 +3,7 @@
   "R_object_stl": [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
   "object_origin_stl_m": [0.0, 0.0, 0.0],
   "camera_role": "head_d435i",
-  "camera_serial": "261222076212",
+  "camera_serial": "261722072445",
   "color_width": 1280,
   "color_height": 720,
   "depth_width": 848,
@@ -33,4 +33,3 @@
   "quality_gate_enabled": false,
   "seed": 0
 }
-

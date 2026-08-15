@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+from planner_task_retry import retry_task_creation
+
 
 SDK_WHEEL = next(
     iter(sorted((Path(__file__).resolve().parents[1] / "runtime/parm_sdk").glob("parm_sdk-*.whl"), reverse=True)),
@@ -21,7 +23,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="左臂 RRTStar 到 graspup，再沿 body_base +Z 上移。"
     )
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--speed", type=float, default=0.1)
     parser.add_argument("--lift-m", type=float, default=0.10)
@@ -81,7 +83,10 @@ def main() -> None:
         }
         print("=== graspup 固定关节目标 ===")
         print(f"joint_values (deg) = {GRASPUP_JOINTS_DEG}")
-        joint_result = planner._trajectory.send_payload(joint_payload, timeout=30.0)
+        joint_result = retry_task_creation(
+            lambda: planner._trajectory.send_payload(joint_payload, timeout=30.0),
+            label="左臂 graspup RRTStar",
+        )
         joint_data = joint_result.get("data") or {}
         joint_trajectory = joint_data.get("trajectory") or []
         joint_frequency = float(joint_data.get("sample_frequency", 10.0))
@@ -146,7 +151,10 @@ def main() -> None:
                 }],
                 "topp": {"max_vel_factor": args.speed, "max_acc_factor": args.speed},
             }
-            lift_result = planner._trajectory.send_payload(lift_payload, timeout=30.0)
+            lift_result = retry_task_creation(
+                lambda: planner._trajectory.send_payload(lift_payload, timeout=30.0),
+                label="左臂 graspup 上方 RRTStar",
+            )
         else:
             lift_payload = {
                 "waypoints": [{
@@ -168,7 +176,10 @@ def main() -> None:
                     "final_phase_oversample": 2.0,
                 },
             }
-            lift_result = planner._trajectory.send_payload(lift_payload, timeout=30.0)
+            lift_result = retry_task_creation(
+                lambda: planner._trajectory.send_payload(lift_payload, timeout=30.0),
+                label="左臂 graspup 上方 RRTConnect",
+            )
 
         lift_data = lift_result.get("data") or {}
         lift_trajectory = lift_data.get("trajectory") or []

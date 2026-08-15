@@ -15,36 +15,46 @@ from __future__ import annotations
 
 import argparse
 import ast
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+import importlib
 import json
 import math
 import os
 from pathlib import Path
 import sys
 import time
+from typing import Any, TypeVar
 
 MODULE_ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = MODULE_ROOT.parents[2]
+RUNTIME_PYTHON = Path(os.environ.get(
+    "BUFFER_GRASP_PYTHON", str(PROJECT_ROOT / ".venv/bin/python"),
+))
+if not RUNTIME_PYTHON.is_file():
+    raise RuntimeError(f"buffer_grasp runtime is missing: {RUNTIME_PYTHON}")
+# The system Python may import an older user-site parm_sdk.  Re-exec through
+# this project venv so Arm/Gripper/Planner always use the deployment-matched
+# SDK bundled with the project.
+if Path(sys.executable).absolute() != RUNTIME_PYTHON.absolute():
+    os.execv(str(RUNTIME_PYTHON), [str(RUNTIME_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 PUSH_T_DIR = MODULE_ROOT
 if str(PUSH_T_DIR) not in sys.path:
     sys.path.insert(0, str(PUSH_T_DIR))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from move_by_eef_pose import compose_pose, inverse_pose, pose_from_lookup_transform, rotate_vector
-from move_by_joints import (
-    ensure_ready, finite, import_sdk, move_l as servo_move_l,
-    rotvec_to_quat, rotvec_to_rpy, rpy_to_rotvec,
-)
 from planning_log import planner_start_pose, planning_event
 
 
 DEFAULT_LINE_ENTRY_CLEARANCE_M = 0.020
 DEFAULT_LINE_MAX_REAR_DISTANCE_M = 0.060
-RIGHT_EEF_FROM_TRANSFER_BASE = [0.274, 0.0, -0.05075, 0.0, 0.0, 0.0]
+DRIVER_EEF_FRAME = "right_hand_transfer_base"
+RIGHT_EEF_FRAME = "right_eef"
 DEFAULT_Q1_XY_TOLERANCE_M = 0.0005
 DEFAULT_Q1_Z_TOLERANCE_M = 0.0005
 DEFAULT_Q1_PITCH_TOLERANCE_RAD = math.radians(0.1)
 DEFAULT_Q1_POST_GRASP_LIFT_M = (0.050, 0.040, 0.030, 0.020, 0.010)
-DEFAULT_SERVO_COLLISION_PRECHECK_STEP_M = 0.010
-SERVO_COLLISION_PRECHECK_PARALLELISM = 3
 RRTSTAR_TIMEOUT_S = 30.0
 Q1_DIRECT_PATH_UNAVAILABLE_EXIT_CODE = 20
 POSE_OUTPUT_ROOT = MODULE_ROOT.parents[2] / "output/module_4_2"
@@ -52,6 +62,317 @@ WORKPIECE_CONFIGS = {
     1: MODULE_ROOT / "configs/workpiece_1_grasp.toml",
     2: MODULE_ROOT / "configs/workpiece_2_grasp.toml",
 }
+
+
+# Self-contained copies of the helpers formerly imported from
+# move_by_eef_pose.py, move_by_joints.py and tool/planner_task_retry.py.
+# Keep this block here so this executable can be deployed without those files.
+ResultT = TypeVar("ResultT")
+TASK_CREATION_ATTEMPTS = 5
+TASK_CREATION_RETRY_DELAYS_S = (1.0, 2.0, 3.0, 5.0)
+TASK_CREATION_FAILURE_TEXT = "Failed to create planning task"
+
+
+def retry_task_creation(request: Callable[[], ResultT], *, label: str) -> ResultT:
+    """Retry only the planner's transient pre-IK task-allocation failures."""
+    for attempt in range(1, TASK_CREATION_ATTEMPTS + 1):
+        try:
+            return request()
+        except Exception as exc:
+            if TASK_CREATION_FAILURE_TEXT not in str(exc) or attempt == TASK_CREATION_ATTEMPTS:
+                raise
+            delay_s = TASK_CREATION_RETRY_DELAYS_S[attempt - 1]
+            print(
+                f"[planner] {label} 创建规划任务失败；{delay_s:.1f}s 后重试 "
+                f"{attempt + 1}/{TASK_CREATION_ATTEMPTS}", flush=True,
+            )
+            time.sleep(delay_s)
+    raise AssertionError("unreachable")
+
+
+def import_sdk() -> Any:
+    try:
+        return importlib.import_module("parm_sdk")
+    except ImportError:
+        override = os.environ.get("PARM_SDK_WHEEL", "").strip()
+        candidates = [Path(override)] if override else []
+        candidates.extend(sorted(Path("/home/dainanjun/Public/parm_sdk_1.0.0").glob("parm_sdk-*.whl"), reverse=True))
+        for wheel in candidates:
+            if wheel.is_file():
+                sys.path.insert(0, str(wheel))
+                try:
+                    return importlib.import_module("parm_sdk")
+                except ImportError:
+                    continue
+    raise ImportError("无法导入 parm_sdk；请安装 SDK 或设置 PARM_SDK_WHEEL。")
+
+
+def finite(values: Any, count: int, name: str) -> list[float]:
+    if not isinstance(values, (list, tuple)) or len(values) != count:
+        raise ValueError(f"{name} 必须恰好包含 {count} 个数。")
+    result = [float(value) for value in values]
+    if not all(math.isfinite(value) for value in result):
+        raise ValueError(f"{name} 必须全为有限数。")
+    return result
+
+
+def rpy_to_rotvec(rpy: list[float]) -> list[float]:
+    """Convert ZYX-composed RPY radians to an axis-angle rotation vector."""
+    roll, pitch, yaw = finite(rpy, 3, "rpy")
+    cr, sr, cp, sp, cy, sy = math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch), math.cos(yaw), math.sin(yaw)
+    rotation = ((cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr),
+                (sy * cp, sy * sp * sr + cy * cr, sy * sp * sr - cy * sr),
+                (-sp, cp * sr, cp * cr))
+    theta = math.acos(max(-1.0, min(1.0, (rotation[0][0] + rotation[1][1] + rotation[2][2] - 1.0) / 2.0)))
+    if theta < 1e-10:
+        return [0.0, 0.0, 0.0]
+    sine = math.sin(theta)
+    if abs(sine) < 1e-8:
+        axis = [math.sqrt(max(0.0, (rotation[index][index] + 1.0) / 2.0)) for index in range(3)]
+        if rotation[2][1] - rotation[1][2] < 0: axis[0] = -axis[0]
+        if rotation[0][2] - rotation[2][0] < 0: axis[1] = -axis[1]
+        if rotation[1][0] - rotation[0][1] < 0: axis[2] = -axis[2]
+    else:
+        axis = [(rotation[2][1] - rotation[1][2]) / (2.0 * sine),
+                (rotation[0][2] - rotation[2][0]) / (2.0 * sine),
+                (rotation[1][0] - rotation[0][1]) / (2.0 * sine)]
+    norm = math.sqrt(sum(component * component for component in axis))
+    if norm < 1e-10:
+        raise ValueError("无法将 rpy 转换为旋转向量。")
+    return [component / norm * theta for component in axis]
+
+
+def rotvec_to_quat(rotvec: list[float]) -> list[float]:
+    x, y, z = finite(rotvec, 3, "rotation vector")
+    angle = math.sqrt(x * x + y * y + z * z)
+    if angle < 1e-12:
+        return [0.0, 0.0, 0.0, 1.0]
+    scale = math.sin(angle / 2.0) / angle
+    return [x * scale, y * scale, z * scale, math.cos(angle / 2.0)]
+
+
+def quat_to_rotvec(quat: list[float]) -> list[float]:
+    qx, qy, qz, qw = finite(quat, 4, "quaternion")
+    norm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if norm < 1e-12:
+        raise ValueError("四元数不能为零。")
+    qx, qy, qz, qw = qx / norm, qy / norm, qz / norm, qw / norm
+    if qw < 0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    sine = math.sqrt(qx * qx + qy * qy + qz * qz)
+    if sine < 1e-12:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(sine, qw)
+    return [qx / sine * angle, qy / sine * angle, qz / sine * angle]
+
+
+def quat_multiply(first: list[float], second: list[float]) -> list[float]:
+    """Compose xyzw quaternions: returned transform is first ∘ second."""
+    ax, ay, az, aw = first
+    bx, by, bz, bw = second
+    return [aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+            aw * bw - ax * bx - ay * by - az * bz]
+
+
+def rotate_vector(quat: list[float], vector: list[float]) -> list[float]:
+    qx, qy, qz, qw = quat
+    vx, vy, vz = vector
+    tx, ty, tz = 2.0 * (qy * vz - qz * vy), 2.0 * (qz * vx - qx * vz), 2.0 * (qx * vy - qy * vx)
+    return [vx + qw * tx + qy * tz - qz * ty,
+            vy + qw * ty + qz * tx - qx * tz,
+            vz + qw * tz + qx * ty - qy * tx]
+
+
+def compose_pose(first: list[float], second: list[float]) -> list[float]:
+    """Compose [xyz, rotvec] transforms: returned = first ∘ second."""
+    first_quat, second_quat = rotvec_to_quat(first[3:]), rotvec_to_quat(second[3:])
+    offset = rotate_vector(first_quat, second[:3])
+    return [first[0] + offset[0], first[1] + offset[1], first[2] + offset[2]] + quat_to_rotvec(quat_multiply(first_quat, second_quat))
+
+
+def inverse_pose(pose: list[float]) -> list[float]:
+    quat = rotvec_to_quat(pose[3:])
+    inverse_quat = [-quat[0], -quat[1], -quat[2], quat[3]]
+    return rotate_vector(inverse_quat, [-pose[0], -pose[1], -pose[2]]) + quat_to_rotvec(inverse_quat)
+
+
+def rotvec_to_rpy(rotvec: list[float]) -> list[float]:
+    qx, qy, qz, qw = rotvec_to_quat(rotvec)
+    r00, r10, r20 = 1.0 - 2.0 * (qy * qy + qz * qz), 2.0 * (qx * qy + qz * qw), 2.0 * (qx * qz - qy * qw)
+    r21, r22 = 2.0 * (qy * qz + qx * qw), 1.0 - 2.0 * (qx * qx + qy * qy)
+    pitch = math.asin(max(-1.0, min(1.0, -r20)))
+    if abs(math.cos(pitch)) < 1e-8:
+        return [0.0, pitch, math.atan2(-2.0 * (qx * qy - qz * qw), r00)]
+    return [math.atan2(r21, r22), pitch, math.atan2(r10, r00)]
+
+
+def pose_from_lookup_transform(data: object) -> list[float]:
+    if not isinstance(data, dict):
+        raise RuntimeError("规划器返回的 TF 数据无效。")
+    translation, rotation = data.get("translation"), data.get("rotation")
+    if not isinstance(translation, dict) or not isinstance(rotation, dict):
+        raise RuntimeError("规划器返回的 TF 缺少 translation 或 rotation。")
+    return finite([translation.get("x"), translation.get("y"), translation.get("z")], 3, "planner TF translation") + quat_to_rotvec(finite([rotation.get("x"), rotation.get("y"), rotation.get("z"), rotation.get("w")], 4, "planner TF rotation"))
+
+
+def planner_relative_pose(planner: object, frame_id: str, parent_frame: str, child_frame: str) -> list[float]:
+    parent = pose_from_lookup_transform(planner.lookup_transform(frame_id, parent_frame).get("data"))
+    child = pose_from_lookup_transform(planner.lookup_transform(frame_id, child_frame).get("data"))
+    return compose_pose(inverse_pose(parent), child)
+
+
+def shortest_angle_delta(start: float, end: float) -> float:
+    return (end - start + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def slerp(q0: list[float], q1: list[float], alpha: float) -> list[float]:
+    dot = sum(a * b for a, b in zip(q0, q1))
+    if dot < 0.0:
+        q1, dot = [-item for item in q1], -dot
+    dot = max(-1.0, min(1.0, dot))
+    if dot > 0.9995:
+        result = [a + alpha * (b - a) for a, b in zip(q0, q1)]
+        norm = math.sqrt(sum(item * item for item in result))
+        return [item / norm for item in result]
+    theta = math.acos(dot)
+    sine = math.sin(theta)
+    return [math.sin((1.0 - alpha) * theta) / sine * a + math.sin(alpha * theta) / sine * b for a, b in zip(q0, q1)]
+
+
+def smoothstep5(alpha: float) -> float:
+    alpha = max(0.0, min(1.0, alpha))
+    return alpha ** 3 * (10.0 + alpha * (-15.0 + 6.0 * alpha))
+
+
+def minimum_scurve_duration(distance: float, max_speed: float, max_acceleration: float) -> float:
+    if distance <= 1e-12:
+        return 0.0
+    return max(1.875 * distance / max_speed, math.sqrt((10.0 / math.sqrt(3.0)) * distance / max_acceleration))
+
+
+def position_error_m(first: list[float], second: list[float]) -> float:
+    return math.sqrt(sum((first[index] - second[index]) ** 2 for index in range(3)))
+
+
+def orientation_error_rad(first: list[float], second: list[float]) -> float:
+    q0, q1 = rotvec_to_quat(first[3:]), rotvec_to_quat(second[3:])
+    return 2.0 * math.acos(max(-1.0, min(1.0, abs(sum(a * b for a, b in zip(q0, q1))))))
+
+
+def pose_to_command(raw_pose: Any) -> list[float]:
+    if isinstance(raw_pose, dict):
+        xyz = finite(raw_pose.get("xyz"), 3, "eef_pose.xyz")
+        if "rpy" in raw_pose:
+            return xyz + rpy_to_rotvec(raw_pose["rpy"])
+        for key in ("rotvec", "axis_angle", "rxryrz", "rotation_vector"):
+            if key in raw_pose:
+                return xyz + finite(raw_pose[key], 3, f"eef_pose.{key}")
+        raise ValueError("eef_pose 缺少 rpy 或旋转向量字段。")
+    return finite(raw_pose, 6, "eef_pose")
+
+
+def arm_state(arm: Any, arm_id: int) -> dict[str, Any]:
+    state = arm.get_state()
+    per_arm = ((state or {}).get("state") or {}).get("left" if arm_id == 1 else "right")
+    if not isinstance(per_arm, dict):
+        raise RuntimeError("当前机械臂状态不可用，无法开始笛卡尔移动。")
+    return per_arm
+
+
+def current_pose(arm: Any, arm_id: int) -> list[float]:
+    return pose_to_command(arm_state(arm, arm_id).get("eef_pose"))
+
+
+def ensure_ready(arm: Any, arm_id: int, recover_timeout_s: float = 10.0) -> None:
+    state = arm.get_state()
+    if state is None:
+        raise RuntimeError("尚未收到机械臂状态。")
+    system_state = str(state.get("system_state", "")).strip().lower()
+    if system_state == "error":
+        print("检测到 ERROR，正在 clear_error() 并等待恢复...")
+        arm.clear_error()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            system_state = str((state or {}).get("system_state", "")).strip().lower()
+            if system_state == "running":
+                break
+            if system_state == "estop":
+                raise RuntimeError(f"clear_error() 后进入 ESTOP：{state.get('estop_reason')!r}")
+            time.sleep(0.05)
+        else:
+            raise RuntimeError(f"clear_error() 后未能恢复 RUNNING，当前={system_state!r}")
+    if system_state == "estop":
+        raise RuntimeError(f"系统处于 ESTOP：{state.get('estop_reason')!r}")
+    if system_state != "running":
+        raise RuntimeError(f"系统尚未就绪，当前 system_state={system_state!r}")
+    key = "left" if arm_id == 1 else "right"
+    if not bool((state.get("state") or {}).get(key, {}).get("enabled", False)):
+        print("目标手臂未使能，正在 enable()...")
+        arm.enable()
+        deadline = time.monotonic() + recover_timeout_s
+        while time.monotonic() < deadline:
+            state = arm.get_state()
+            if bool(((state or {}).get("state") or {}).get(key, {}).get("enabled", False)):
+                return
+            time.sleep(0.05)
+        raise RuntimeError("enable() 后目标手臂仍未使能。")
+
+
+def servo_move_l(arm: Any, arm_id: int, target: list[float], linear_speed_mps: float,
+                 angular_speed_radps: float, max_linear_accel_mps2: float,
+                 max_angular_accel_radps2: float, hz: float, position_tolerance_m: float,
+                 orientation_tolerance_rad: float, settle_timeout_s: float,
+                 tcp: list[float] | None = None,
+                 joint_path_recorder: list[list[float]] | None = None) -> None:
+    """Stream one absolute ServoPose line and optionally record live joints."""
+    tcp_rpy = finite(tcp if tcp is not None else [0.0] * 6, 6, "servo tcp")
+    tcp_pose = tcp_rpy[:3] + rpy_to_rotvec(tcp_rpy[3:])
+    start = compose_pose(current_pose(arm, arm_id), tcp_pose)
+    distance, angle = position_error_m(target, start), orientation_error_rad(target, start)
+    if distance <= position_tolerance_m and angle <= orientation_tolerance_rad:
+        print("当前末端已在目标容差内；无需移动。")
+        return
+    period = 1.0 / hz
+    duration = max(minimum_scurve_duration(distance, linear_speed_mps, max_linear_accel_mps2), minimum_scurve_duration(angle, angular_speed_radps, max_angular_accel_radps2), period)
+    steps = max(1, math.ceil(duration * hz))
+    print(f"[move_to_pose] distance={distance:.4f}m rotation={math.degrees(angle):.2f}deg duration={duration:.2f}s steps={steps} @ {hz:.1f}Hz")
+
+    def record_live_joints() -> None:
+        if joint_path_recorder is None:
+            return
+        joints = finite(arm_state(arm, arm_id).get("position"), 7, "servo 实测关节角")
+        if not joint_path_recorder or any(abs(value - previous) > 1e-8 for value, previous in zip(joints, joint_path_recorder[-1])):
+            joint_path_recorder.append(joints)
+
+    q0, q1 = rotvec_to_quat(start[3:]), rotvec_to_quat(target[3:])
+    record_live_joints()
+    arm.start_servo_pose(arm_id, pose_type="absolute", frame="world", tcp=tcp_rpy, input_frequency_hz=hz)
+    try:
+        deadline = time.monotonic()
+        for index in range(1, steps + 1):
+            alpha = smoothstep5(index / float(steps))
+            waypoint = [start[axis] + alpha * (target[axis] - start[axis]) for axis in range(3)] + quat_to_rotvec(slerp(q0, q1, alpha))
+            arm.push_servo_pose(arm_id, waypoint)
+            record_live_joints()
+            deadline += period
+            time.sleep(max(0.0, deadline - time.monotonic()))
+        settle_deadline, final_pose = time.monotonic() + settle_timeout_s, start
+        while time.monotonic() < settle_deadline:
+            arm.push_servo_pose(arm_id, target)
+            record_live_joints()
+            final_pose = compose_pose(current_pose(arm, arm_id), tcp_pose)
+            if position_error_m(target, final_pose) <= position_tolerance_m and orientation_error_rad(target, final_pose) <= orientation_tolerance_rad:
+                return
+            time.sleep(period)
+        raise RuntimeError(f"末端位姿未在超时内到位：位置误差={position_error_m(target, final_pose) * 1000.0:.1f} mm，旋转误差={math.degrees(orientation_error_rad(target, final_pose)):.2f}°。")
+    finally:
+        try:
+            arm.stop_servo_pose(arm_id)
+        except Exception:
+            pass
 
 
 class TrajectoryPlanningError(RuntimeError):
@@ -332,7 +653,7 @@ def close_gripper_for_configured_workpiece(
     There is no separate narrow-grasp recovery mode: anything outside the
     calibrated interval is treated as an unconfirmed grasp.
     """
-    gripper.move(arm_id, 0.0, mode="async", preempt=True)
+    gripper.move(arm_id, 0.0, speed=100.0, mode="async", preempt=True)
     print("已下发右夹爪 Q1 闭合抓取命令，等待夹爪接触工件并停止...")
     deadline = time.monotonic() + timeout_s
     observed_closing = False
@@ -388,7 +709,10 @@ def preplan_tcp_trajectory(planner: object, *, arm_id: int, group: str, frame_id
         # Do not send ``False``: older planner servers only recognise the opt-in field.
         if rrtstar_goal_tolerance:
             request["rrtstar_goal_tolerance"] = True
-        result = planner.plan_cart_trajectory(**request)
+        result = retry_task_creation(
+            lambda: planner.plan_cart_trajectory(**request),
+            label=f"右臂 {stage} {planner_kind.upper()} 笛卡尔规划",
+        )
         data = result.get("data") or {}
         trajectory, planned_arm_id, frequency = data.get("trajectory"), data.get("arm_id"), data.get("sample_frequency", 10.0)
         if planned_arm_id != arm_id or not isinstance(trajectory, list) or not trajectory or not isinstance(frequency, (int, float)) or frequency <= 0:
@@ -422,10 +746,13 @@ def can_plan_target(
         "ik_pose_xyz_rotvec": target_for_ik,
     }
     try:
-        result = planner.plan_cart_trajectory(
-            group=group, planner=planner_kind, frame_id=frame_id, ik_frame=ik_frame,
-            position=target_for_ik[:3], orientation=rotvec_to_quat(target_for_ik[3:]),
-            max_vel=max_vel, max_acc=max_acc, timeout=timeout_s,
+        result = retry_task_creation(
+            lambda: planner.plan_cart_trajectory(
+                group=group, planner=planner_kind, frame_id=frame_id, ik_frame=ik_frame,
+                position=target_for_ik[:3], orientation=rotvec_to_quat(target_for_ik[3:]),
+                max_vel=max_vel, max_acc=max_acc, timeout=timeout_s,
+            ),
+            label=f"右臂 {planner_kind.upper()} 可达性预检",
         )
         data = result.get("data") or {}
         trajectory, planned_arm_id = data.get("trajectory"), data.get("arm_id")
@@ -458,9 +785,9 @@ def plan_and_follow(arm: object, planner: object, *, arm_id: int, group: str, fr
             time.sleep(0.2)
 
 
-def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo_eef_offset: list[float], args: argparse.Namespace, stage: str) -> None:
-    """Move a native right_eef target through ServoPose's calibrated TCP."""
-    print(f"{stage}：使用控制器 servo 直线段，不经过 RRTstar 碰撞预检。")
+def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo_eef_offset: list[float], args: argparse.Namespace, stage: str, joint_path_recorder: list[list[float]]) -> None:
+    """Move directly on ServoPose and record the live joint path for retreat."""
+    print(f"{stage}：直接执行控制器 servo 直线段；不做 RRTstar 碰撞预检，并记录实测关节角以供确认抓取后反向撤离。")
     servo_move_l(
         arm, arm_id, tcp_target,
         linear_speed_mps=args.servo_linear_speed_mps,
@@ -470,69 +797,32 @@ def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo
         hz=args.servo_hz, position_tolerance_m=args.servo_position_tolerance_m,
         orientation_tolerance_rad=args.servo_orientation_tolerance_rad,
         settle_timeout_s=args.servo_settle_timeout_s, tcp=servo_eef_offset,
+        joint_path_recorder=joint_path_recorder,
     )
 
 
-def precheck_servo_line_collision(
-    sdk: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str,
-    tcp_offset: list[float], start_tcp: list[float], target_tcp: list[float],
-    args: argparse.Namespace, stage: str,
+def reverse_recorded_servo_joint_path(
+    arm: object, *, arm_id: int, joint_path: list[list[float]], sample_frequency_hz: float,
 ) -> None:
-    """Reject a servo line when any sampled TCP pose is not collision-plannable.
-
-    ServoPose does not use the planner's collision checker.  Sampling its
-    intended Cartesian line makes every sampled pose a collision-checked
-    RRTstar goal before the open-gripper approach is allowed to start.  Up to
-    three independent Planner clients check a batch concurrently. This is
-    deliberately conservative: an inconclusive sample is treated as unsafe
-    and the closed-loop controller can choose Module 7 reorientation instead.
-    """
-    linear_distance = math.sqrt(sum(
-        (target_tcp[axis] - start_tcp[axis]) ** 2 for axis in range(3)
-    ))
-    segments = max(1, math.ceil(linear_distance / DEFAULT_SERVO_COLLISION_PRECHECK_STEP_M))
+    """Retreat by replaying the measured ServoPose joint path in reverse."""
+    if len(joint_path) < 2:
+        raise RuntimeError(
+            "最终 Servo 段未记录到足够的实测关节路点；"
+            "为避免抓住工件后在未知路径上运动，禁止继续抬升。"
+        )
+    retreat = list(reversed(joint_path))
     print(
-        f"{stage}：servo 碰撞预检，线长={linear_distance * 1000.0:.1f} mm，"
-        f"{segments} 个 10 mm 以内的 TCP 采样终点，最多并发 3 个 RRTstar 目标。"
+        "抓取已确认：按最终 Servo 段的实测关节路点倒序撤离，"
+        f"共 {len(retreat)} 点，回放频率={sample_frequency_hz:.1f} Hz。"
     )
-    samples = [
-        (index, [
-            start_tcp[axis] + (index / segments) * (target_tcp[axis] - start_tcp[axis])
-            for axis in range(6)
-        ])
-        for index in range(1, segments + 1)
-    ]
-
-    def check_sample(item: tuple[int, list[float]]) -> tuple[int, bool, str]:
-        index, sample = item
-        worker_planner = None
-        try:
-            worker_planner = sdk.Planner(host=args.planner_host)
-            feasible, detail = can_plan_target(
-                worker_planner, arm_id=arm_id, group=group, frame_id=frame_id,
-                ik_frame=ik_frame, tcp_offset=tcp_offset, target=sample,
-                target_is_tcp=True, planner_kind=args.planner,
-                max_vel=args.max_vel, max_acc=args.max_acc,
-            )
-            return index, feasible, detail
-        except Exception as exc:
-            return index, False, f"{type(exc).__name__}: {exc}"
-        finally:
-            if worker_planner is not None:
-                try:
-                    worker_planner.close()
-                except Exception:
-                    pass
-
-    for batch_start in range(0, len(samples), SERVO_COLLISION_PRECHECK_PARALLELISM):
-        batch = samples[batch_start:batch_start + SERVO_COLLISION_PRECHECK_PARALLELISM]
-        with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-            outcomes = list(executor.map(check_sample, batch))
-        for index, feasible, detail in outcomes:
-            if not feasible:
-                raise Q1DirectPathUnavailableError(
-                    f"{stage}：servo 线段采样 {index}/{segments} 不可无碰撞规划；{detail}"
-                )
+    try:
+        arm.follow_trajectory(
+            arm_id=arm_id, trajectory=retreat, sample_frequency=sample_frequency_hz,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "抓取已确认，但最终 Servo 段的反向关节撤离执行失败；禁止继续 RRTstar 抬升。"
+        ) from exc
 
 
 def recover_target_tcp_pose(arm: object, planner: object, *, arm_id: int, group: str, frame_id: str, ik_frame: str, tcp_offset: list[float], target: list[float], planner_kind: str, max_vel: float, max_acc: float, retries: int, xy_tolerance_m: float, z_tolerance_m: float, orientation_tolerance_rad: float, correction_attempts: int, stage: str, execution_speed_scale: float) -> None:
@@ -592,9 +882,9 @@ def parse_args() -> argparse.Namespace:
         "--tcp-yaw-toward-workpiece-y-deg", type=float, default=-3.0,
         help="TCP 相对工件的本地 +Z 偏转（度；默认 -3）",
     )
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
-    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
     parser.add_argument("--planner", choices=("rrtstar",), default="rrtstar", help="固定使用 RRTstar")
     parser.add_argument("--final-approach-mode", choices=("servo", "rrt"), default="servo",
@@ -681,7 +971,6 @@ def main() -> int:
         # right_eef is a native planner frame, so no virtual TCP transform or
         # additional target-position correction is applied.
         tcp_offset = [0.0] * 6
-        servo_eef_offset = RIGHT_EEF_FROM_TRANSFER_BASE
         correction = [0.0] * 3
     except ValueError as exc:
         print(f"错误: {exc}", file=sys.stderr)
@@ -690,12 +979,16 @@ def main() -> int:
     local_yaw_correction = rpy_to_rotvec([
         0.0, 0.0, math.radians(args.tcp_yaw_toward_workpiece_y_deg),
     ])
-    # T_body_tcp = T_body_workpiece ∘ Rz_local(correction).  Positive local
-    # yaw maps TCP +X toward workpiece +Y, as requested.
-    orientation = compose_pose(
+    # First obtain the yaw requested by the workpiece orientation and its
+    # calibrated local-Z correction.  The final approach must keep the TCP
+    # level in body_base, so discard the resulting roll/pitch before planning
+    # the rear alignment and executing ServoPose.
+    workpiece_aligned_orientation = compose_pose(
         [0.0, 0.0, 0.0, *workpiece_orientation],
         [0.0, 0.0, 0.0, *local_yaw_correction],
     )[3:]
+    workpiece_aligned_rpy = rotvec_to_rpy(workpiece_aligned_orientation)
+    orientation = rpy_to_rotvec([0.0, 0.0, workpiece_aligned_rpy[2]])
     tcp_local_offset_base = rotate_vector(
         rotvec_to_quat(orientation), list(args.tcp_local_offset_at_grasp_m)
     )
@@ -707,9 +1000,8 @@ def main() -> int:
     # TCP target, so the final advance remains exactly along TCP +X.
     approach_anchor_xyz = grasp_xyz.copy()
     target_rpy = rotvec_to_rpy(orientation)
-    # With the default zero local yaw correction, TCP +X/+Y are respectively
-    # parallel and same-direction to workpiece +X/+Y.  Therefore the rear
-    # approach and servo advance follow the full 3-D workpiece X axis.
+    # Roll and pitch are fixed at zero, so the rear approach and final Servo
+    # advance remain horizontal in body_base along the level TCP +X axis.
     tcp_x_axis = rotate_vector(rotvec_to_quat(orientation), [1.0, 0.0, 0.0])
     tcp_x_xy_norm_sq = sum(component * component for component in tcp_x_axis[:2])
     if tcp_x_xy_norm_sq < 1e-9:
@@ -737,7 +1029,15 @@ def main() -> int:
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         gripper = sdk.Gripper(host=args.gripper_host)
-        group, ik_frame = "right_arm", "right_eef"
+        group, ik_frame = "right_arm", RIGHT_EEF_FRAME
+        servo_eef_offset = planner_relative_pose(
+            planner, args.frame_id, DRIVER_EEF_FRAME, RIGHT_EEF_FRAME,
+        )
+        print(
+            "规划器 TF right_hand_transfer_base→right_eef="
+            f"{[round(value, 6) for value in servo_eef_offset]}；"
+            "Servo 使用该实时变换。"
+        )
         set_gripper_state(gripper, arm_id=args.arm_id, target_open=True, timeout_s=args.gripper_timeout_s, tolerance=args.gripper_position_tolerance)
 
         start_tcp = compose_pose(pose_from_lookup_transform(planner.lookup_transform(args.frame_id, ik_frame).get("data")), tcp_offset)
@@ -773,17 +1073,16 @@ def main() -> int:
         # The final contact point is the configured semantic -X grasp point,
         # plus the optional final-only body-base Z calibration.
         grasp_target = grasp_xyz + orientation
+        # All direct Servo segments after the rear RRTstar alignment append
+        # their live joint states here.  If a higher-Z retry succeeds, this
+        # one buffer contains both forward segments in actual execution order.
+        final_servo_joint_path: list[list[float]] = []
         if args.final_approach_mode == "servo":
-            precheck_servo_line_collision(
-                sdk, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                ik_frame=ik_frame, tcp_offset=tcp_offset,
-                start_tcp=alignment_target, target_tcp=grasp_target,
-                args=args, stage="沿 TCP +X 从后方延长线推进至抓取点",
-            )
             servo_follow_tcp(
                 arm, arm_id=args.arm_id, tcp_target=grasp_target,
                 servo_eef_offset=servo_eef_offset, args=args,
                 stage="沿 TCP +X 从后方延长线推进至抓取点",
+                joint_path_recorder=final_servo_joint_path,
             )
         else:
             plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage="沿 TCP +X 从后方延长线推进至抓取点", execution_speed_scale=args.trajectory_execution_speed_scale)
@@ -806,20 +1105,10 @@ def main() -> int:
                     timeout_s=args.gripper_timeout_s,
                     tolerance=args.gripper_position_tolerance,
                 )
-                current_tcp = compose_pose(
-                    pose_from_lookup_transform(
-                        planner.lookup_transform(args.frame_id, ik_frame).get("data")
-                    ), tcp_offset,
-                )
-                precheck_servo_line_collision(
-                    sdk, arm_id=args.arm_id, group=group, frame_id=args.frame_id,
-                    ik_frame=ik_frame, tcp_offset=tcp_offset,
-                    start_tcp=current_tcp, target_tcp=attempt_target,
-                    args=args, stage=label,
-                )
                 servo_follow_tcp(
                     arm, arm_id=args.arm_id, tcp_target=attempt_target,
                     servo_eef_offset=servo_eef_offset, args=args, stage=label,
+                    joint_path_recorder=final_servo_joint_path,
                 )
             try:
                 close_gripper_for_configured_workpiece(
@@ -837,6 +1126,11 @@ def main() -> int:
                     ) from exc
                 print(f"{label} 未确认抓住（{exc}）；准备下一高度复抓。")
 
+        if args.final_approach_mode == "servo":
+            reverse_recorded_servo_joint_path(
+                arm, arm_id=args.arm_id, joint_path=final_servo_joint_path,
+                sample_frequency_hz=args.servo_hz,
+            )
         tcp = compose_pose(pose_from_lookup_transform(planner.lookup_transform(args.frame_id, ik_frame).get("data")), tcp_offset)
         lift_failures: list[str] = []
         for lift_m in args.q1_post_grasp_lift_m:

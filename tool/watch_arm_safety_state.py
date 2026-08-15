@@ -11,7 +11,7 @@ import time
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--interval-s", type=float, default=0.2)
     parser.add_argument(
         "--output",

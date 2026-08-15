@@ -32,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Move arm1 to the fixed D405 observation joint pose."
     )
-    parser.add_argument("--arm-host", default="192.168.88.1", help=argparse.SUPPRESS)
+    parser.add_argument("--arm-host", default="192.168.3.11", help=argparse.SUPPRESS)
     parser.add_argument("--arm-id", type=int, default=1, choices=(1,))
     parser.add_argument("--speed", type=float, default=0.1)
     parser.add_argument("--planner-host", default=DEFAULT_PLANNER_HOST)

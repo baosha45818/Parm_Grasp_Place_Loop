@@ -64,3 +64,6 @@ cp /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_2_left_inspect_ap
 14.
 cd /home/dainanjun/Public/Parm_Grasp_Place_Loop && \
 PARM_LOOP_WORKPIECE=1 .venv/bin/python modules/module_5_left_pick/run_head_judge_then_pick.py --execute
+
+15.
+python /home/dainanjun/shurenbin/arm_head_teach_192_168_3_11.py --arm-id 2

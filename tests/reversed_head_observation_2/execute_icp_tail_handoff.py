@@ -59,7 +59,7 @@ DEFAULT_RIGHT_GRASP_JOINTS_DEG = [
     162.5467, 59.2095, -70.8701, 76.9661, -21.2146, 0.4807, 80.0175,
 ]
 DEFAULT_RIGHT_PLACE_READY_JOINTS_DEG = [
-    102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196,
+    22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054,
 ]
 DEFAULT_POST_RELEASE_CLEARANCE_MINUS_X_M = 0.03
 DEFAULT_POST_RELEASE_CLEARANCE_PLUS_Z_M = 0.03
@@ -73,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--require-confirmation", action="store_true")

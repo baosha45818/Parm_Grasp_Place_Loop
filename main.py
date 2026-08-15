@@ -11,6 +11,7 @@ from pathlib import Path
 from loop_config import load_config
 from schedulers import RuntimeContext, left_scheduler, right_scheduler
 from tool.planner_runtime import PlannerRuntime
+from xianxin_runtime import configure_environment
 
 
 ROOT = Path(__file__).resolve().parent
@@ -33,6 +34,7 @@ def ensure_config(path: Path) -> None:
 
 
 def main() -> None:
+    configure_environment()
     args = parse_args()
     if args.cycles < 1:
         raise ValueError("--cycles must be >= 1")

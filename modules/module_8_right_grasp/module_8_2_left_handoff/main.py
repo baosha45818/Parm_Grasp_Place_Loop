@@ -73,8 +73,8 @@ def parse_args() -> argparse.Namespace:
         help="Module 5-2 本轮生成并用于移动左手到交接位的 result.json",
     )
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     parser.add_argument(
         "--workpiece",
         choices=("1", "2"),

@@ -299,7 +299,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Teach PARM arm and print current joint angles by keyboard hotkeys"
     )
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     parser.add_argument("--arm-id", type=int, choices=(1, 2), default=1, help="1=left, 2=right")
     parser.add_argument(
         "--joint-unit",

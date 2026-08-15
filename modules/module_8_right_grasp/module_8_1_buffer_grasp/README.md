@@ -25,7 +25,75 @@ python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_gras
 
 `--workpiece` 会自动选择同编号抓取配置，并读取 `output/module_4_2/workpiece_<编号>/` 中最新的 `mask_pose.json`；可用 `--workpiece-pose-file` 显式覆盖，但文件的工件标记必须一致。确认预演与现场状态后，追加 `--execute` 才会实际打开夹爪、规划并执行抓取、闭合夹爪和抬升。模块需要可访问的 `parm_sdk`、右臂/夹爪服务和规划器。抓取入口不会调用调整模块；应仅在视觉结果已经满足直接抓取条件时使用。
 
-总控先预演：
+## 手动移动到保存位姿
+
+`saved_poses/3.json`、`4.json`、`6.json`、`10.json` 都保存的是右臂（`arm_id=2`）位姿。先不加 `--execute` 预览目标；确认机器人周围无碰撞风险、右臂处于可运动状态后，再在同一命令末尾加 `--execute`。默认机械臂地址为现场的 `192.168.3.11`，可用 `--arm-host` 覆盖。
+
+按保存的七轴关节角移动（控制器 `move_j`，适合回到已示教的固定姿态）：
+
+```bash
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp
+
+python3 move_by_joints.py \
+  --arm-id 2 \
+  --pose-file saved_poses/4.json \
+  --execute
+```
+
+实际执行时：
+
+```bash
+python3 move_by_joints.py \
+  --arm-id 2 \
+  --pose-file saved_poses/4.json \
+  --execute
+```
+
+将 `4.json` 替换为 `3.json`、`6.json` 或 `10.json` 即可使用相应保存姿态；如需降低关节运动速度，可添加例如 `--joint-speed 0.1`。
+
+按保存的末端位姿移动（规划器规划，默认笛卡尔直线 `lin`；使用保存文件中的 `body_base` 下 `eef_pose`）：
+
+```bash
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp
+
+python3 move_by_eef_pose.py \
+  --arm-id 2 \
+  --pose-file saved_poses/4.json
+```
+
+实际执行时：
+
+```bash
+python3 move_by_eef_pose.py \
+  --arm-id 2 \
+  --pose-file saved_poses/4.json \
+  --execute
+```
+
+末端位姿移动默认连接本机规划器 `127.0.0.1`；如规划器不在本机，可用 `--planner-host <地址>` 指定。可用 `--planner ptp` 改为关节空间规划，或用 `--max-vel 0.05 --max-acc 0.05` 降低规划速度和加速度比例。
+
+
+
+
+
+
+
+8-1模块单独跑，不加 --workpiece-pose-file 默认就是output/module_4_2/workpiece_<工件编号>/<最新编号>/mask_pose.json，加了参数可以指定--workpiece-pose-file \
+  /home/dainanjun/Public/Parm_Grasp_Place_Loop/output/module_4_2/workpiece_1/379/mask_pose.json
+
+
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp
+
+python3 buffer_grasp.py \
+  --workpiece 1 \
+  --arm-id 2 \
+  --execute
+
+
+
+
+
+总控执行：
 
 ```bash
 python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py --workpiece 1 \

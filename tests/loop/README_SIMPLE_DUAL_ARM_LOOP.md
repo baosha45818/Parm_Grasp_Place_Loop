@@ -46,7 +46,7 @@ bash start_uds_server.sh
   /home/dainanjun/Public/Parm_Grasp_Place_Loop/tests/loop/simple_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
   --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1
+  --arm-host 192.168.3.11
 ```
 
 右臂状态为 `1` 时，总控直接运行既有 pushT+抓取流程；不会再等待人工输入 `y`。抓取完成后，pushT 自行上抬，总控直接关节 PTP 到 `right_place_ready`，右臂执行持续 ServoPose 正式放置。只有工件放入孔位并确认松开夹爪后，状态才回到 `0`，左臂才会执行已经预测和规划好的抓取。
@@ -58,7 +58,6 @@ bash start_uds_server.sh
 ## 兼容性
 
 原来的命令仍可独立使用。新增的 GraspNet 抓取执行许可只在总控设置
-`LOOP_GRASPNET_EXECUTION_PERMIT_FILE` 时启用；观察位通知只在总控设置
-`LOOP_GRASPNET_OBSERVATION_READY_FILE` 时启用；Module 2 放置许可只在总控设置
+`LOOP_GRASPNET_EXECUTION_PERMIT_FILE` 时启用；Module 2 放置许可只在总控设置
 `MODULE2_PLACEMENT_READY_FILE` 与 `MODULE2_PLACEMENT_PERMIT_FILE` 时启用。直接运行
 `run_grasp_to_module2.sh` 或 `standalone_inspect.py` 不会等待总控。

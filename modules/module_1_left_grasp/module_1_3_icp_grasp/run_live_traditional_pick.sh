@@ -9,6 +9,12 @@ SAM_SOCKET="${PARM_SAM2_SOCKET:-${SAM_DIR}/runtime/sam2-service.sock}"
 PYTHON_BIN="${LOOP_ROOT}/.venv/bin/python"
 LOG_DIR="${HERE}/logs"
 
+# This module uses the direct Planner hand-eye calibration, not legacy SDK
+# eef_pose metadata.  Start a camera-only Broker for the active left D405.
+export GRASPNET_V7_DIRECT_PLANNER=1
+export GRASPNET_V7_D405_SERIAL="${PARM_D405_SERIAL:-260322270600}"
+export GRASPNET_V7_DISABLE_FEMTO=1
+
 mkdir -p "${LOG_DIR}"
 
 sam_ready() {
@@ -49,7 +55,7 @@ echo "-> verifying Camera Broker for traditional D405 capture"
 (
   cd "${LOOP_ROOT}"
   "${PYTHON_BIN}" -c \
-    'from modules.module_0_prepare.ensure_camera_broker import ensure_camera_broker; ensure_camera_broker()'
+    'import os; from modules.module_0_prepare.ensure_camera_broker import ensure_camera_broker; ensure_camera_broker(require_d405_eef_pose=False, expected_d405_serial=os.environ.get("PARM_D405_SERIAL", "260322270600"), require_femto=False)'
 )
 
 exec "${PYTHON_BIN}" "${HERE}/run_live_traditional_pick.py" \

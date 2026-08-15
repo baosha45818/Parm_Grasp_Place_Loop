@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner-host", default="127.0.0.1")
     parser.add_argument("--driver-host", default="127.0.0.1")
     parser.add_argument("--gripper-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--speed", type=float, default=0.05)
     return parser.parse_args()
 

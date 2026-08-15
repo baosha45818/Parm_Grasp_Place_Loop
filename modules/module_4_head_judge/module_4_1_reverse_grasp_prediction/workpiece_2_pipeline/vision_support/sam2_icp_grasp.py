@@ -167,20 +167,16 @@ def depth_score(T, cad_render, feature, depth, mask, K, scale):
     return score, {'match_fraction': float(keep.mean()), 'depth_mae_m': mae, 'weighted_feature_fraction': float(np.mean(feature[ind[keep]]))}
 
 
-def classify(cad_icp, cad_render, feature, observed, depth, mask, K, scale, cad_up, min_margin_m, normal):
+def classify(cad_icp, cad_render, feature, observed, depth, mask, K, scale, cad_up, normal):
     trials = []
     for side, initial in face_initials(cad_icp, observed, normal, cad_up):
         T, rmse, fitness = constrained_icp(cad_icp, observed, initial, normal)
-        score, render = depth_score(T, cad_render, feature, depth, mask, K, scale)
-        trials.append({'side': side, 'T': T, 'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render_score_m': score, 'render': render})
-    best = {side: min((x for x in trials if x['side']==side), key=lambda x:x['render_score_m']) for side in ('positive','reverse')}
-    up, down = best['positive'], best['reverse']; margin = abs(up['render_score_m']-down['render_score_m'])
-    # A fixed, labelled-scene-calibrated physical margin is preferable to a
-    # percentage of the score: the latter incorrectly rejected the known
-    # reverse-side part when both hypotheses had a high common depth offset.
-    threshold = float(min_margin_m)
-    side = 'unknown' if not np.isfinite(margin) or margin < threshold else min(best, key=lambda s: best[s]['render_score_m'])
-    return side, best, margin, threshold
+        _score, render = depth_score(T, cad_render, feature, depth, mask, K, scale)
+        trials.append({'side': side, 'T': T, 'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render': render})
+    quality_key = lambda x: (x['icp_fitness'], x['render']['match_fraction'], -x['icp_rmse_m'])
+    best = {side: max((x for x in trials if x['side']==side), key=quality_key) for side in ('positive','reverse')}
+    side = max(best, key=lambda name: quality_key(best[name]))
+    return side, best
 
 
 def main():
@@ -219,7 +215,7 @@ def main():
             continue
         pts = voxel_downsample_np(remove_radius_outliers_np(mask_depth_to_points_cam(m, depth, K, float(meta['depth_scale_m']), .35, 1.2, 1)), .003)
         if len(pts) < 120: continue
-        side, best, margin, threshold = classify(cad_icp, cad_render, feature, pts, depth, m.astype(bool), K, float(meta['depth_scale_m']), cad_up, orientation['minimum_score_margin_m'], scene_normal)
+        side, best = classify(cad_icp, cad_render, feature, pts, depth, m.astype(bool), K, float(meta['depth_scale_m']), cad_up, scene_normal)
         reverse_quality = best['reverse']
         reverse_match = float(reverse_quality['render']['match_fraction'])
         reverse_fitness = float(reverse_quality['icp_fitness'])
@@ -228,13 +224,13 @@ def main():
             and reverse_match >= float(orientation['minimum_reverse_depth_match_fraction'])
         )
         accepted_side = side if side != 'reverse' or geometry_ok else 'rejected_geometry'
-        diag = {'object_key': f'sam2-{i}', 'classification': accepted_side, 'score_margin_m': margin, 'required_margin_m': threshold,
+        diag = {'object_key': f'sam2-{i}', 'classification': accepted_side,
                 'reverse_geometry_quality': {'icp_fitness': reverse_fitness, 'minimum_icp_fitness': orientation['minimum_reverse_icp_fitness'], 'depth_match_fraction': reverse_match, 'minimum_depth_match_fraction': orientation['minimum_reverse_depth_match_fraction'], 'accepted': geometry_ok},
                 'positive': {k:v for k,v in best['positive'].items() if k!='T'}, 'reverse': {k:v for k,v in best['reverse'].items() if k!='T'}}
         diagnostics.append(diag)
         color = {'positive': (0,180,0), 'reverse': (0,0,220), 'unknown': (0,180,255), 'rejected_geometry': (120,120,120)}[accepted_side]
         tint = np.zeros_like(orient); tint[:]=color; orient[m>0] = (.55*orient[m>0]+.45*tint[m>0]).astype(np.uint8)
-        ys, xs = np.nonzero(m); cv2.putText(orient, f'{accepted_side} d={margin*1000:.1f}mm', (int(xs.mean()),int(ys.mean())), cv2.FONT_HERSHEY_SIMPLEX, .48, color, 2, cv2.LINE_AA)
+        ys, xs = np.nonzero(m); cv2.putText(orient, f"{accepted_side} f={best[side]['icp_fitness']:.2f} d={best[side]['render']['match_fraction']:.2f}", (int(xs.mean()),int(ys.mean())), cv2.FONT_HERSHEY_SIMPLEX, .48, color, 2, cv2.LINE_AA)
         if accepted_side != 'reverse': continue
         T = best[side]['T']; rotation, translation = T[:3,:3], T[:3,3]
         object_center = rotation @ vertices.mean(axis=0) + translation
@@ -250,14 +246,14 @@ def main():
         center = rotation @ head + translation; R = make_grasp_frame(rotation@width, scene_normal)
         # Version7/GraspNet convention: +X is the approach axis.  Retreating
         # by -X is therefore a vertical, above-table pregrasp for this frame.
-        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'orientation_score_margin_m':margin, 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
+        records.append({'object_side':side, 'object_key':f'sam2-{i}', 'icp_fitness':best[side]['icp_fitness'], 'depth_match_fraction':best[side]['render']['match_fraction'], 'icp_rmse_m':best[side]['icp_rmse_m'], 'wide_head_outward_grasp_offset_m':outward_offset_m, 'wide_head_inward_grasp_offset_m':inward_offset_m, 'wide_head_towards_camera':head_towards_camera, 'wide_head_grasp_offset_direction':'inward' if head_towards_camera else 'outward', 'wide_head_grasp_offset_m':inward_offset_m if head_towards_camera else outward_offset_m, 'grasp_frame_convention':'version7_graspnet:+X_approach_down,+Y_jaw_opening,+Z_side', 'grasp_pose':pose_record(R,center), 'pregrasp_pose':pose_record(R,center-R[:,0]*.08)})
     # One workpiece can receive overlapping SAM2 prompts.  Associate duplicate
     # reverse masks by their CAD/TCP centres and retain the stronger face score.
     unique = []
     for record in records:
         center = np.asarray(record['grasp_pose']['translation_m'], dtype=float)
         same = next((j for j, old in enumerate(unique) if np.linalg.norm(center-np.asarray(old['grasp_pose']['translation_m'], dtype=float)) < .025), None)
-        if same is None or record['orientation_score_margin_m'] > unique[same]['orientation_score_margin_m']:
+        if same is None or (record['icp_fitness'], record['depth_match_fraction'], -record['icp_rmse_m']) > (unique[same]['icp_fitness'], unique[same]['depth_match_fraction'], -unique[same]['icp_rmse_m']):
             if same is None: unique.append(record)
             else: unique[same] = record
     records = unique

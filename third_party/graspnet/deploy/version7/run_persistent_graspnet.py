@@ -413,18 +413,6 @@ def move_to_observation_and_open(args) -> bool:
     if not planner_execute.move_to_observation_with_planner(args):
         return False
     print_elapsed("go_graspnet / D405 observation motion", stage_started)
-    observation_ready_value = os.environ.get("LOOP_GRASPNET_OBSERVATION_READY_FILE")
-    if observation_ready_value:
-        observation_ready_path = Path(observation_ready_value)
-        temporary = observation_ready_path.with_name(
-            f".{observation_ready_path.name}.tmp"
-        )
-        temporary.write_text("ready\n", encoding="utf-8")
-        temporary.replace(observation_ready_path)
-        print(
-            "-> 左臂已到 GraspNet 观察位；已通知总控可以启动右臂 ServoPose。",
-            flush=True,
-        )
     stage_started = time.monotonic()
     planner_execute.move_gripper(args, 100.0, "open at GraspNet observation")
     print_elapsed("open gripper at GraspNet observation", stage_started)

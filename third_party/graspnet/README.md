@@ -14,9 +14,9 @@
 | D405 腕部标定 | `deploy/calibration/output/wrist1/calibration_wrist1.json` | D405 点云转换到 `arm1_base` |
 | Femto Bolt 外参 | `deploy/calibration/output/laser/calibration_laser.json` | 固定相机点云转换到 `arm1_base` |
 | 夹爪 TCP 标定 | `deploy/calibration/output/tcp_grasp_tcp/calibration_translation2.json` | 抓取中心转换为 EEF 目标位姿 |
-| RealSense D405 | 序列号 `260322270242` | 腕部 RGB-D 和点云采集 |
+| RealSense D405 | 序列号 `260322270600` | 左腕 RGB-D 和点云采集 |
 | Femto Bolt | 序列号 `CL8L56301LK` | 外部 RGB-D 和点云采集 |
-| arm1 控制器 | `192.168.88.1`，arm1 | 关节运动和末端位姿控制 |
+| arm1 控制器 | `192.168.3.11`，arm1 | 关节运动和末端位姿控制 |
 | 夹爪服务 | `localhost`，hand1 | 设置开度、力和速度 |
 
 模型权重和 Python 虚拟环境不在仓库中，需要在部署机器上单独准备。仓库中的标定 JSON 只适用于当前设备；更换相机、安装位置、机械臂或夹爪后必须重新标定。

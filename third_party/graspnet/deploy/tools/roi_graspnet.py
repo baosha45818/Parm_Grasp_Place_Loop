@@ -12,7 +12,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve()
 ROOT = HERE.parents[2]
-DEFAULT_D405_SERIAL = "260322270242"
+DEFAULT_D405_SERIAL = "260322270600"
 
 
 def build_parser() -> argparse.ArgumentParser:

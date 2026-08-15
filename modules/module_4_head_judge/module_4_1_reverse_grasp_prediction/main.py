@@ -22,9 +22,12 @@ VISION_ROOT = (
     LOOP_ROOT
     / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation"
 )
-CONFIG_DIR = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/config"
 PYTHON = Path(sys.executable)
-BODY_HEAD = CONFIG_DIR / "body_head_calibration.json"
+BODY_HEAD = (
+    LOOP_ROOT
+    / "modules/module_4_head_judge/module_4_2_pose_estimation/"
+    "calibration/head_charuco_13x5_calibration_head.json"
+)
 sys.path.insert(0, str(LOOP_ROOT))
 from modules.module_5_left_pick.module_5_1_reverse_grasp.execution_timing import ExecutionTiming
 DEFAULT_SAM2_URL = (

@@ -28,7 +28,7 @@ final_approach_mode = "servo"
 
 [servo]
 # 最终 ServoPose 直线段最大线速度 [m/s]。
-servo_linear_speed_mps = 0.05
+servo_linear_speed_mps = 0.1
 # 最终 ServoPose 直线段最大角速度 [rad/s]。
 servo_angular_speed_radps = 0.3
 # 最终 ServoPose 直线段最大线加速度 [m/s²]。

@@ -9,8 +9,10 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 .venv/bin/python \
   modules/modular_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
-  --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1 --workpiece 1
+  --gripper-host 192.168.3.11 \
+  --arm-host 192.168.3.11 \
+  --head-host 192.168.3.22 \
+  --workpiece 1
 ```
 
 它复用已经验证的双进程调度、共享状态、右臂 ServoPose 互斥和
@@ -31,11 +33,11 @@ Judge/Pick、Align/Grasp、Handoff、Right Place 和 Right Idle 的调度入口
 - `third_party/push_T/`：历史备份；模块化全流程不再调用。
 - `third_party/anchor_urdf/`：Version9 名义 TCP 实验所需 URDF。
 - `calibration/`：反抓交接用的 `body_base` 对齐外参。
-- `runtime/parm_sdk/`：本机硬件 driver 与 Planner SDK wheel。
-- `planner/plucky_hjt_parm/`：规划器 Docker Compose 源码。
+- `260812/祥鑫现场交付_260812/`：祥鑫现场交付的 SDK wheel。
+- 本机只运行规划器 Docker；手臂、夹爪、云台、力传感器和踏板 driver 都运行在现场控制器。
 
-规划器 Docker、夹爪/力传感器/云台/踏板 driver 和 SAM2 服务仍是运行时服务，
-但它们的项目文件均已在本目录内；硬件本体与 Docker 镜像当然不能复制进代码目录。
+规划器 Docker 与 SAM2 服务由本机运行；夹爪、力传感器、云台和踏板由现场控制器运行。
+网络地址、SDK 和规划器 TF 约定见 [XIANXIN_SCENE_ADAPTATION.md](XIANXIN_SCENE_ADAPTATION.md)。
 
 旧总控保持不变，兼容入口仍为：
 
@@ -59,8 +61,9 @@ cd /home/dainanjun/Public
 /home/dainanjun/Public/data_collector/.venv/bin/python \
   /home/dainanjun/Public/Parm_Grasp_Place_Loop/tests/loop/simple_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
-  --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --gripper-host 192.168.3.11 \
+  --arm-host 192.168.3.11 \
+  --head-host 192.168.3.22 \
   --left-flow original
 ```
 
@@ -71,8 +74,9 @@ cd /home/dainanjun/Public
 /home/dainanjun/Public/data_collector/.venv/bin/python \
   /home/dainanjun/Public/Parm_Grasp_Place_Loop/tests/loop/simple_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
-  --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --gripper-host 192.168.3.11 \
+  --arm-host 192.168.3.11 \
+  --head-host 192.168.3.22 \
   --left-flow sam2-cs-auto
 ```
 
@@ -83,8 +87,9 @@ cd /home/dainanjun/Public
 /home/dainanjun/Public/data_collector/.venv/bin/python \
   /home/dainanjun/Public/Parm_Grasp_Place_Loop/tests/loop/simple_dual_arm_loop.py \
   --planner-host 127.0.0.1 \
-  --gripper-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --gripper-host 192.168.3.11 \
+  --arm-host 192.168.3.11 \
+  --head-host 192.168.3.22 \
   --left-flow apart
 ```
 

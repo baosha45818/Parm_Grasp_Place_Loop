@@ -176,7 +176,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--planner-host", default="127.0.0.1")
     p.add_argument("--gripper-host", default="127.0.0.1")
     p.add_argument("--head-host", default="127.0.0.1")
-    p.add_argument("--arm-host", default="192.168.88.1")
+    p.add_argument("--arm-host", default="192.168.3.11")
     return p.parse_args()
 
 

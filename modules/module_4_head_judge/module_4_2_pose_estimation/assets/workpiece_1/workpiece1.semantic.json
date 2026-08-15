@@ -1,0 +1,14 @@
+{
+  "transform_convention": "p_stl = T_stl_workpiece_semantic @ p_workpiece_semantic",
+  "description": "Workpiece semantic frame for ICP pose output. +X points from the narrow tail to the wide head; +Y points left when viewed with +Z as the outward/upward normal; +Z completes a right-handed frame.",
+  "positive_face": {
+    "upward_axis": "+Z",
+    "description": "For tabletop placement, semantic +Z pointing above the table defines the positive/front face; the opposite tabletop direction is BACK."
+  },
+  "T_stl_workpiece_semantic": [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0]
+  ]
+}

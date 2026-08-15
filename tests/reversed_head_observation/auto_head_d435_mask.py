@@ -7,7 +7,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from modules.module_5_left_pick.module_5_2_handoff_prepare.auto_depth_colour_sam2 import segment_workpiece
 from tool.inspection_support.mask_depth import (
     mask_depth_diagnostics,
     mask_depth_to_points_cam,
@@ -15,6 +14,7 @@ from tool.inspection_support.mask_depth import (
     valid_median_depth,
     voxel_downsample_np,
 )
+from tool.inspection_support.sam2_icp import prompt_segment
 
 
 HERE = Path(__file__).resolve().parent
@@ -38,8 +38,6 @@ def automatic_prompts(image: np.ndarray, config: dict) -> tuple[list[int], list[
 def capture_auto_view(camera, cfg: dict, name: str, output: Path, sam2_url: str, prompt_config: Path = DEFAULT_CONFIG):
     """Capture RGB-D and produce the same artifacts as capture_view(), without UI input."""
     prompt_spec = json.loads(prompt_config.read_text(encoding="utf-8"))
-    # ``enabled`` guarded the retired fixed-point prompt method.  The current
-    # implementation derives all prompts from the captured RGB-D frame.
     frames = [camera.read() for _ in range(int(cfg["capture_frames"]))]
     frame = frames[-1]
     if cfg.get("depth_aggregation") == "valid_median":
@@ -54,13 +52,14 @@ def capture_auto_view(camera, cfg: dict, name: str, output: Path, sam2_url: str,
     if depth.shape != frame.color.shape[:2]:
         raise RuntimeError("RGB/depth are not aligned; automatic RGB prompts are unsafe")
 
-    # Production default: derive prompts from the current aligned RGB-D frame,
-    # never reuse fixed historical points.
-    box, positives, negatives = None, None, None
-    mask, box, positives, negatives = segment_workpiece(
-        frame.color, depth, frame.depth_scale, sam2_url,
-        min_depth_m=0.25, max_depth_m=0.40,
-    )
+    # At the calibrated handoff observation pose the workpiece is stationary
+    # in image coordinates.  Use the two approved prompt locations from the
+    # overlay directly instead of re-detecting RGB-D components on each run.
+    # SAM2 still produces the mask; only its prompts are fixed automatically.
+    box, positives, negatives = automatic_prompts(frame.color, prompt_spec)
+    if len(positives) != 2:
+        raise ValueError("自动标点配置必须恰好包含工件正点 1 和 2")
+    mask = prompt_segment(frame.color, box, positives, negatives, sam2_url)
     if not np.any(mask):
         raise RuntimeError("automatic SAM2 mask is empty")
     diagnostics = mask_depth_diagnostics(
@@ -100,7 +99,7 @@ def capture_auto_view(camera, cfg: dict, name: str, output: Path, sam2_url: str,
     mask_depth = depth[mask > 0]
     nonzero = mask_depth[mask_depth > 0]
     report = {
-        "mask_mode": "automatic_depth_colour_sam2",
+        "mask_mode": "fixed_points_1_2_sam2",
         "prompt_config": str(prompt_config),
         "roi_xyxy": box,
         "positive_points": positives,

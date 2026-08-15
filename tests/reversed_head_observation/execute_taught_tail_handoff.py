@@ -81,7 +81,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--result", "--icp-result", dest="result", type=Path, required=True)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument("--execute-url", default=DEFAULT_EXECUTE_URL)
     parser.add_argument("--execute", action="store_true")
@@ -191,13 +191,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--right-lift-distance-m",
         type=float,
-        default=0.03,
+        default=0.05,
         help="左夹爪打开后右手沿body_base +Z上升距离，默认0.03m",
     )
     parser.add_argument(
         "--right-retreat-distance-m",
         type=float,
-        default=0.08,
+        default=0.15,
         help="右手上升后沿body_base -Y后退距离，默认0.08m",
     )
     parser.add_argument(

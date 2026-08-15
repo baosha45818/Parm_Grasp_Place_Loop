@@ -22,7 +22,7 @@ def main() -> None:
     parser.add_argument("--ik-frame", default="left_hand_transfer_end")
     parser.add_argument("--frame-id", default="body_base")
     parser.add_argument("--arm-id", type=int, default=1)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--speed", type=float, default=0.1)
     parser.add_argument("--lift-m", type=float, default=0.10)
     parser.add_argument("--execute", action="store_true")

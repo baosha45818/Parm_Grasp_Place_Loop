@@ -37,6 +37,9 @@ LEFT_ONLY_REQUIRED_FRAMES = frozenset(
 # tests use it to verify the exact service contract consumed by Module 1.
 PLANNER_SDK_PORTS = (5604, 5609, 5610)
 GRASPNET_PLANNER_PORTS = PLANNER_SDK_PORTS
+# The Xiangxin left/right gripper driver publishes its authoritative state on
+# this PUB port.  New drivers do not provide reliable synchronous status reads.
+GRIPPER_STATUS_PORT = 7702
 
 
 def _wait_for_state(reader, label: str, timeout_s: float = 2.0) -> dict[str, Any]:
@@ -159,7 +162,8 @@ def preflight_robot_infrastructure(
     """Validate all loop-critical endpoints without changing hardware state."""
     from parm_sdk import Arm, Gripper, Planner
 
-    force_host = force_sensor_host or gripper_host
+    # 祥鑫现场的力传感器与云台在独立控制器；不能再从夹爪 host 推断。
+    force_host = force_sensor_host or "192.168.3.22"
     active_arm_names = ("left",) if left_only else ("left", "right")
     active_hands = ((1, "left"),) if left_only else ((1, "left"), (2, "right"))
     if required_frames is None:
@@ -179,7 +183,9 @@ def preflight_robot_infrastructure(
         arm_summary = _validate_arm_state(
             _wait_for_state(arm.get_state, "机械臂"), active_arm_names
         )
-    with Gripper(host=gripper_host) as gripper:
+    # Keep preflight on the same new-driver state stream used by the runtime
+    # gripper commands; otherwise the SDK falls back to its legacy query path.
+    with Gripper(host=gripper_host, status_port=GRIPPER_STATUS_PORT) as gripper:
         gripper_summary = _validate_gripper_state(
             _wait_for_state(gripper.get_state, "夹爪"), active_hands
         )

@@ -107,7 +107,7 @@ class ModularLoopContractTest(unittest.TestCase):
 
         self.assertEqual(
             Path(scheduler.GRASPNET_FLOW_WORKDIR).resolve(),
-            (MODULES / "module_1_left_grasp/module_1_1_graspnet").resolve(),
+            (MODULES / "module_1_left_grasp/module_1_3_icp_grasp").resolve(),
         )
 
         self.assertEqual(

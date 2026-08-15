@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - depends on local environment
     raise SystemExit("pyrealsense2 is required in the active Python environment.") from exc
 
 
-DEFAULT_HEAD_SERIAL = "261222076212"
+DEFAULT_HEAD_SERIAL = "261722072445"
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 
 

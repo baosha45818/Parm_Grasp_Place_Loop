@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Desktop-grasp end-to-end entry point; perception by default, motion only with --execute."""
 from __future__ import annotations
-import argparse, json, subprocess, sys, time
+import argparse, json, os, subprocess, sys, time
 from pathlib import Path
 from types import SimpleNamespace
 import numpy as np
@@ -10,6 +10,7 @@ from capture_head_rgbd import capture, DEFAULT_HEAD_SERIAL, DEFAULT_OUTPUT_DIR
 ROOT=Path(__file__).resolve().parent
 MODULE_ROOT=ROOT.parent
 PROJECT_ROOT=MODULE_ROOT.parents[2]
+HEAD_CALIBRATION=PROJECT_ROOT/'modules/module_4_head_judge/module_4_2_pose_estimation/calibration/head_charuco_13x5_calibration_head.json'
 if str(PROJECT_ROOT) not in sys.path: sys.path.insert(0,str(PROJECT_ROOT))
 # Use the caller's environment, rather than a workstation-specific venv path.
 PYTHON=Path(sys.executable)
@@ -71,7 +72,7 @@ def move_left_ready_after_capture(d,planner_host,arm_host,speed):
  finally:
   event['finished_at']=time.time(); (d/'motion_after_capture.json').write_text(json.dumps(event,indent=2)); runtime.close()
 def main():
- p=argparse.ArgumentParser();p.add_argument('--capture-dir',type=Path,help='reuse a prior RGB-D capture');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--body-head',type=Path,default=MODULE_ROOT/'config/body_head_calibration.json');p.add_argument('--stl',type=Path,default=PROJECT_ROOT/'tool/welding_up_side_1118_only_2_small_screws_removed.stl');p.add_argument('--orientation-config',type=Path,default=MODULE_ROOT/'config/cad_orientation.json');p.add_argument('--planner-host',default='127.0.0.1');p.add_argument('--arm-host',default='192.168.88.1');p.add_argument('--head-host',default='127.0.0.1');p.add_argument('--head-settle-s',type=float,default=1.0);p.add_argument('--speed',type=float,default=.20);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.005,help='additional body_base -Z bias for both pregrasp and grasp (default: 0.005 m)');a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--capture-dir',type=Path,help='reuse a prior RGB-D capture');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--body-head',type=Path,default=HEAD_CALIBRATION);p.add_argument('--stl',type=Path,default=PROJECT_ROOT/'tool/welding_up_side_1118_only_2_small_screws_removed.stl');p.add_argument('--orientation-config',type=Path,default=MODULE_ROOT/'config/cad_orientation.json');p.add_argument('--planner-host',default=os.environ.get('PARM_PLANNER_HOST','127.0.0.1'));p.add_argument('--arm-host',default=os.environ.get('PARM_ARM_HOST','192.168.3.11'));p.add_argument('--head-host',default=os.environ.get('PARM_HEAD_HOST','192.168.3.22'));p.add_argument('--head-settle-s',type=float,default=1.0);p.add_argument('--speed',type=float,default=.20);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.005,help='additional body_base -Z bias for both pregrasp and grasp (default: 0.005 m)');a=p.parse_args()
  if a.execute and a.preflight_only: p.error('--execute and --preflight-only are mutually exclusive')
  ensure_sam2()
  fresh_capture=not bool(a.capture_dir)

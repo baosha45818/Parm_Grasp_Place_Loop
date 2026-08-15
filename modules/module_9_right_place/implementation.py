@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from time import time
 from typing import TYPE_CHECKING
 
@@ -115,7 +116,11 @@ def _insert_hole_a(
 ) -> None:
     from parm_sdk import ForceSensor
 
-    with ForceSensor(host=planner.config.planner_host, hand=RIGHT_HAND) as sensor:
+    # Planner is local, but the Xianxin force driver runs on the head/FT controller.
+    with ForceSensor(
+        host=os.environ.get("PARM_FORCE_SENSOR_HOST", "192.168.3.22"),
+        hand=RIGHT_HAND,
+    ) as sensor:
         baseline_samples = [
             _read_wrench(sensor, config.sample_timeout_seconds)
             for _ in range(config.baseline_samples)

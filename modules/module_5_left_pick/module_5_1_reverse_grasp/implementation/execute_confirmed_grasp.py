@@ -4,7 +4,7 @@
 Default is dry-run.  --execute is required for any planner motion.
 """
 from __future__ import annotations
-import argparse,json,sys,time
+import argparse,json,os,sys,time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import numpy as np
@@ -23,6 +23,16 @@ REVERSE_GRASP_CONFIG=load_workpiece_handoff_profile('1')['left_reverse_grasp']
 POST_CLOSE_LIFT_M=0.03
 # 反抓到工件后，新左夹爪必须保持至少 35% 的开度；接近全闭合不视为可靠持件。
 LEFT_GRIPPER_HELD_POSITION_MIN=35.0
+HEAD_CALIBRATION = ROOT / 'modules/module_4_head_judge/module_4_2_pose_estimation/calibration/head_charuco_13x5_calibration_head.json'
+
+def load_body_head_transform(path):
+ payload=json.loads(path.read_text())
+ key=next((key for key in ('T_base_head_camera','T_body_base_head_camera','T') if key in payload),None)
+ if key is None: raise RuntimeError(f'头部相机标定缺少 4x4 外参: {path}')
+ transform=np.asarray(payload[key],float)
+ if transform.shape != (4,4) or not np.all(np.isfinite(transform)) or not np.allclose(transform[3],[0.,0.,0.,1.]):
+  raise RuntimeError(f'头部相机标定不是有效 4x4 矩阵: {path}')
+ return transform
 
 def pose(T):
  q=Rotation.from_matrix(T[:3,:3]).as_quat() # x,y,z,w
@@ -59,14 +69,14 @@ def wait_for_left_joint_target(arm_host,target_deg,label,tolerance_deg=.5,timeou
    time.sleep(.05)
  raise RuntimeError(f'{label} did not arrive within {timeout_s:.1f}s; max joint error={last:.3f}deg')
 def main():
- p=argparse.ArgumentParser();p.add_argument('--grasp-json',type=Path,required=True);p.add_argument('--body-head',type=Path,default=MODULE_ROOT/'config/body_head_calibration.json',help='body_base <- head camera calibration');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--speed',type=float,default=.20);p.add_argument('--above-m',type=float,default=.03);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.005,help='additional body_z_down_m');p.add_argument('--lift-m',type=float,default=float(REVERSE_GRASP_CONFIG['post_close_lift_m']),help='固定为 0.03m：闭夹爪后上提3cm');p.add_argument('--gripper-host',default='127.0.0.1');p.add_argument('--planner-host',default='127.0.0.1');p.add_argument('--arm-host',default='192.168.88.1');p.add_argument('--execute-url',default='http://127.0.0.1:5667/middle/waypoint/execute');p.add_argument('--timing-file',type=Path,default=None);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--grasp-json',type=Path,required=True);p.add_argument('--body-head',type=Path,default=HEAD_CALIBRATION,help='body_base <- head camera calibration');p.add_argument('--execute',action='store_true');p.add_argument('--preflight-only',action='store_true',help='plan all enabled approach candidates but never execute');p.add_argument('--speed',type=float,default=.20);p.add_argument('--above-m',type=float,default=.03);p.add_argument('--approach-angles-deg',nargs='+',type=float,default=[90.,15.,-15.],help='table-relative approach angles; 90=vertical down; default: 90 15 -15 (up to +/-75deg side tilt)');p.add_argument('--body-z-down-m',type=float,default=.005,help='additional body_z_down_m');p.add_argument('--lift-m',type=float,default=float(REVERSE_GRASP_CONFIG['post_close_lift_m']),help='固定为 0.03m：闭夹爪后上提3cm');p.add_argument('--gripper-host',default=os.environ.get('PARM_GRIPPER_HOST','192.168.3.11'));p.add_argument('--planner-host',default=os.environ.get('PARM_PLANNER_HOST','127.0.0.1'));p.add_argument('--arm-host',default=os.environ.get('PARM_ARM_HOST','192.168.3.11'));p.add_argument('--execute-url',default='http://127.0.0.1:5667/middle/waypoint/execute');p.add_argument('--timing-file',type=Path,default=None);a=p.parse_args()
  if a.execute and a.preflight_only: p.error('--execute and --preflight-only are mutually exclusive')
  if a.above_m<=0 or abs(a.lift_m-POST_CLOSE_LIFT_M)>1e-9 or a.body_z_down_m<0 or not a.approach_angles_deg or any(not 0<abs(x)<=90 for x in a.approach_angles_deg): p.error(f'--above-m 必须为正，--lift-m 必须固定为 {POST_CLOSE_LIFT_M:.2f}m；--body-z-down-m 必须非负；每个 --approach-angles-deg 必须在 [-90,90] 且非0')
  records=json.loads(a.grasp_json.read_text());
  if len(records) != 1:
   raise RuntimeError(f'execution blocked: expected exactly one reverse-side grasp candidate, got {len(records)}; inspect grasp_overlay.png')
  r=records[0]; Tg=np.eye(4);Tg[:3,:3]=r['grasp_pose']['rotation_matrix'];Tg[:3,3]=r['grasp_pose']['translation_m']
- Tb=np.asarray(json.loads(a.body_head.read_text())['T'],float)
+ Tb=load_body_head_transform(a.body_head)
  timing=ExecutionTiming();timing_path=a.timing_file or a.grasp_json.parent/'reverse_grasp_execution_timing.json';outcome='FAILURE'
  # ``left_eef`` is the URDF open-jaw grasp centre: target it directly and do
  # not apply the retired grasp-TCP calibration or Planner-tool bridge.

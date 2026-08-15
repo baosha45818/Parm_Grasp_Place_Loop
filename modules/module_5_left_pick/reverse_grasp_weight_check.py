@@ -60,7 +60,7 @@ def _collect_window(force_sensor_host: str):
         return collect_force_window(sensor, sample_count=sample_count, timeout_s=timeout_s)
 
 
-def capture_open_gripper_baseline(force_sensor_host: str = "127.0.0.1"):
+def capture_open_gripper_baseline(force_sensor_host: str = "192.168.3.22"):
     """在抓取位、闭夹爪前采集空载三轴力基线。"""
     baseline = _collect_window(force_sensor_host)
     print(f"[反抓力] 抓取位空载基线: median={list(baseline.median_force_n)} N", flush=True)
@@ -69,7 +69,7 @@ def capture_open_gripper_baseline(force_sensor_host: str = "127.0.0.1"):
 
 def verify_object_after_lift(
     baseline: Any,
-    force_sensor_host: str = "127.0.0.1",
+    force_sensor_host: str = "192.168.3.22",
     *,
     minimum_held_mass_g: float | None = None,
 ) -> dict[str, Any]:
@@ -126,6 +126,6 @@ def verify_object_after_lift(
     return payload
 
 
-def verify_single_after_lift(baseline: Any, force_sensor_host: str = "127.0.0.1") -> dict[str, Any]:
+def verify_single_after_lift(baseline: Any, force_sensor_host: str = "192.168.3.22") -> dict[str, Any]:
     """兼容旧导入；语义已经变为只判断是否抓到工件。"""
     return verify_object_after_lift(baseline, force_sensor_host)

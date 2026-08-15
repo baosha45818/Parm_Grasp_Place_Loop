@@ -60,7 +60,7 @@ def parse_args() -> argparse.Namespace:
         help="Record left-arm, gripper and TCP state into robot_state.json (default: enabled)",
     )
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--gripper-host", default="127.0.0.1")
     parser.add_argument("--joint-unit", choices=("deg", "rad"), default="deg",
                         help="Unit returned by the arm state service; snapshot is always written in degrees")

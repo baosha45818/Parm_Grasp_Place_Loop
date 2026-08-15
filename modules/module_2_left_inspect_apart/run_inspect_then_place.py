@@ -27,6 +27,7 @@ from modules.module_status import (
     report_exception as report_module_exception,
 )
 from modules.module_3_left_place.placement_config import load_workpiece_parameters
+from modules.stage_result import write_stage_result
 from tool.runtime_log import RuntimeLogCapture
 from tool.workpiece_timer import module_timer
 
@@ -56,11 +57,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--arm-host",
-        default=os.environ.get("GRASPNET_V7_ARM_HOST", "192.168.88.1"),
+        default=os.environ.get("PARM_ARM_HOST", os.environ.get("GRASPNET_V7_ARM_HOST", "192.168.3.11")),
     )
     parser.add_argument(
         "--gripper-host",
-        default=os.environ.get("PARM_GRIPPER_HOST", "127.0.0.1"),
+        default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"),
     )
     parser.add_argument("--gripper-hand", type=int, default=1)
     parser.add_argument(
@@ -120,6 +121,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--placement-permit-file", type=Path)
     parser.add_argument("--auto-confirm-motion", action="store_true")
     parser.add_argument("--skip-motion", action="store_true")
+    parser.add_argument(
+        "--skip-inspect-direct",
+        action="store_true",
+        help="跳过PC1/PC2与ICP，直接以Module 3固定 left_eef DIRECT放置。",
+    )
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     # 该包装器会把放置参数显式转交给 Module 3；因此必须按照所选工件替换
@@ -235,8 +241,27 @@ def main() -> int:
         inspect_command.extend(["--weight-handoff-file", str(args.weight_handoff_file)])
     if args.skip_motion:
         inspect_command.append("--skip-motion")
-    with module_timer("module_2_left_inspect"):
-        run(inspect_command, "Module 2 Inspect")
+    if args.skip_inspect_direct:
+        inspection_payload = {
+            "stage": "left_inspect",
+            "outcome": "success",
+            "direct_only_without_inspect": True,
+            "inspection_skipped_reason": "loop_direct_place_after_grasp",
+            "workpiece": args.workpiece,
+            "weight_handoff_file": (
+                str(args.weight_handoff_file) if args.weight_handoff_file else None
+            ),
+        }
+        write_stage_result(inspection_result, inspection_payload)
+        report_module_status(
+            "module_2_left_inspect",
+            ResultStatus.SUCCESS,
+            "总控DIRECT模式：跳过PC1/PC2、SAM2和ICP；已发布无ICP DIRECT交接",
+        )
+        print("[apart] 总控DIRECT模式：跳过 Module 2 Inspect，直接启动 Module 3 DIRECT。", flush=True)
+    else:
+        with module_timer("module_2_left_inspect"):
+            run(inspect_command, "Module 2 Inspect")
 
     inspection_payload = json.loads(inspection_result.read_text(encoding="utf-8"))
     inspection_outcome = inspection_payload.get("outcome")

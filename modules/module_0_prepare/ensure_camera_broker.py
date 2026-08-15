@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start or validate the singleton D405/Femto Camera Broker for a loop run."""
+"""Start or validate the singleton camera Broker for a loop run."""
 
 from __future__ import annotations
 
@@ -84,9 +84,17 @@ def _restart_owned_broker() -> None:
     print(f"[module-0] restarted Camera Broker after failed D405 EEF preflight: pid={pid}", flush=True)
 
 
-def _start_broker(timeout_s: float) -> dict:
+def _start_broker(
+    timeout_s: float, *, require_femto: bool, require_d405_eef_pose: bool,
+    expected_d405_serial: str | None,
+) -> dict:
     environment = dict(os.environ)
-    environment["GRASPNET_V7_DISABLE_FEMTO"] = "0"
+    # Module 1's direct-Planner ICP path owns only D405.  Do not overwrite
+    # that request with the legacy all-camera Broker default.
+    environment["GRASPNET_V7_DISABLE_FEMTO"] = "0" if require_femto else "1"
+    environment["GRASPNET_V7_DIRECT_PLANNER"] = "0" if require_d405_eef_pose else "1"
+    if expected_d405_serial is not None:
+        environment["GRASPNET_V7_D405_SERIAL"] = str(expected_d405_serial)
     environment["GRASPNET_V7_CAMERA_SOCKET"] = SOCKET
     subprocess.run(["bash", str(V7_DIR / "start_camera_service.sh")], check=True, env=environment)
     deadline = time.monotonic() + timeout_s
@@ -99,44 +107,86 @@ def _start_broker(timeout_s: float) -> dict:
             time.sleep(0.25)
 
 
-def _validate_broker(status: dict) -> None:
-    """Validate every camera profile and the D405-to-robot pose dependency."""
+def _validate_broker(
+    status: dict, *, require_d405_eef_pose: bool = True, expected_d405_serial: str | None = None,
+    require_femto: bool = True,
+) -> None:
+    """Validate the requested camera set and D405-to-robot dependency."""
     if status.get("schema_version") != 1:
         raise RuntimeError("Camera Broker ABI mismatch; restart it with the current project version")
     cameras = status.get("camera_config") or {}
-    if "d405" not in cameras or "femto_bolt" not in cameras:
-        raise RuntimeError("Camera Broker must own both D405 and Femto; refusing mixed direct-SDK operation")
+    if not require_femto and "femto_bolt" in cameras:
+        raise RuntimeError(
+            "Camera Broker has Femto enabled, but this D405-only flow must not "
+            "occupy the chest camera"
+        )
+    required_cameras = {"d405"}
+    if require_femto:
+        required_cameras.add("femto_bolt")
+    missing_cameras = sorted(required_cameras.difference(cameras))
+    if missing_cameras:
+        raise RuntimeError(f"Camera Broker is missing required cameras: {missing_cameras}")
     profiles = status.get("profiles") or {}
-    for profile_id in ("graspnet_d405_v1", "graspnet_femto_v1", "inspect_femto_v1"):
+    if expected_d405_serial is not None:
+        actual = str((cameras.get("d405") or {}).get("serial", ""))
+        if actual != str(expected_d405_serial):
+            raise RuntimeError(
+                f"Camera Broker D405 serial is {actual!r}; expected {expected_d405_serial!r}"
+            )
+    profile_ids = ["graspnet_d405_v1"]
+    if require_femto:
+        profile_ids.extend(("graspnet_femto_v1", "inspect_femto_v1"))
+    for profile_id in profile_ids:
         if profile_id not in profiles:
             raise RuntimeError(f"Camera Broker lacks required profile: {profile_id}")
         result = _request({
             "op": "probe", "schema_version": 1, "profile_id": profile_id,
-            "require_eef_pose": profile_id == "graspnet_d405_v1",
+            "require_eef_pose": profile_id == "graspnet_d405_v1" and require_d405_eef_pose,
         })
-        if profile_id == "graspnet_d405_v1" and "T_base_eef" not in result:
+        if profile_id == "graspnet_d405_v1" and require_d405_eef_pose and "T_base_eef" not in result:
             raise RuntimeError("Camera Broker D405 probe did not return T_base_eef")
 
 
-def ensure_camera_broker(timeout_s: float = 75.0) -> dict:
+def ensure_camera_broker(
+    timeout_s: float = 75.0, *, require_d405_eef_pose: bool = True,
+    expected_d405_serial: str | None = None, require_femto: bool = True,
+) -> dict:
     try:
         status = _status()
         started = False
     except OSError:
         _remove_confirmed_stale_socket()
-        status = _start_broker(timeout_s)
+        status = _start_broker(
+            timeout_s,
+            require_femto=require_femto,
+            require_d405_eef_pose=require_d405_eef_pose,
+            expected_d405_serial=expected_d405_serial,
+        )
         started = True
     try:
-        _validate_broker(status)
+        _validate_broker(
+            status, require_d405_eef_pose=require_d405_eef_pose,
+            expected_d405_serial=expected_d405_serial,
+            require_femto=require_femto,
+        )
     except RuntimeError:
         if started:
             raise
         # A live old Broker may not implement the EEF probe, while a Broker
         # created before a driver restart can retain a stale SDK subscriber.
         _restart_owned_broker()
-        status = _start_broker(timeout_s)
+        status = _start_broker(
+            timeout_s,
+            require_femto=require_femto,
+            require_d405_eef_pose=require_d405_eef_pose,
+            expected_d405_serial=expected_d405_serial,
+        )
         started = True
-        _validate_broker(status)
+        _validate_broker(
+            status, require_d405_eef_pose=require_d405_eef_pose,
+            expected_d405_serial=expected_d405_serial,
+            require_femto=require_femto,
+        )
     print(f"[module-0] Camera Broker {'started' if started else 'reused'}: {SOCKET}", flush=True)
     return status
 
@@ -150,7 +200,7 @@ def require_camera_broker() -> dict:
 
 
 def stop_camera_broker(timeout_s: float = 10.0) -> bool:
-    """Stop only the project-owned broker and release D405/Femto for GCS."""
+    """Stop only the project-owned broker and release its camera devices for GCS."""
     pid_path = V7_DIR / "logs" / "camera_service.pid"
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
@@ -173,7 +223,7 @@ def stop_camera_broker(timeout_s: float = 10.0) -> bool:
         time.sleep(0.1)
     _remove_confirmed_stale_socket()
     pid_path.unlink(missing_ok=True)
-    print(f"[module-0] Camera Broker stopped; D405/Femto released for GCS: pid={pid}", flush=True)
+    print(f"[module-0] Camera Broker stopped; camera devices released for GCS: pid={pid}", flush=True)
     return True
 
 

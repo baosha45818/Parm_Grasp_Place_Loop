@@ -46,21 +46,19 @@ GRASPNET_ROOT = LOOP / "third_party/graspnet"
 HERE = Path(__file__).resolve().parent
 WEIGHT_CONFIG_PATH = LOOP / "config/grasp_weight_thresholds.conf"
 
+# URDF: left finger1 is the physical left finger (+X of gripper_base), and
+# finger2 is the physical right finger (-X).  gripper_base is fixed to
+# left_eef with +X_gripper == -Y_eef, hence this is right finger -> left
+# finger in the *final left_eef pose* frame.  Apply only to front grasps.
+FRONT_PHYSICAL_RIGHT_TO_LEFT_JAW_OFFSET_M = 0.00
+PHYSICAL_RIGHT_TO_LEFT_JAW_AXIS_EEF = np.array((0.0, -1.0, 0.0))
+# Back-face offset is expressed in the Workpiece-1 CAD frame rather than a
+# gripper frame: move the whole gripper toward object -X by 3 mm.
+BACK_OBJECT_NEGATIVE_X_OFFSET_M = 0.0015
+
 
 class TraditionalPlannerUnreachable(RuntimeError):
     """No candidate from one fresh traditional observation has a safe path."""
-
-
-def publish_observation_ready() -> None:
-    """Tell the loop that the left arm is parked at the D405 observation pose."""
-    value = os.environ.get("LOOP_GRASPNET_OBSERVATION_READY_FILE")
-    if not value:
-        return
-    ready_path = Path(value)
-    temporary = ready_path.with_name(f".{ready_path.name}.tmp")
-    temporary.write_text("ready\n", encoding="utf-8")
-    temporary.replace(ready_path)
-    print("-> 左臂已到传统 ICP 观察位；已通知总控可以启动右臂 ServoPose。", flush=True)
 
 
 def wait_for_execution_permit() -> None:
@@ -121,32 +119,79 @@ def load_shared_weight_defaults() -> dict[str, float | int]:
     }
 
 
-def eef_transform(state: dict) -> np.ndarray:
-    left = ((state.get("state") or {}).get("left") or {})
-    pose = left.get("eef_pose") or {}
-    xyz, rpy = pose.get("xyz"), pose.get("rpy")
-    if not (isinstance(xyz, list) and isinstance(rpy, list) and len(xyz) == len(rpy) == 3):
-        raise RuntimeError("parm_sdk Arm.get_state() does not contain left eef_pose xyz/rpy")
-    values = np.asarray([*xyz, *rpy], dtype=float)
-    if not np.all(np.isfinite(values)):
-        raise RuntimeError("left eef_pose has non-finite values")
-    T = np.eye(4)
-    T[:3, :3] = Rotation.from_euler("xyz", values[3:]).as_matrix()
-    T[:3, 3] = values[:3]
-    return T
+def planner_body_base_to_left_end() -> tuple[np.ndarray, dict]:
+    """Read the live direct Planner transform T_body_base_left_arm_end_link."""
+    sys.path.insert(0, str(GRASPNET_ROOT))
+    from parm_sdk import Planner
+    planner = Planner(host="127.0.0.1", trajectory_port=5604, tf_port=5609, waypoint_port=5610)
+    try:
+        response = planner.lookup_transform("left_arm_end_link", "body_base")
+        reverse_response = planner.lookup_transform("body_base", "left_arm_end_link")
+    finally:
+        planner.close()
+    data = (response.get("data") or {})
+    reverse_data = (reverse_response.get("data") or {})
+    if data.get("source_frame") != "left_arm_end_link" or data.get("target_frame") != "body_base":
+        raise RuntimeError(f"unexpected Planner TF response for left_arm_end_link -> body_base: {data}")
+    if reverse_data.get("source_frame") != "body_base" or reverse_data.get("target_frame") != "left_arm_end_link":
+        raise RuntimeError(f"unexpected Planner TF response for body_base -> left_arm_end_link: {reverse_data}")
+    translation, rotation = data.get("translation") or {}, data.get("rotation") or {}
+    raw = np.eye(4)
+    try:
+        raw[:3, :3] = Rotation.from_quat([rotation[key] for key in "xyzw"]).as_matrix()
+        raw[:3, 3] = [translation[key] for key in "xyz"]
+        reverse_translation, reverse_rotation = reverse_data.get("translation") or {}, reverse_data.get("rotation") or {}
+        reverse_raw = np.eye(4)
+        reverse_raw[:3, :3] = Rotation.from_quat([reverse_rotation[key] for key in "xyzw"]).as_matrix()
+        reverse_raw[:3, 3] = [reverse_translation[key] for key in "xyz"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid Planner TF payload: {data}") from exc
+    if not (np.all(np.isfinite(raw)) and np.all(np.isfinite(reverse_raw))):
+        raise RuntimeError("Planner returned non-finite left-arm TF values")
+    # The deployed TF gateway serializes the inverse of the requested
+    # transform; this normalization is independently checked in calibration.
+    T_body_base_left_end = np.linalg.inv(raw)
+    T_left_end_body_base = np.linalg.inv(reverse_raw)
+    closure = T_body_base_left_end @ T_left_end_body_base
+    closure_mm, closure_deg = pose_delta(np.eye(4), closure)
+    if closure_mm > 0.5 or closure_deg > 0.25:
+        raise RuntimeError(
+            "Planner body_base/end-link TF directions are not reciprocal: "
+            f"closure={closure_mm:.3f}mm/{closure_deg:.3f}deg"
+        )
+    return T_body_base_left_end, {
+        "direct_timestamp": data.get("timestamp"),
+        "reverse_timestamp": reverse_data.get("timestamp"),
+        "forward_reverse_closure_mm": closure_mm,
+        "forward_reverse_closure_deg": closure_deg,
+    }
+
+
+def pose_delta(before: np.ndarray, after: np.ndarray) -> tuple[float, float]:
+    return (
+        float(np.linalg.norm(after[:3, 3] - before[:3, 3]) * 1000.0),
+        float((Rotation.from_matrix(before[:3, :3].T @ after[:3, :3]).magnitude()) * 180.0 / np.pi),
+    )
+
+
+def planner_timestamp_ns(tf_record: dict) -> int:
+    """Return the dynamic timestamp of the direct Planner TF response."""
+    stamp = tf_record.get("direct_timestamp")
+    if not isinstance(stamp, dict):
+        raise RuntimeError("Planner TF response has no dynamic timestamp")
+    try:
+        return int(stamp["sec"]) * 1_000_000_000 + int(stamp["nanosec"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"invalid Planner TF timestamp: {stamp}") from exc
 
 
 def capture_log(run: Path, args: argparse.Namespace) -> Path:
     """Request D405 data from the singleton Camera Broker for traditional ICP."""
     sys.path.insert(0, str(TOOL))
-    from parm_sdk import Arm
     sys.path.insert(0, str(GRASPNET_ROOT / "deploy" / "version7"))
     from camera_client import capture as broker_capture
     from camera_client import status as broker_status
 
-    with Arm(host=args.arm_host) as arm:
-        state = arm.get_state() or {}
-    T_base_eef = eef_transform(state)
     raw = run / "raw/d405"
     raw.parent.mkdir(parents=True, exist_ok=True)
     if raw.exists():
@@ -154,19 +199,55 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
 
     status = broker_status(args.camera_broker_socket, timeout_s=args.camera_broker_timeout_s)
     allow_root = Path(status["allow_root"]).resolve()
-    broker_capture_dir = (
-        allow_root / "traditional_icp" /
-        f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex}"
-    )
-    result = broker_capture(
-        args.camera_broker_socket,
-        {
-            "camera": "d405",
-            "output_dir": str(broker_capture_dir),
-            "frame_count": int(args.frames),
-        },
-        timeout_s=args.camera_broker_timeout_s,
-    )
+    broker_capture_dir: Path | None = None
+    result: dict | None = None
+    for attempt in range(1, int(args.capture_stability_retries) + 1):
+        T_before, tf_before = planner_body_base_to_left_end()
+        broker_capture_dir = (
+            allow_root / "traditional_icp" /
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex}"
+        )
+        result = broker_capture(
+            args.camera_broker_socket,
+            {
+                "camera": "d405",
+                "output_dir": str(broker_capture_dir),
+                "frame_count": int(args.frames),
+                "require_eef_pose": False,
+            },
+            timeout_s=args.camera_broker_timeout_s,
+        )
+        T_after, tf_after = planner_body_base_to_left_end()
+        delta_mm, delta_deg = pose_delta(T_before, T_after)
+        timestamp_before_ns = planner_timestamp_ns(tf_before)
+        timestamp_after_ns = planner_timestamp_ns(tf_after)
+        if timestamp_after_ns <= timestamp_before_ns:
+            shutil.rmtree(broker_capture_dir, ignore_errors=True)
+            raise RuntimeError(
+                "Planner TF timestamp did not advance during D405 capture; "
+                "restart/repair the Planner joint-state TF publisher before recapturing"
+            )
+        if delta_mm <= 0.5 and delta_deg <= 0.25:
+            break
+        shutil.rmtree(broker_capture_dir, ignore_errors=True)
+        if attempt == int(args.capture_stability_retries):
+            raise RuntimeError(
+                "Planner left-arm end link remained in motion across "
+                f"{attempt} D405 captures: {delta_mm:.2f}mm/{delta_deg:.2f}deg"
+            )
+        print(
+            "-> D405 capture static check retry "
+            f"{attempt}/{int(args.capture_stability_retries)}: "
+            f"{delta_mm:.2f}mm/{delta_deg:.2f}deg; waiting "
+            f"{args.capture_stability_retry_wait_s:.2f}s",
+            flush=True,
+        )
+        time.sleep(args.capture_stability_retry_wait_s)
+    else:  # pragma: no cover - loop always exits by break or exception.
+        raise AssertionError("D405 capture stability loop exited unexpectedly")
+
+    if broker_capture_dir is None or result is None:
+        raise AssertionError("D405 capture did not return a result")
     try:
         shutil.copytree(broker_capture_dir, raw)
     finally:
@@ -176,13 +257,18 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
 
     meta_path = raw / "meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    # Keep traditional ICP's established pose source unchanged.  The Broker
-    # owns only the camera; this Arm.get_state snapshot remains the recorded
-    # T_base_eef consumed by the offline ICP stage.
+    # Direct Planner coordinate chain; no SDK eef_pose and no
+    # planner_tf_bridge calibration participates in Module 1 geometry.
     meta.update({
         "camera_name": "d405",
         "serial": args.d405_serial,
-        "T_base_eef": T_base_eef.tolist(),
+        "T_body_base_left_arm_end_link": T_after.tolist(),
+        "planner_tf_before": tf_before,
+        "planner_tf_after": tf_after,
+        "planner_tf_timestamp_before_ns": timestamp_before_ns,
+        "planner_tf_timestamp_after_ns": timestamp_after_ns,
+        "planner_capture_stability": {"translation_delta_mm": delta_mm, "rotation_delta_deg": delta_deg},
+        "robot_pose_source": "direct Planner lookup_transform(left_arm_end_link, body_base), inverse-normalized",
         "frame_count": int(args.frames),
         "camera_broker_socket": args.camera_broker_socket,
         "camera_broker_capture_elapsed_s": result.get("capture_elapsed_s"),
@@ -255,18 +341,20 @@ def planner_args() -> argparse.Namespace:
     args.planner_host = "127.0.0.1"; args.planner_trajectory_port = 5604
     args.planner_tf_port = 5609; args.planner_waypoint_port = 5610
     args.planner_execute_url = "http://127.0.0.1:5667/middle/waypoint/execute"
-    args.planner_bridge_calibration = str(
-        TOOL / "calibration/graspnet_planner_bridge_5604_20260803/planner_tf_bridge_5604_candidate.json"
-    )
-    # Exact Module 1-1/V7 production Planner convention.  Its direct-center
-    # mode consumes the calibrated plan pose as the left_eef IK target.
+    # Direct Planner coordinate chain: the ICP plan is already expressed in
+    # body_base using live body_base->end_link and the new hand-eye result.
+    # Never load or apply the retired planner_tf_bridge calibration here.
     args.planner_base_frame = "body_base"; args.planner_tool_frame = "left_eef"
-    args.planner_direct_grasp_center = True
-    args.planner_group = "left_arm"; args.arm_id = 1; args.arm_host = "192.168.88.1"
-    # Keep the user-requested 0.2 velocity.  Pilz rejected recent LIN paths
-    # at 0.2 acceleration by a small joint3 limit overshoot (2.441 > 2.4),
+    args.planner_direct_grasp_center = True; args.planner_direct_pose = True
+    args.planner_group = "left_arm"; args.arm_id = 1; args.arm_host = os.environ.get("PARM_ARM_HOST", "192.168.3.11")
+    # This deployment exposes the left gripper from the robot controller,
+    # not from a local legacy service.  Keep it paired with arm1 explicitly.
+    args.gripper_host = os.environ.get("PARM_GRIPPER_HOST", args.arm_host)
+    args.gripper_hand = 1
+    # Keep Module 1 at the requested 0.5 velocity. Pilz rejected recent LIN
+    # paths at higher acceleration by a small joint3 limit overshoot (2.441 > 2.4),
     # so use a conservative acceleration scale without slowing cruise speed.
-    args.planner_max_vel = .2; args.planner_max_acc = .18
+    args.planner_max_vel = .5; args.planner_max_acc = .18
     args.planner_pregrasp_mode = "rrtstar"; args.planner_descend_mode = "lin"
     args.grasp_weight_check = False; args.stop_after_graspup = True
     return args
@@ -282,12 +370,63 @@ def parallel_jaw_variants(plan: dict) -> list[tuple[float, dict]]:
     """
     original = copy.deepcopy(plan)
     R0 = np.asarray(original["eef_rotation_base"], dtype=float)
-    pre_tcp = np.asarray(original["pregrasp_grasp_tcp_base_m"], dtype=float)
+    nominal_pre_tcp = np.asarray(original["pregrasp_grasp_tcp_base_m"], dtype=float)
     # Preserve the Version7 final-Z probe for the 180-degree symmetry branch.
-    grasp_tcp = np.asarray(original.get("grasp_tcp_base_m", original["grasp_center_base_m"]), dtype=float)
+    nominal_grasp_tcp = np.asarray(
+        original.get("grasp_tcp_base_m", original["grasp_center_base_m"]), dtype=float
+    )
     variants = []
     for roll_deg, R in ((0.0, R0), (180.0, R0 @ Rotation.from_euler("x", 180, degrees=True).as_matrix())):
         item = copy.deepcopy(original)
+        jaw_offset_base = np.zeros(3, dtype=float)
+        if item.get("face_side") == "front":
+            # This must be computed after the symmetry roll: 0/180 degrees
+            # swaps the physical fingers with respect to the object, while
+            # R @ axis always remains physical right -> physical left.
+            jaw_offset_base = R @ (
+                PHYSICAL_RIGHT_TO_LEFT_JAW_AXIS_EEF
+                * FRONT_PHYSICAL_RIGHT_TO_LEFT_JAW_OFFSET_M
+            )
+            item["front_physical_right_to_left_jaw_offset_m"] = (
+                FRONT_PHYSICAL_RIGHT_TO_LEFT_JAW_OFFSET_M
+            )
+            # The deployment default is deliberately zero.  Record the
+            # physical direction even in that case; dividing the zero vector
+            # by the zero scalar used to write NaNs into plan diagnostics.
+            item["front_physical_right_to_left_jaw_axis_base"] = (
+                R @ PHYSICAL_RIGHT_TO_LEFT_JAW_AXIS_EEF
+            ).tolist()
+            item["front_physical_right_to_left_jaw_offset_base_m"] = jaw_offset_base.tolist()
+        elif item.get("face_side") == "back":
+            # This is intentionally independent of the 0/180-degree jaw
+            # symmetry.  New plans persist the object axis explicitly; the
+            # R0 fallback matches the back grasp construction (EEF +Z=-Xobj)
+            # and keeps old recorded plans replayable.
+            negative_x_axis_base = np.asarray(
+                item.get("object_negative_x_axis_base", R0[:, 2]), dtype=float
+            )
+            if negative_x_axis_base.shape != (3,) or not np.all(np.isfinite(negative_x_axis_base)):
+                raise RuntimeError("back plan has invalid object_negative_x_axis_base")
+            norm = float(np.linalg.norm(negative_x_axis_base))
+            if norm < 1e-8:
+                raise RuntimeError("back plan has zero object_negative_x_axis_base")
+            negative_x_axis_base /= norm
+            jaw_offset_base = negative_x_axis_base * BACK_OBJECT_NEGATIVE_X_OFFSET_M
+            item["back_object_negative_x_offset_m"] = BACK_OBJECT_NEGATIVE_X_OFFSET_M
+            item["back_object_negative_x_axis_base"] = negative_x_axis_base.tolist()
+            item["back_object_negative_x_offset_base_m"] = jaw_offset_base.tolist()
+        pre_tcp = nominal_pre_tcp + jaw_offset_base
+        grasp_tcp = nominal_grasp_tcp + jaw_offset_base
+        # Keep all persisted centre/TCP fields congruent with the actual
+        # target, so the plan and its visual/debug artifacts describe the
+        # same whole-gripper translation.
+        for key in (
+            "grasp_center_base_m", "predicted_grasp_tcp_base_m",
+            "compensated_grasp_center_base_m", "grasp_tcp_base_m",
+        ):
+            if key in item:
+                item[key] = (np.asarray(original[key], dtype=float) + jaw_offset_base).tolist()
+        item["pregrasp_grasp_tcp_base_m"] = pre_tcp.tolist()
         item["eef_rotation_base"] = R.tolist()
         item["eef_axis_angle_rad"] = Rotation.from_matrix(R).as_rotvec().tolist()
         if item.get("planner_direct_grasp_center") is True:
@@ -560,7 +699,7 @@ def prepare_traditional_candidate(
             flush=True,
         )
         subprocess.run(
-            [sys.executable, str(observation_script), "--arm-host", args.arm_host, "--speed", "0.2"]
+            [sys.executable, str(observation_script), "--arm-host", args.arm_host, "--speed", "0.5"]
             if observation_script.name == "go_graspnet2.py"
             else [sys.executable, str(observation_script), "--arm-host", args.arm_host],
             input="y\n", text=True, check=True,
@@ -759,8 +898,11 @@ def run_traditional_cycles(
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     weight_defaults = load_shared_weight_defaults()
-    p.add_argument("--d405-serial", default="260322270242")
-    p.add_argument("--arm-host", default="192.168.88.1")
+    p.add_argument(
+        "--d405-serial",
+        default=os.environ.get("PARM_D405_SERIAL", "260322270600"),
+    )
+    p.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     p.add_argument("--frames", type=int, default=5)
     p.add_argument("--icp-workers", type=int, default=min(4, os.cpu_count() or 1),
                    help="parallel STL-ICP worker processes per D405 observation (default: min(4, CPU count))")
@@ -776,6 +918,14 @@ def main() -> None:
         help="singleton D405/Femto Camera Broker Unix socket",
     )
     p.add_argument("--camera-broker-timeout-s", type=float, default=30.0)
+    p.add_argument(
+        "--capture-stability-retries", type=int, default=3,
+        help="D405 capture static-check attempts after observation motion (default: 3)",
+    )
+    p.add_argument(
+        "--capture-stability-retry-wait-s", type=float, default=0.25,
+        help="wait before a D405 static-check recapture, in seconds (default: 0.25)",
+    )
     p.add_argument("--output-dir", type=Path, default=HERE / "output")
     p.add_argument("--sam-socket", default=str(TOOL / "sam2-service/runtime/sam2-service.sock"))
     p.add_argument("--min-single-stl-observed-coverage", type=float, default=.65,
@@ -796,9 +946,9 @@ def main() -> None:
                    help="only another instance higher than the grasp surface by this guard enters sweep checking (default: 0.003)")
     p.add_argument("--max-auto-grasp-up-m", type=float, default=.03,
                    help="maximum automatic +Z lift to clear lower stacked points (default: 0.03; 0 disables)")
-    p.add_argument("--front-grasp-upward-offset-m", type=float, default=0.021,
+    p.add_argument("--front-grasp-upward-offset-m", type=float, default=0.00,
                    help="final front-side closure offset in +Z meters (default: 0.021; closes at grasp surface)")
-    p.add_argument("--back-grasp-upward-offset-m", type=float, default=0.027,
+    p.add_argument("--back-grasp-upward-offset-m", type=float, default=0.00,
                    help="final back-side closure offset in +Z meters (default: 0.027; closes at grasp surface)")
     p.add_argument("--grasp-downward-probe-m", type=float, default=None,
                    help="optional V7 signed global override: positive=down, negative=up")
@@ -806,7 +956,7 @@ def main() -> None:
     p.add_argument("--execute", action="store_true", help="permit physical execution only with --confirm-real-grasp")
     p.add_argument("--confirm-real-grasp", action="store_true")
     p.add_argument("--weight-handoff-file", type=Path)
-    p.add_argument("--force-sensor-host", default="127.0.0.1")
+    p.add_argument("--force-sensor-host", default=os.environ.get("PARM_FORCE_SENSOR_HOST", "192.168.3.22"))
     p.add_argument("--weight-check-samples", type=int, default=weight_defaults["weight_check_samples"])
     p.add_argument("--weight-check-timeout-s", type=float, default=weight_defaults["weight_check_timeout_s"])
     p.add_argument("--weight-check-settle-s", type=float, default=weight_defaults["weight_check_settle_s"])
@@ -829,6 +979,10 @@ def main() -> None:
     )
     args = p.parse_args()
     if args.frames < 1: p.error("--frames must be positive")
+    if args.capture_stability_retries < 1:
+        p.error("--capture-stability-retries must be positive")
+    if args.capture_stability_retry_wait_s < 0:
+        p.error("--capture-stability-retry-wait-s must be non-negative")
     if args.icp_workers < 1: p.error("--icp-workers must be positive")
     if not np.isfinite(args.icp_daemon_timeout_s) or args.icp_daemon_timeout_s <= 0:
         p.error("--icp-daemon-timeout-s must be finite and positive")
@@ -910,12 +1064,6 @@ def main() -> None:
             input="y\n",
             text=True,
             check=True,
-        )
-        publish_observation_ready()
-    elif os.environ.get("LOOP_GRASPNET_OBSERVATION_READY_FILE"):
-        raise RuntimeError(
-            "traditional ICP loop mode cannot use --skip-observation-move: "
-            "the scheduler needs a verified observation-ready marker"
         )
     try:
         run_traditional_cycles(args, pa, pe)

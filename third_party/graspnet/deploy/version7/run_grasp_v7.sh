@@ -117,10 +117,10 @@ exec env CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" "$ROOT_DIR/.venv/bin/
   --planner-max-acc "$GRASPNET_PLANNER_SPEED" \
   --planner-pregrasp-mode rrtstar \
   --planner-descend-mode lin \
-  --arm-host 192.168.88.1 \
+  --arm-host "${PARM_ARM_HOST:-192.168.3.11}" \
   --arm-id 1 \
   --move-observation \
-  --d405-serial 260322270242 \
+  --d405-serial 260322270600 \
   --d405-frame-count 5 \
   --d405-postprocess \
   --d405-hole-filling \

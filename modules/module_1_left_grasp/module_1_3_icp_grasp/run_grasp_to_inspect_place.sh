@@ -43,13 +43,16 @@ fi
 if [[ "${LOOP_AUTO_CONFIRM_MOTION:-0}" == "1" ]]; then
   placement_gate_args+=(--auto-confirm-motion)
 fi
+if [[ "${PARM_LOOP_SKIP_INSPECT_DIRECT:-0}" == "1" ]]; then
+  placement_gate_args+=(--skip-inspect-direct)
+fi
 
 echo "-> Module 1: traditional pick; GraspNet is not invoked"
 echo "-> running: cd $ICP_PICK_DIR && ./run_live_traditional_pick.sh --execute --confirm-real-grasp"
 (
   cd "$ICP_PICK_DIR"
   ./run_live_traditional_pick.sh \
-    --arm-host "${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.88.1}}" \
+    --arm-host "${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.3.11}}" \
     --weight-handoff-file "$WEIGHT_HANDOFF_FILE" \
     --execute --confirm-real-grasp
 )
@@ -63,12 +66,16 @@ if [[ ! -s "$WEIGHT_HANDOFF_FILE" ]]; then
 fi
 # Module 1 and Module 2 share the persistent Broker.  It remains the sole
 # owner of D405 and Femto throughout the complete run.
-echo "-> traditional D405 capture completed through Camera Broker; starting Module 2"
-echo "-> traditional pick completed at graspup; starting Module 2: $MODULE2_SCRIPT"
+if [[ "${PARM_LOOP_SKIP_INSPECT_DIRECT:-0}" == "1" ]]; then
+  echo "-> traditional pick completed at graspup; total-loop DIRECT mode skips Module 2 PC1/PC2/ICP"
+else
+  echo "-> traditional D405 capture completed through Camera Broker; starting Module 2"
+  echo "-> traditional pick completed at graspup; starting Module 2: $MODULE2_SCRIPT"
+fi
 "$LOOP_ROOT/.venv/bin/python" "$MODULE2_SCRIPT" \
   --planner-host "${PARM_PLANNER_HOST:-127.0.0.1}" \
-  --arm-host "${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.88.1}}" \
-  --gripper-host "${PARM_GRIPPER_HOST:-127.0.0.1}" \
+  --arm-host "${PARM_ARM_HOST:-${GRASPNET_V7_ARM_HOST:-192.168.3.11}}" \
+  --gripper-host "${PARM_GRIPPER_HOST:-192.168.3.11}" \
   --workpiece "$PARM_LOOP_WORKPIECE" \
   --weight-handoff-file "$WEIGHT_HANDOFF_FILE" \
   "${placement_gate_args[@]}"

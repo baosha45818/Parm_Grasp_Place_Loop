@@ -40,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
     parser.add_argument("--alignment", type=Path, default=ALIGNMENT_PATH)
     parser.add_argument(
+        "--propagate-head-extrinsic",
+        action="store_true",
+        help="按实时命令角通过头部运动学从标定外参推导 body_base 外参",
+    )
+    parser.add_argument(
         "--output-dir", type=Path,
         default=ROOT / "output/reversed_head_pose_d435",
     )
@@ -87,9 +92,9 @@ def read_head_pose_command_deg(host: str, timeout_s: float = 3.0) -> tuple[dict[
         raise RuntimeError(f"云台存在报警: {state}")
     if not pitch.get("enabled") or not yaw.get("enabled"):
         raise RuntimeError(f"云台未使能: {state}")
-    # 当前 SDK 的 move_to() 下发 pitch 时取反，但状态反馈保留驱动符号。
+    # parm_sdk 20260811 的状态和 move_to() 使用同一命令坐标系：正 pitch 低头。
     command_pose = {
-        "pitch": -float(pitch["position"]),
+        "pitch": float(pitch["position"]),
         "yaw": float(yaw["position"]),
     }
     return command_pose, state
@@ -101,7 +106,17 @@ def pose_error_deg(actual: dict[str, float], expected: dict[str, float]) -> floa
 
 def load_calibrated_transform(path: Path) -> tuple[np.ndarray, dict[str, float]]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    matrix = np.asarray(data["T_body_base_head_camera"], dtype=np.float64)
+    transform_key = next(
+        (
+            key
+            for key in ("T_body_base_head_camera", "T_base_head_camera", "T")
+            if key in data
+        ),
+        None,
+    )
+    if transform_key is None:
+        raise ValueError(f"外参缺少头相机变换矩阵: {path}")
+    matrix = np.asarray(data[transform_key], dtype=np.float64)
     if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
         raise ValueError(f"无效 T_body_base_head_camera: {path}")
     pose = data.get("head_pose_deg") or {}
@@ -115,6 +130,7 @@ def choose_output_transform(
     actual_head_pose: dict[str, float],
     alignment_path: Path,
     tolerance_deg: float,
+    propagate_head_extrinsic: bool = False,
 ) -> tuple[np.ndarray, str, dict[str, Any]]:
     if output_frame == "camera":
         return T_camera_object, CAMERA_FRAME, {
@@ -123,6 +139,25 @@ def choose_output_transform(
         }
     T_body_camera, calibration_pose = load_calibrated_transform(alignment_path)
     error = pose_error_deg(actual_head_pose, calibration_pose)
+    if propagate_head_extrinsic:
+        from tests.reversed_head_observation.derive_head_alignment import (
+            propagate_extrinsic,
+        )
+
+        T_body_camera = propagate_extrinsic(
+            T_body_camera,
+            calibration_pose["pitch"],
+            calibration_pose["yaw"],
+            actual_head_pose["pitch"],
+            actual_head_pose["yaw"],
+        )
+        return T_body_camera @ T_camera_object, "body_base", {
+            "status": "kinematically_propagated_head_extrinsic",
+            "calibration_path": str(alignment_path),
+            "calibration_head_pose_deg": calibration_pose,
+            "runtime_head_pose_deg": actual_head_pose,
+            "head_pose_error_deg": error,
+        }
     if error > tolerance_deg:
         raise RuntimeError(
             "不能输出 body_base 位姿：实时云台命令角 "
@@ -175,7 +210,8 @@ def main() -> int:
     if args.output_frame == "body_base":
         # 在打开相机、要求人工分割前先拒绝姿态不匹配的固定外参。
         choose_output_transform(
-            "body_base", np.eye(4), actual, args.alignment, args.head_tolerance_deg
+            "body_base", np.eye(4), actual, args.alignment,
+            args.head_tolerance_deg, args.propagate_head_extrinsic,
         )
 
     def read_left_tcp() -> np.ndarray:
@@ -279,7 +315,8 @@ def main() -> int:
         camera_intrinsics=np.asarray(report["camera_intrinsics"], dtype=np.float64),
     )
     T_output_object, output_frame, transform_info = choose_output_transform(
-        args.output_frame, T_camera_object, actual, args.alignment, args.head_tolerance_deg
+        args.output_frame, T_camera_object, actual, args.alignment,
+        args.head_tolerance_deg, args.propagate_head_extrinsic,
     )
     visualization = save_pose_visualization(
         run_dir, "head_d435", cad, T_camera_object, T_output_object, output_frame,

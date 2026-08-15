@@ -19,7 +19,11 @@ ROOT = Path(__file__).resolve().parents[2]
 PYTHON = ROOT / ".venv/bin/python"
 HEAD_MOTION = ROOT / "tool/move_head_gimbal.py"
 RGBD_CAPTURE = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation/capture_head_rgbd.py"
-BODY_HEAD = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/config/body_head_calibration.json"
+BODY_HEAD = (
+    ROOT
+    / "modules/module_4_head_judge/module_4_2_pose_estimation/"
+    "calibration/head_charuco_13x5_calibration_head.json"
+)
 REVERSE_PREDICTION = (
     ROOT
     / "modules/module_4_head_judge/module_4_1_reverse_grasp_prediction/main.py"
@@ -114,12 +118,14 @@ def run_stage(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true")
-    parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument(
+        "--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1")
+    )
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
     parser.add_argument(
         "--head-host",
-        default="127.0.0.1",
+        default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"),
     )
     parser.add_argument(
         "--prediction-retry-seconds",
@@ -164,7 +170,9 @@ def reopen_and_return_to_reverse_ready(args: argparse.Namespace, workpiece: str)
         execute_url="http://127.0.0.1:5667/middle/waypoint/execute",
         base_frame="body_base", left_group="left_arm", right_group="right_arm",
         left_tool_frame="left_eef", right_tool_frame="right_hand_transfer_end",
-        max_velocity=0.2, max_acceleration=0.2, idle_poll_seconds=0.2,
+        max_velocity=float(os.environ.get("PARM_LEFT_ARM_SPEED", "0.1")),
+        max_acceleration=float(os.environ.get("PARM_LEFT_ARM_SPEED", "0.1")),
+        idle_poll_seconds=0.2,
         live=True, poses={},
     ))
     try:
@@ -321,6 +329,7 @@ def main() -> int:
             str(PYTHON), str(REVERSE_PREDICTION), "--execute",
             "--prediction-file", str(prediction_file),
             "--capture-dir", str(capture_dir),
+            "--body-head", str(BODY_HEAD),
         ]
         print("[module-4-1] " + " ".join(prediction_command), flush=True)
         try:

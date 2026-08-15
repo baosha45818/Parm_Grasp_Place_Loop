@@ -7,7 +7,7 @@
 - `right_align.py`：调整姿态入口；
 - `configs/workpiece_1_turn_candidates.toml`、`configs/workpiece_2_turn_candidates.toml`：两种工件唯一的调整参数源；按预抓取、下探/闭抓、抬起、摆正、安全下放顺序编排并附中文注释；
 - 右臂目标直接使用规划器原生 `right_eef`；
-- `move_by_joints.py`、`move_by_eef_pose.py`、`grasp_motion_support.py`、`planning_log.py`：调整执行所需的本地运动与规划公共代码。
+- `planning_log.py`：规划请求和闭爪刚性关系的结构化 JSONL 日志工具；其余运动、几何、SDK 与夹爪控制代码已内置于 `right_align.py`。
 
 先进行预演（不加 `--execute` 不会发送机械臂或夹爪动作）：
 
@@ -17,6 +17,6 @@ python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_7_right_alig
   --arm-id 2
 ```
 
-`--workpiece` 会自动选择同编号调整配置，并读取 `output/module_4_2/workpiece_<编号>/` 中最新的 `mask_pose.json`；可用 `--workpiece-pose-file` 显式覆盖，但文件的工件标记必须一致。确认预演结果与现场状态后，追加 `--execute` 才会实际打开夹爪、抓取、翻转、放置并释放。该模块需要可访问的 `parm_sdk`、右臂/夹爪服务和规划器；工件位姿 JSON 中的 `calibration` 字段必须指向可读取的头相机标定文件，以便放置阶段执行可见 ROI 过滤。
+`--workpiece` 会自动选择同编号调整配置，并读取 `output/module_4_2/workpiece_<编号>/` 中最新的 `mask_pose.json`；可用 `--workpiece-pose-file` 显式覆盖，但文件的工件标记必须一致。确认预演结果与现场状态后，追加 `--execute` 才会实际打开夹爪、抓取、翻转、放置并释放。该模块需要可访问的 `parm_sdk`、右臂/夹爪服务和规划器。
 
 校准记录默认写到 `/home/dainanjun/Public/Parm_Grasp_Place_Loop/output/module_7/reorient_q3_records/`。可通过 `--calibration-record-file` 指定其他记录文件。

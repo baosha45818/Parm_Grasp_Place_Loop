@@ -200,6 +200,32 @@ class ApartModuleContractTest(unittest.TestCase):
                 "pc1_pc2_registration_failed_recovered",
             )
 
+    def test_direct_mode_skips_inspect_and_publishes_explicit_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            argv = [
+                "run_inspect_then_place.py",
+                "--workpiece", "2",
+                "--output-dir", str(root / "output"),
+                "--skip-inspect-direct",
+                "--skip-motion",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(
+                    run_inspect_then_place.subprocess, "run",
+                ) as mocked_run,
+            ):
+                self.assertEqual(run_inspect_then_place.main(), 0)
+            self.assertEqual(mocked_run.call_count, 1)
+            place_command = mocked_run.call_args.args[0]
+            self.assertEqual(Path(place_command[1]).name, "standalone_left_place.py")
+            inspect_result = next((root / "output").glob("left_inspect_result_*.json"))
+            payload = json.loads(inspect_result.read_text(encoding="utf-8"))
+            self.assertEqual(payload["stage"], "left_inspect")
+            self.assertTrue(payload["direct_only_without_inspect"])
+            self.assertEqual(payload["inspection_skipped_reason"], "loop_direct_place_after_grasp")
+
     def test_new_modules_do_not_import_frozen_inspect(self) -> None:
         files = [
             ROOT / "modules/module_2_left_inspect_apart/standalone_inspect.py",

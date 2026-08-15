@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "description": "Fixed-pose automatic SAM2 prompts for the held workpiece at head pitch=2 deg, yaw=26.5 deg. Coordinates are normalized to the captured RGB image; revalidate before enabling auto mask.",
-  "roi_xyxy_normalized": [0.40094, 0.05208, 0.68396, 0.58333],
+  "description": "Fixed-view automatic prompts for Module 5-2 handoff at head pitch=25 deg, yaw=35 deg. Positive points are the approved overlay labels 1 and 2 from run 20260813_161825; SAM2 receives these fixed points directly.",
+  "roi_xyxy_normalized": [0.39483972, 0.23087622, 0.63017983, 0.56884562],
   "positive_points_normalized": [
-    [0.47052, 0.15833],
-    [0.56132, 0.20833],
-    [0.62618, 0.24583]
+    [0.50430023, 0.37273992],
+    [0.46833464, 0.37830320]
   ],
   "negative_points_normalized": [
-    [0.64505, 0.14167],
-    [0.64858, 0.14375]
+    [0.58639562, 0.56189152],
+    [0.58639562, 0.32962448],
+    [0.44018765, 0.45340751]
   ],
   "mask_color_bgr": [0, 255, 0],
   "mask_alpha": 0.45

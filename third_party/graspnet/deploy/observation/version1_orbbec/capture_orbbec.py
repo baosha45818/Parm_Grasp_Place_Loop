@@ -54,7 +54,7 @@ def read_T_base_eef(host: str) -> np.ndarray:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Capture Femto RGB-D at the already-reached go_pc pose")
     parser.add_argument("--output-root", type=Path, default=Path(__file__).resolve().parent / "output")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--femto-serial", default=DEFAULT_FEMTO_BOLT_SERIAL)
     parser.add_argument("--frames", type=int, default=3, help="median-fuse this many depth frames")
     args = parser.parse_args()

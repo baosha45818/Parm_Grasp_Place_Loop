@@ -54,7 +54,7 @@ RIGHT_IDLE_POSE = (
     ROOT / "modules/module_10_right_idle/right_idle_pose.json"
 )
 BASE_MOTION_SPEED = 0.1
-DEFAULT_LEFT_SPEED = 0.3
+DEFAULT_LEFT_SPEED = 0.4
 DEFAULT_RIGHT_SPEED = 0.3
 
 # multiprocessing spawn 会在子进程重新导入 target 所在模块；因此必须在模块
@@ -77,6 +77,7 @@ from modules.module_0_prepare.ensure_sam2_service import ensure_sam2_service, sa
 from modules.module_0_prepare.preflight_robot_infrastructure import (
     preflight_robot_infrastructure,
 )
+from xianxin_runtime import configure_environment
 
 
 def load_scheduler():
@@ -489,6 +490,7 @@ def extract_graspnet_visualization_argument() -> None:
 
 
 def main() -> None:
+    configure_environment()
     # 必须先消费选择参数：后续 Module 5-2/8-2/9 的入口绑定依赖此环境值。
     # 工件类型不可由历史默认值猜测，必须由本次调用显式给出。
     # The managed production entry owns SAM2 for the complete Loop lifetime.
@@ -510,14 +512,17 @@ def main() -> None:
     configure_motion_speeds()
     inject_fixed_module_arguments()
     readiness_args = scheduler.parse_args()
-    # Every RGB-D consumer uses this singleton, including traditional ICP
-    # Module 1.  It alone owns the physical D405/Femto devices.
+    # Current production flow uses traditional ICP Module 1's wrist D405 only.
+    # Keep Femto disabled so the chest camera is neither initialized nor held.
     ensure_sam2_service()
-    ensure_camera_broker()
+    ensure_camera_broker(
+        require_femto=False,
+        expected_d405_serial=os.environ["PARM_D405_SERIAL"],
+    )
     os.environ["PARM_SAM2_URL"] = sam2_url()
     print(
-        "[module-0] 传统 ICP Module 1 与 Module 2 共用 Camera Broker；"
-        "GraspNet 服务不启动。",
+        "[module-0] 传统 ICP Module 1 使用 D405-only Camera Broker；"
+        "胸部 Femto、Module 2 Inspect 与 GraspNet 服务均不启动。",
         flush=True,
     )
     # ``spawn`` 产生的左右 worker 会重新导入旧调度器；用环境标记让它们
@@ -547,6 +552,7 @@ def main() -> None:
         planner_host=readiness_args.planner_host,
         arm_host=readiness_args.arm_host,
         gripper_host=readiness_args.gripper_host,
+        force_sensor_host=os.environ["PARM_FORCE_SENSOR_HOST"],
         left_only=bool(getattr(readiness_args, "left_only", False)),
     )
     print(
@@ -627,8 +633,8 @@ if __name__ == "__main__":
                     traceback.print_exc()
                     raise SystemExit(1)
             finally:
-                # Camera Broker 独占 D405/Femto；总控无论正常结束、异常或 Ctrl+C，
-                # 都释放硬件，避免后续 GCS 出现 VIDIOC_S_FMT/Orbbec 连接失败。
+                # D405-only Broker 独占腕部相机；总控无论正常结束、异常或 Ctrl+C，
+                # 都释放它，避免后续 GCS 出现设备占用错误。
                 try:
                     stop_camera_broker()
                 except BaseException as exc:

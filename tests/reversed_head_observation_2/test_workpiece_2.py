@@ -69,7 +69,10 @@ class Workpiece2AdaptationTests(unittest.TestCase):
     def test_production_high_handoff_profile_is_one_consistent_contract(self):
         profile = load_workpiece_2_handoff_profile()
         self.assertEqual(profile["workpiece"], "2")
-        self.assertEqual(profile["profile_id"], "workpiece_2_high_handoff_v1")
+        self.assertEqual(
+            profile["profile_id"],
+            "workpiece_2_reverse_grasp_handoff_toml_v1",
+        )
         np.testing.assert_allclose(
             profile["handoff"]["center_body_m"], [0.42, 0.10, 0.25]
         )
@@ -164,7 +167,7 @@ class Workpiece2AdaptationTests(unittest.TestCase):
             # Current workpiece-1 high-handoff taught pose.  This value must
             # track Module 8-2's live taught joint target, not the previous
             # high-handoff teaching.
-            [0.3915042755, -0.1674108421, 0.3152845422],
+            [0.3931181508, -0.1248361212, 0.2948360274],
             atol=1e-7,
         )
         self.assertEqual(
@@ -208,7 +211,7 @@ class Workpiece2AdaptationTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             WORKPIECE_1_RIGHT_PLACE_READY_JOINTS_DEG,
-            [30.4353, 23.8637, 0.5905, 66.3409, -62.0439, -64.3304, 25.7149],
+            [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054],
         )
 
     def test_module_8_2_forwards_the_complete_high_handoff_profile(self):

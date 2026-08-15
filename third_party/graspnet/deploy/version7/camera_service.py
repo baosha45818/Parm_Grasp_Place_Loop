@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Broker-owned immutable capture bundles (default: <allow-root>/captures)",
     )
-    p.add_argument("--arm-host", default="192.168.88.1")
+    p.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
     p.add_argument("--arm-id", type=int, default=1)
     p.add_argument("--d405-serial", default=DEFAULT_D405_SERIAL)
     p.add_argument("--d405-width", type=int, default=640)
@@ -63,6 +63,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-capture-bundles", type=int, default=200)
     p.add_argument("--disable-femto", action="store_true",
                    help="open D405 only; reject Femto capture requests")
+    p.add_argument(
+        "--no-arm-state", action="store_true",
+        help="camera-only mode: never open the SDK Arm or add legacy T_base_eef metadata",
+    )
     return p.parse_args()
 
 
@@ -98,7 +102,9 @@ class CameraEngine:
                                                                    depth_width=args.femto_depth_width,
                                                                    depth_height=args.femto_depth_height,
                                                                    warmup_frames=args.femto_warmup_frames))
-        self.arm = self.stack.enter_context(_import_parm_sdk().Arm(host=args.arm_host))
+        self.arm = None
+        if not args.no_arm_state:
+            self.arm = self.stack.enter_context(_import_parm_sdk().Arm(host=args.arm_host))
         print("-> Version7 camera service ready: D405{} is open".format(
             " only" if args.disable_femto else " and Femto"
         ), flush=True)
@@ -107,7 +113,8 @@ class CameraEngine:
         self.stack.close()
 
     def status(self) -> dict:
-        status = {"arm": {"host": self.args.arm_host, "id": self.args.arm_id},
+        status = {"arm": {"host": self.args.arm_host, "id": self.args.arm_id,
+                          "legacy_eef_pose_enabled": self.arm is not None},
                   "d405": {"serial": self.args.d405_serial, "width": self.args.d405_width,
                             "height": self.args.d405_height, "postprocess": self.args.d405_postprocess,
                             "hole_filling": self.args.d405_hole_filling}}
@@ -196,6 +203,8 @@ class CameraEngine:
         if require_eef_pose:
             if camera != "d405":
                 raise RuntimeError("EEF pose probe is only valid for the D405 profile")
+            if self.arm is None:
+                raise RuntimeError("legacy T_base_eef is disabled in camera-only mode")
             T_base_eef = read_robot_base_to_eef(self.arm, self.args.arm_id)
             result["T_base_eef"] = np.asarray(T_base_eef, dtype=float).tolist()
         return result
@@ -214,7 +223,13 @@ class CameraEngine:
                 frame = frames[-1]
                 if count > 1:
                     frame = replace(frame, depth=np.median(np.stack([item.depth for item in frames]), axis=0).astype(frame.depth.dtype))
-                T_base_eef = read_robot_base_to_eef(self.arm, self.args.arm_id)
+                require_eef_pose = bool(request.get("require_eef_pose", self.arm is not None))
+                if require_eef_pose:
+                    if self.arm is None:
+                        raise RuntimeError("legacy T_base_eef requested from camera-only service")
+                    T_base_eef = read_robot_base_to_eef(self.arm, self.args.arm_id)
+                else:
+                    T_base_eef = None
         elif camera == "femto_bolt":
             if self.femto is None:
                 raise RuntimeError("Femto is disabled for this Version7 camera service")

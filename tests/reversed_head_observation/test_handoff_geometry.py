@@ -355,6 +355,11 @@ class HandoffGeometryTests(unittest.TestCase):
             },
         }
         np.testing.assert_allclose(validate_icp_for_motion(result, config), np.eye(4))
+        result["transform_info"] = {
+            "status": "kinematically_propagated_head_extrinsic",
+            "calibration_head_pose_deg": {"pitch": 45.0, "yaw": 0.0},
+        }
+        np.testing.assert_allclose(validate_icp_for_motion(result, config), np.eye(4))
         result["registration"]["fitness"] = 0.2
         with self.assertRaisesRegex(RuntimeError, "fitness"):
             validate_icp_for_motion(result, config)

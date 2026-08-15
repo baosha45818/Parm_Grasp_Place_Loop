@@ -8,7 +8,7 @@ workpiece = "workpiece_1"
 # 视觉语义原点沿工件自身 X/Y/Z 到几何抓取点的偏移 [m]。
 grasp_point_semantic_offset_m = [-0.03, 0.0, 0.02130022645]
 # 到抓取点后沿 TCP 自身 X/Y/Z 的目标位置补偿 [m]。
-tcp_local_offset_at_grasp_m = [0.008, 0.0, 0.002]
+tcp_local_offset_at_grasp_m = [0.011, 0.0, 0.008]
 # TCP 绕工件局部 +Y 的偏航补偿 [deg]。
 tcp_yaw_toward_workpiece_y_deg = 0.0
 # 初次闭爪未确认抓住时，原地沿 body_base +Z 复抓的高度 [m]。
@@ -28,7 +28,7 @@ final_approach_mode = "servo"
 
 [servo]
 # 最终 ServoPose 直线段最大线速度 [m/s]。
-servo_linear_speed_mps = 0.05
+servo_linear_speed_mps = 0.1
 # 最终 ServoPose 直线段最大角速度 [rad/s]。
 servo_angular_speed_radps = 0.3
 # 最终 ServoPose 直线段最大线加速度 [m/s²]。
@@ -66,7 +66,7 @@ grasp_position_max = 100.0
 
 [post_grasp]
 # 确认抓住后沿 body_base +Z 上抬候选 [m]；按从左到右顺序尝试。
-q1_post_grasp_lift_m = [0.15, 0.1, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01, 0.005]
+q1_post_grasp_lift_m = [0.15, 0.1, 0.05, 0.01, 0.005]
 # 后方对齐/抓取点校验允许的 TCP XY 误差 [m]。
 q1_xy_tolerance_m = 0.0005
 # 后方对齐/抓取点校验允许的 TCP Z 误差 [m]。

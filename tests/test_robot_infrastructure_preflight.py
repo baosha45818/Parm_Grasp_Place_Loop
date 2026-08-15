@@ -51,8 +51,10 @@ class _Arm:
 
 
 class _Gripper:
+    init_kwargs: list[dict] = []
+
     def __init__(self, **_kwargs):
-        pass
+        type(self).init_kwargs.append(_kwargs)
 
     def __enter__(self):
         return self
@@ -68,6 +70,9 @@ class _Gripper:
 
 
 class RobotInfrastructurePreflightTests(unittest.TestCase):
+    def setUp(self):
+        _Gripper.init_kwargs.clear()
+
     def test_missing_left_eef_is_a_hard_preflight_failure(self):
         class PlannerWithoutLeftEef(_Planner):
             def list_frame_ids(self, **_kwargs):
@@ -111,6 +116,7 @@ class RobotInfrastructurePreflightTests(unittest.TestCase):
             [5604, 5609, 5610],
         )
         self.assertEqual(read_force.call_count, 2)
+        self.assertEqual(_Gripper.init_kwargs, [{"host": "gripper", "status_port": 7702}])
 
     def test_left_only_does_not_require_right_side_state(self):
         class LeftOnlyPlanner(_Planner):
@@ -157,6 +163,7 @@ class RobotInfrastructurePreflightTests(unittest.TestCase):
                 planner_host="planner",
                 arm_host="arm",
                 gripper_host="gripper",
+                force_sensor_host="gripper",
                 left_only=True,
             )
 

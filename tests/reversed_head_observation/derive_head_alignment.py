@@ -76,8 +76,21 @@ def derive_payload(
     reference_pose = reference.get("head_pose_deg") or {}
     reference_pitch = float(reference_pose["pitch"])
     reference_yaw = float(reference_pose["yaw"])
+    transform_key = next(
+        (
+            key
+            for key in ("T_body_base_head_camera", "T_base_head_camera", "T")
+            if key in reference
+        ),
+        None,
+    )
+    if transform_key is None:
+        raise ValueError(
+            "reference calibration lacks T_body_base_head_camera, "
+            "T_base_head_camera, or T"
+        )
     target = propagate_extrinsic(
-        np.asarray(reference["T_body_base_head_camera"], dtype=float),
+        np.asarray(reference[transform_key], dtype=float),
         reference_pitch,
         reference_yaw,
         target_pitch_deg,
@@ -91,6 +104,10 @@ def derive_payload(
             "yaw": float(target_yaw_deg),
         },
         "T_body_base_head_camera": target.tolist(),
+        # Keep both deployed calibration schemas readable by the handoff and
+        # reverse-grasp consumers while preserving the reference metadata.
+        "T_base_head_camera": target.tolist(),
+        "T": target.tolist(),
         "extrinsic_derivation": {
             "method": "reference_extrinsic_propagated_through_deployed_head_urdf",
             "reference_head_pose_deg": {

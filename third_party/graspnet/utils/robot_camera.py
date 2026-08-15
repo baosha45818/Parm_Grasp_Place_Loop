@@ -46,7 +46,7 @@ rs = _import_optional_module("pyrealsense2")
 ob = _import_optional_module("pyorbbecsdk")
 
 
-DEFAULT_D405_SERIAL = "260322270242"
+DEFAULT_D405_SERIAL = "260322270600"
 DEFAULT_FEMTO_BOLT_SERIAL = "CL8L56301LK"
 
 

@@ -20,7 +20,7 @@ BASE_FRAME = "body_base"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument(
         "--motion-mode", choices=("planner", "servo-pose"), default="servo-pose",
         help="planner=body_base +Y；servo-pose=SDK world +Y",

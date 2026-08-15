@@ -121,30 +121,43 @@ def validate_icp_for_motion(
     result: dict[str, Any], config: dict[str, Any]
 ) -> np.ndarray:
     transform_info = result.get("transform_info") or {}
-    if transform_info.get("status") != "calibrated_fixed_head_pose":
+    transform_status = transform_info.get("status")
+    if transform_status not in {
+        "calibrated_fixed_head_pose",
+        "kinematically_propagated_head_extrinsic",
+    }:
         raise RuntimeError(
-            "ICP result is not backed by a fixed-head body_base calibration"
+            "ICP result is not backed by an accepted body_base head extrinsic"
         )
-    expected_head = config.get("expected_head_pose_deg") or {}
-    actual_head = result.get("head_pose_command_deg") or {}
-    calibrated_head = transform_info.get("calibration_head_pose_deg") or {}
-    for axis in ("pitch", "yaw"):
-        if (
-            axis not in expected_head
-            or axis not in actual_head
-            or axis not in calibrated_head
-        ):
-            raise RuntimeError(f"ICP result is missing head {axis} metadata")
-        if abs(float(expected_head[axis]) - float(actual_head[axis])) > 1.0:
-            raise RuntimeError(
-                f"ICP head {axis}={actual_head[axis]}° does not match configured "
-                f"handoff observation angle {expected_head[axis]}°"
-            )
-        if abs(float(expected_head[axis]) - float(calibrated_head[axis])) > 1.0:
-            raise RuntimeError(
-                f"D435 calibration head {axis}={calibrated_head[axis]}° does not "
-                f"match handoff observation angle {expected_head[axis]}°"
-            )
+    # A propagated extrinsic intentionally observes from a different gimbal
+    # angle than the fixed-pose calibration. Its body_base transform is already
+    # rebuilt by the pose-estimation module, so do not reject that source for
+    # not matching the calibration angle again here.
+    if transform_status == "kinematically_propagated_head_extrinsic":
+        calibrated_head: dict[str, Any] | None = None
+    else:
+        calibrated_head = transform_info.get("calibration_head_pose_deg") or {}
+    if transform_status == "calibrated_fixed_head_pose":
+        expected_head = config.get("expected_head_pose_deg") or {}
+        actual_head = result.get("head_pose_command_deg") or {}
+        for axis in ("pitch", "yaw"):
+            if (
+                axis not in expected_head
+                or axis not in actual_head
+                or calibrated_head is None
+                or axis not in calibrated_head
+            ):
+                raise RuntimeError(f"ICP result is missing head {axis} metadata")
+            if abs(float(expected_head[axis]) - float(actual_head[axis])) > 1.0:
+                raise RuntimeError(
+                    f"ICP head {axis}={actual_head[axis]}° does not match configured "
+                    f"handoff observation angle {expected_head[axis]}°"
+                )
+            if abs(float(expected_head[axis]) - float(calibrated_head[axis])) > 1.0:
+                raise RuntimeError(
+                    f"D435 calibration head {axis}={calibrated_head[axis]}° does not "
+                    f"match handoff observation angle {expected_head[axis]}°"
+                )
 
     registration = result.get("registration") or {}
     try:

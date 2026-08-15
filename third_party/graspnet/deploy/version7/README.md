@@ -7,7 +7,7 @@ Version7 按 Version5 的双相机候选、外参转换和候选筛选逻辑运�
 - arm1、D405、Femto、夹爪和 Planner 均应已上电且可用；
 - GraspNet 权重位于 `checkpoint/checkpoint-rs.tar`；
 - 使用 `.venv`；
-- 当前固定使用 arm1、D405 `260322270242`、Femto `CL8L56301LK`；
+- 当前固定使用 arm1、左腕 D405 `260322270600`、Femto `CL8L56301LK`；
 - 相机服务与 GraspNet 服务必须使用同一个任务目录。
 
 以下命令使用当前默认配置：D405 后处理开启、孔洞填充开启、任务目录为 `deploy/version7/jobs`。
@@ -17,7 +17,7 @@ cd /home/dainanjun/qiuguolin/graspnet
 
 export GRASPNET_V7_JOBS_ROOT=/home/dainanjun/qiuguolin/graspnet/deploy/version7/jobs
 export GRASPNET_V7_NUM_VIEW=300
-export GRASPNET_V7_ARM_HOST=192.168.88.1
+export GRASPNET_V7_ARM_HOST=192.168.3.11
 export GRASPNET_V7_ARM_ID=1
 export GRASPNET_V7_D405_POSTPROCESS=1
 export GRASPNET_V7_D405_HOLE_FILLING=1

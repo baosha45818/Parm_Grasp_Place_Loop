@@ -35,13 +35,13 @@ if __name__ == "__main__" and Path(sys.executable).resolve() != PYTHON.resolve()
     )
 
 DEFAULT_ALIGNMENT = (
-    ROOT / "calibration/sdk_base_alignment/"
-    "sdk_base_to_planner_alignment_pitch2_yaw26p5_kinematic.json"
+    ROOT / "modules/module_4_head_judge/module_4_2_pose_estimation/"
+    "calibration/head_charuco_13x5_calibration_head.json"
 )
 # Backward-compatible exports used by the reversed-head observation contract.
 # The per-workpiece profile remains the runtime source of truth.
-HANDOFF_HEAD_PITCH_DEG = 2.0
-HANDOFF_HEAD_YAW_DEG = 26.5
+HANDOFF_HEAD_PITCH_DEG = 25.0
+HANDOFF_HEAD_YAW_DEG = 35.0
 DEFAULT_OUTPUT_DIR = ROOT / "output/reversed_head_pose_d435"
 DEFAULT_AUTO_MASK_CONFIG = (
     ROOT
@@ -65,16 +65,20 @@ def parse_args() -> argparse.Namespace:
         "--alignment",
         type=Path,
         default=DEFAULT_ALIGNMENT,
-        help="头部D435在pitch=2°、yaw=26.5°时的body_base外参",
+        help="头部D435参考外参；运行时按实际交接观察角动态传播",
     )
-    parser.add_argument("--sam2-url", default=os.environ.get("PARM_SAM2_URL", "unix:///tmp/sam2-service.sock"))
+    parser.add_argument(
+        "--sam2-url",
+        default=os.environ.get("PARM_SAM2_URL"),
+        help="SAM2 服务地址；未指定时使用 Module 0 已验证的项目内服务 socket",
+    )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--mask-mode",
         choices=("auto", "interactive"),
         default=None,
         help=(
-            "SAM2分割方式；默认auto使用当前RGB-D自动标记；"
+            "SAM2分割方式；默认auto使用固定观察位的自动标点（1、2号正点）；"
             "interactive使用全手工ROI/正负点"
         ),
     )
@@ -84,10 +88,18 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_AUTO_MASK_CONFIG,
         help="固定观察位自动ROI和SAM2正负点配置",
     )
-    parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--driver-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default="192.168.88.1")
-    parser.add_argument("--gripper-host", default="127.0.0.1")
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
+    # The legacy observation helpers name this endpoint ``driver-host``, but
+    # they use it exclusively to read the head pose.  Xiangxin hosts it on the
+    # head controller rather than localhost.
+    parser.add_argument("--driver-host", default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    parser.add_argument(
+        "--head-host",
+        default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"),
+        help="云台 driver 主机；不复用历史 --driver-host",
+    )
     parser.add_argument(
         "--workpiece",
         choices=("1", "2"),
@@ -102,8 +114,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--speed-multiplier",
         type=float,
-        default=4.0 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0")),
-        help="相对原流程速度倍率，默认4.0",
+        default=2.0 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "1.0")),
+        help="相对 0.05 基准速度的倍率；默认使观察位速度为 0.1",
     )
     parser.add_argument(
         "--require-confirmation",
@@ -205,8 +217,13 @@ def main() -> int:
     profile = load_workpiece_handoff_profile("1")
     observation = profile["left_observation"]
     handoff_center = list(profile["handoff"]["center_body_m"])
-    from modules.module_0_prepare.ensure_sam2_service import require_sam2_service
+    from modules.module_0_prepare.ensure_sam2_service import (
+        require_sam2_service,
+        sam2_url,
+    )
     require_sam2_service()
+    if args.sam2_url is None:
+        args.sam2_url = sam2_url()
     if args.speed_multiplier <= 0.0:
         raise ValueError("--speed-multiplier must be positive")
     if not HEAD_MOTION.is_file():
@@ -257,9 +274,10 @@ def main() -> int:
     # 2. 反手交接专用流程：云台到标定角度，再运行 D435、SAM2 和 ICP。
     previous = set(output_dir.glob("*/result.json"))
     run([
-        str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.driver_host,
+        str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
         "--pitch", str(observation["head_pose_deg"]["pitch"]),
         "--yaw", str(observation["head_pose_deg"]["yaw"]),
+        "--timeout-s", "60",
     ])
     run([
         sys.executable,
@@ -267,6 +285,7 @@ def main() -> int:
         "tests.reversed_head_observation.estimate_pose_head_d435",
         "--alignment",
         str(alignment),
+        "--propagate-head-extrinsic",
         "--output-frame",
         "body_base",
         "--sam2-url",
@@ -332,7 +351,10 @@ def main() -> int:
 
 def main_workpiece_2(args: argparse.Namespace) -> int:
     """工件2左手交接准备：只观察和送交接位，绝不驱动右臂。"""
-    from modules.module_0_prepare.ensure_sam2_service import require_sam2_service
+    from modules.module_0_prepare.ensure_sam2_service import (
+        require_sam2_service,
+        sam2_url,
+    )
 
     profile = load_workpiece_handoff_profile("2")
     observation = profile["left_observation"]
@@ -351,6 +373,8 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
             raise FileNotFoundError(f"{label}不存在：{path}")
 
     require_sam2_service()
+    if args.sam2_url is None:
+        args.sam2_url = sam2_url()
     output_dir = WORKPIECE_2_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     previous = set(output_dir.glob("*/result.json"))
@@ -382,9 +406,10 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
         )
         return NO_GRASP_EXIT_CODE
     run([
-        str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.driver_host,
+        str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
         "--pitch", str(head_pose["pitch"]),
         "--yaw", str(head_pose["yaw"]),
+        "--timeout-s", "60",
     ])
     run([
         sys.executable,
@@ -392,6 +417,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
         "tests.reversed_head_observation.estimate_pose_head_d435",
         "--config", str(WORKPIECE_2_POSE_CONFIG),
         "--alignment", str(observation["alignment"]),
+        "--propagate-head-extrinsic",
         "--output-frame", "body_base",
         "--sam2-url", args.sam2_url,
         "--mask-mode", args.mask_mode,

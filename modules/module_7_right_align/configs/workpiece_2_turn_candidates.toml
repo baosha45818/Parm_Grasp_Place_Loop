@@ -141,10 +141,10 @@ turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
 
 # 旋转和下放共用的固定桌面参考点，body_base XY（m）。
-# 与工件 1 使用同一原点：来自 workpiece_1/285 原图红点的 RGB-D 投影。
+# 与工件 1 使用同一原点：来自 workpiece_1/391 原图红点的桌面平面投影。
 # 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
 # place_x/place_y_offset_candidates_m 均相对此点解释。
-fixed_reference_body_base_xy_m = [0.502045, -0.045800]
+fixed_reference_body_base_xy_m = [0.502166, 0.015160]
 
 # 工件正面在 body_base 下的基准局部 RPY。
 front_base_rpy_deg = [0.0, 0.0, 0.0]
@@ -153,7 +153,7 @@ front_base_rpy_deg = [0.0, 0.0, 0.0]
 x_offset_candidates_m = [0.0, 0.1]
 
 # 旋转后工件中心相对固定 body_base 参考点的 Y 偏移候选。
-y_offset_candidates_m = [-0.2, -0.1, 0.0]
+y_offset_candidates_m = [-0.25, -0.2, 0.0]
 
 # 闭爪抬起后工件中心的 body_base Z 偏移候选。
 z_offset_candidates_m = [0.0, 0.1]
@@ -169,18 +169,6 @@ pitch_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
 
 # 工件局部 yaw 摆正候选，优先落在 Q1。
 yaw_candidates_deg = [35.0, 30.0, 45.0, 60.0, 75.0, 0.0]
-
-# 旧搜索兼容参数：摆正姿态搜索步长。
-turn_attitude_search_step_deg = 15.0
-
-# 旧搜索兼容参数：摆正区域网格步长。
-turn_search_grid_step_m = 0.05
-
-# 旧搜索兼容参数：摆正区域正 X 最小距离。
-turn_positive_x_min_m = 0.0
-
-# 旧搜索兼容参数：摆正区域正 X 最大距离。
-turn_positive_x_max_m = 0.2
 
 # 并行 RRTConnect 摆正规划的最大 worker 数。
 rrt_turn_parallelism = 3
@@ -200,7 +188,7 @@ place_y_offset_candidates_m = [-0.150, -0.120, -0.100]
 
 # 松爪时 TCP 相对抓取高度的额外安全余量候选；按左到右顺序规划。
 # 每个余量都会与全部 XY 候选组合；均不可达则保留工件并报错，不自动生成更高的余量。
-place_tcp_extra_clearance_m = [0.01, 0.02]
+place_tcp_extra_clearance_m = [0.01, 0.015]
 
 # 并行 RRTConnect 下放规划的最大 worker 数。
 rrt_place_parallelism = 3

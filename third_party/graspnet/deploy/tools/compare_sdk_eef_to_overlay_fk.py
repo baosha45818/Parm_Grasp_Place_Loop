@@ -51,7 +51,7 @@ def overlay_fk(kinematics: Path, q_rad: np.ndarray) -> np.ndarray:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--samples-dir", type=Path, required=True)
-    parser.add_argument("--arm-host", default="192.168.88.1")
+    parser.add_argument("--arm-host", default="192.168.3.11")
     parser.add_argument("--kinematics", type=Path, default=Path("/home/dainanjun/Public/plucky_hjt_parm/arm_configs/arm_kinematics/left.yaml"))
     args = parser.parse_args()
     pairs = []
