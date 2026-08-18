@@ -16,11 +16,9 @@ import json
 import os
 from pathlib import Path
 import secrets
-import shutil
 import subprocess
 import sys
 import time
-import uuid
 
 import cv2
 import numpy as np
@@ -297,48 +295,50 @@ def pose_delta(before: np.ndarray, after: np.ndarray) -> tuple[float, float]:
 
 
 def capture_log(run: Path, args: argparse.Namespace) -> Path:
-    """通过 Camera Broker 采集稳定 RGB-D，并记录所选手眼标定链。"""
-    sys.path.insert(0, str(GRASPNET_ROOT / "deploy" / "version7"))
-    from camera_client import capture as broker_capture
-    from camera_client import status as broker_status
-
+    """直接通过 pyrealsense2 采集稳定 D405 RGB-D，并记录手眼标定链。"""
     raw = run / "raw/d405"
     raw.parent.mkdir(parents=True, exist_ok=True)
     if raw.exists():
         raise RuntimeError(f"traditional raw capture directory already exists: {raw}")
 
-    status = broker_status(args.camera_broker_socket, timeout_s=args.camera_broker_timeout_s)
-    if status.get("schema_version") != 1:
-        raise RuntimeError("Camera Broker ABI mismatch; restart it with the current project version")
-    broker_serial = str(
-        (((status.get("camera_config") or {}).get("d405") or {}).get("serial") or "")
-    )
-    if broker_serial != str(args.d405_serial):
-        raise RuntimeError(
-            f"Camera Broker D405 serial is {broker_serial!r}; expected {args.d405_serial!r}"
-        )
-    allow_root = Path(status["allow_root"]).resolve()
-    broker_capture_dir: Path | None = None
-    result: dict | None = None
+    if str(LOOP) not in sys.path:
+        sys.path.insert(0, str(LOOP))
+    from tools.graspnet_runtime.utils.robot_camera import D405Camera
+
+    frame = None
+    capture_result: dict[str, float] | None = None
     capture_metadata: dict = {}
 
-    def capture_once() -> tuple[Path, dict]:
-        """通过 Camera Broker 采集一组 D405 RGB-D 帧及元数据。"""
-        capture_dir = (
-            allow_root / "traditional_icp" /
-            f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex}"
-        )
-        capture_result = broker_capture(
-            args.camera_broker_socket,
-            {
-                "camera": "d405",
-                "output_dir": str(capture_dir),
-                "frame_count": int(args.frames),
-                "require_eef_pose": False,
-            },
-            timeout_s=args.camera_broker_timeout_s,
-        )
-        return capture_dir, capture_result
+    def capture_once() -> tuple[object, dict[str, float]]:
+        """一次直接打开、采集并关闭 D405，绝不经由常驻 Broker。"""
+        started_unix_s = time.time()
+        started_monotonic_s = time.monotonic()
+        with D405Camera(
+            serial=str(args.d405_serial),
+            width=640,
+            height=480,
+            fps=int(args.d405_fps),
+            warmup_frames=15,
+            enable_postprocess=True,
+            enable_hole_filling=True,
+        ) as camera:
+            frames = [
+                camera.read(timeout_ms=int(args.d405_frame_timeout_ms))
+                for _ in range(int(args.frames))
+            ]
+        accepted = frames[-1]
+        if len(frames) > 1:
+            # 与旧 Broker 完全一致：颜色取最后一帧，深度取多帧中值融合。
+            accepted.depth = np.median(
+                np.stack([item.depth for item in frames]), axis=0
+            ).astype(accepted.depth.dtype)
+        finished_unix_s = time.time()
+        return accepted, {
+            "capture_started_unix_s": started_unix_s,
+            "capture_finished_unix_s": finished_unix_s,
+            "capture_started_monotonic_s": started_monotonic_s,
+            "capture_elapsed_s": finished_unix_s - started_unix_s,
+        }
 
     if args.handeye_mode == "bridge":
         sys.path.insert(0, str(TOOL))
@@ -348,12 +348,11 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
         with Arm(host=args.arm_host) as arm:
             for attempt in range(1, int(args.capture_stability_retries) + 1):
                 T_before = eef_transform(arm.get_state() or {})
-                broker_capture_dir, result = capture_once()
+                frame, capture_result = capture_once()
                 T_after = eef_transform(arm.get_state() or {})
                 delta_mm, delta_deg = pose_delta(T_before, T_after)
                 if delta_mm <= 0.5 and delta_deg <= 0.25:
                     break
-                shutil.rmtree(broker_capture_dir, ignore_errors=True)
                 if attempt == int(args.capture_stability_retries):
                     raise RuntimeError(
                         "SDK left eef_pose remained in motion across "
@@ -382,20 +381,18 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
     else:
         for attempt in range(1, int(args.capture_stability_retries) + 1):
             T_before, tf_before = planner_body_base_to_left_end()
-            broker_capture_dir, result = capture_once()
+            frame, capture_result = capture_once()
             T_after, tf_after = planner_body_base_to_left_end()
             delta_mm, delta_deg = pose_delta(T_before, T_after)
             timestamp_before_ns = planner_timestamp_ns(tf_before)
             timestamp_after_ns = planner_timestamp_ns(tf_after)
             if timestamp_after_ns <= timestamp_before_ns:
-                shutil.rmtree(broker_capture_dir, ignore_errors=True)
                 raise RuntimeError(
                     "Planner TF timestamp did not advance during D405 capture; "
                     "repair the Planner joint-state TF publisher before recapturing"
                 )
             if delta_mm <= 0.5 and delta_deg <= 0.25:
                 break
-            shutil.rmtree(broker_capture_dir, ignore_errors=True)
             if attempt == int(args.capture_stability_retries):
                 raise RuntimeError(
                     "Planner left_arm_end_link remained in motion across "
@@ -424,40 +421,49 @@ def capture_log(run: Path, args: argparse.Namespace) -> Path:
             ),
         }
 
-    if broker_capture_dir is None or result is None:
-        raise AssertionError("D405 capture did not return a result")
-    try:
-        shutil.copytree(broker_capture_dir, raw)
-    finally:
-        # Broker workspaces are temporary; preserve only the copy
-        # inside this traditional run after the Broker has finished writing.
-        shutil.rmtree(broker_capture_dir, ignore_errors=True)
-
-    meta_path = raw / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    captured_serial = str(meta.get("serial", ""))
-    if captured_serial != broker_serial:
+    if frame is None or capture_result is None:
+        raise AssertionError("D405 direct capture did not return a frame")
+    captured_serial = str(frame.serial)
+    if captured_serial != str(args.d405_serial):
         raise RuntimeError(
-            f"captured D405 serial is {captured_serial!r}; Broker reported {broker_serial!r}"
+            f"captured D405 serial is {captured_serial!r}; expected {args.d405_serial!r}"
         )
-    meta.update({
+    raw.mkdir(parents=True, exist_ok=False)
+    np.save(raw / "color.npy", frame.color)
+    np.save(raw / "depth.npy", frame.depth)
+    np.save(raw / "depth_intrinsics.npy", frame.depth_intrinsics)
+    np.save(raw / "color_intrinsics.npy", frame.color_intrinsics)
+    if frame.depth_distortion is not None:
+        np.save(raw / "depth_distortion.npy", np.asarray(frame.depth_distortion, dtype=np.float64))
+    if frame.color_distortion is not None:
+        np.save(raw / "color_distortion.npy", np.asarray(frame.color_distortion, dtype=np.float64))
+    if not cv2.imwrite(str(raw / "color.png"), frame.color):
+        raise RuntimeError(f"failed to write D405 color image: {raw / 'color.png'}")
+    meta = {
         "camera_name": "d405",
-        "serial": broker_serial,
+        "serial": captured_serial,
+        "depth_scale_m": float(frame.depth_scale),
+        "depth_scale_raw": float(frame.depth_scale),
+        "color_shape_hw": list(frame.color.shape[:2]),
+        "depth_shape_hw": list(frame.depth.shape[:2]),
+        "frame_count": int(args.frames),
+        "has_depth_distortion": frame.depth_distortion is not None,
+        "has_color_distortion": frame.color_distortion is not None,
+        **capture_result,
         "handeye_mode": args.handeye_mode,
         "handeye_mode_requested": args.handeye_mode_requested,
         "bridge_wrist_calibration": str(args.bridge_wrist_calibration.resolve()),
         "planner_bridge_calibration": str(args.planner_bridge_calibration.resolve()),
         "direct_wrist_calibration": str(args.direct_wrist_calibration.resolve()),
-        "frame_count": int(args.frames),
-        "camera_broker_socket": args.camera_broker_socket,
-        "camera_broker_capture_elapsed_s": result.get("capture_elapsed_s"),
+        "capture_source": "direct_pyrealsense2",
+        "d405_fps": int(args.d405_fps),
         **capture_metadata,
-    })
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    }
+    (raw / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(
-        "-> traditional D405 capture received from Camera Broker: "
+        "-> traditional D405 capture completed directly through pyrealsense2: "
         f"handeye={args.handeye_mode}, frames={args.frames}, "
-        f"elapsed={float(result['capture_elapsed_s']):.3f}s",
+        f"elapsed={float(capture_result['capture_elapsed_s']):.3f}s",
         flush=True,
     )
     return run
@@ -1134,11 +1140,14 @@ def main() -> None:
         help="maximum concurrent Planner preflight requests; matches Module 3 default (default: 8)",
     )
     p.add_argument(
-        "--camera-broker-socket",
-        default=os.environ.get("CAMERA_BROKER_SOCKET", "/tmp/graspnet-v7-camera.sock"),
-        help="singleton D405/Femto Camera Broker Unix socket",
+        "--d405-fps", type=int,
+        default=int(os.environ.get("PARM_D405_FPS", "30")),
+        help="直接 D405 RGB-D 采集帧率（gzhu 默认 15，xiangxin 默认 30）",
     )
-    p.add_argument("--camera-broker-timeout-s", type=float, default=30.0)
+    p.add_argument(
+        "--d405-frame-timeout-ms", type=int, default=5000,
+        help="每帧等待 D405 驱动输出的最长时间（默认 5000 ms）",
+    )
     p.add_argument(
         "--capture-stability-retries", type=int, default=3,
         help="D405 capture static-check attempts after observation motion (default: 3)",
@@ -1270,6 +1279,10 @@ def main() -> None:
         p.error("selected hand-eye calibration file is missing: " + ", ".join(missing_calibrations))
     # 阶段 4：在启动相机、Planner 或机器人之前完成全部数值和文件校验。
     if args.frames < 1: p.error("--frames must be positive")
+    if args.d405_fps not in {5, 15, 30}:
+        p.error("--d405-fps 必须是 5、15 或 30")
+    if args.d405_frame_timeout_ms < 1:
+        p.error("--d405-frame-timeout-ms 必须为正整数")
     if args.capture_stability_retries < 1:
         p.error("--capture-stability-retries must be positive")
     if args.capture_stability_retry_wait_s < 0:

@@ -175,6 +175,105 @@ def tabletop_constrained_icp(
     return transform, rmse, float(np.mean(inlier))
 
 
+def tabletop_constrained_point_to_plane_icp(
+    source: np.ndarray,
+    target: np.ndarray,
+    initial: np.ndarray,
+    table_normal: np.ndarray,
+    *,
+    max_iterations: int = 45,
+    max_corr_m: float = 0.009,
+) -> tuple[np.ndarray, float, float]:
+    """Point-to-plane ICP restricted to translation and tabletop yaw.
+
+    The target normals come from the observed cloud.  Every Gauss-Newton step
+    solves four variables: one rotation about ``table_normal`` and XYZ
+    translation.  Roll and pitch therefore cannot drift into the opposite
+    face hypothesis.  The returned RMSE remains the conventional Euclidean
+    correspondence RMSE so existing quality gates keep the same units.
+    """
+    source = np.asarray(source, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    normal = _normalize(table_normal)
+    transform = np.asarray(initial, dtype=np.float64).copy()
+    target_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target))
+    normal_radius_m = max(2.0 * float(max_corr_m), 0.008)
+    target_cloud.estimate_normals(
+        o3d.geometry.KDTreeSearchParamHybrid(
+            radius=normal_radius_m, max_nn=40
+        )
+    )
+    target_normals = np.asarray(target_cloud.normals, dtype=np.float64)
+    normal_lengths = np.linalg.norm(target_normals, axis=1)
+    valid_normals = np.isfinite(target_normals).all(axis=1) & (normal_lengths > 1e-8)
+    target_normals[valid_normals] /= np.maximum(
+        normal_lengths[valid_normals, None],
+        1e-12,
+    )
+    tree = cKDTree(target)
+    robust_scale = max(float(max_corr_m) * 0.5, 1e-6)
+
+    for _ in range(int(max_iterations)):
+        transformed = _transform_points(transform, source)
+        distances, nearest = tree.query(transformed, k=1, workers=-1)
+        keep = (distances < float(max_corr_m)) & valid_normals[nearest]
+        if np.count_nonzero(keep) < 30:
+            closest = np.argsort(distances)[: min(250, len(distances))]
+            keep[closest] = valid_normals[nearest[closest]]
+        kept_distances = distances[keep]
+        if len(kept_distances) < 4:
+            break
+        cutoff = np.quantile(kept_distances, 0.82)
+        keep &= distances <= cutoff
+        points = transformed[keep]
+        matches = target[nearest[keep]]
+        normals = target_normals[nearest[keep]]
+        residual = np.einsum("ij,ij->i", normals, points - matches)
+
+        # Tukey biweight suppresses depth-edge and segmentation outliers.
+        ratio = residual / robust_scale
+        weights = np.square(1.0 - np.square(ratio))
+        weights[np.abs(ratio) >= 1.0] = 0.0
+        if np.count_nonzero(weights > 0.0) < 20:
+            weights = np.ones_like(residual)
+
+        yaw_jacobian = np.einsum(
+            "ij,ij->i", normals, np.cross(normal, points)
+        )
+        jacobian = np.column_stack((yaw_jacobian, normals))
+        weighted_jacobian = jacobian * np.sqrt(weights)[:, None]
+        weighted_rhs = -residual * np.sqrt(weights)
+        # Mild damping prevents an under-observed flat face from producing a
+        # large unconstrained tangent update while preserving point-plane ICP.
+        damping = np.diag((1e-7, 1e-6, 1e-6, 1e-6))
+        normal_matrix = weighted_jacobian.T @ weighted_jacobian + damping
+        rhs = weighted_jacobian.T @ weighted_rhs
+        try:
+            step = np.linalg.solve(normal_matrix, rhs)
+        except np.linalg.LinAlgError:
+            step = np.linalg.lstsq(weighted_jacobian, weighted_rhs, rcond=None)[0]
+
+        yaw = float(np.clip(step[0], -np.deg2rad(5.0), np.deg2rad(5.0)))
+        translation = np.clip(np.asarray(step[1:4]), -0.005, 0.005)
+        rotation = _axis_angle(normal, yaw)
+        delta = np.eye(4)
+        delta[:3, :3] = rotation
+        delta[:3, 3] = translation
+        transform = delta @ transform
+        if abs(yaw) < 2e-5 and np.linalg.norm(translation) < 2e-6:
+            break
+
+    final_distances, _ = tree.query(
+        _transform_points(transform, source), k=1, workers=-1
+    )
+    inlier = final_distances < float(max_corr_m)
+    rmse = (
+        float(np.sqrt(np.mean(final_distances[inlier] ** 2)))
+        if np.any(inlier) else float("inf")
+    )
+    return transform, rmse, float(np.mean(inlier))
+
+
 def _normalize(vector: np.ndarray) -> np.ndarray:
     vector = np.asarray(vector, dtype=np.float64)
     return vector / max(float(np.linalg.norm(vector)), 1e-12)

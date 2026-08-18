@@ -24,6 +24,8 @@ PYTHON = LOOP_ROOT / ".venv/bin/python"
 VISION_ROOT = HERE / "vision"
 CAPTURE = VISION_ROOT / "capture_rgbd.py"
 QUALITY_GATE_CONFIG = HERE / "quality_gate.json"
+OUTPUT_ROOT = LOOP_ROOT / "output/module_4_1"
+DEFAULT_CAPTURE_ROOT = OUTPUT_ROOT / "captures"
 
 # Module 4 is the project-wide owner of SAM2/ICP execution and the
 # FRONT/BACK/OTHER mapping.  Buffer Check only adds a stricter release gate.
@@ -44,14 +46,14 @@ EXIT_UNCERTAIN = 21
 EXIT_CONFIGURATION = 22
 
 
-def _inside_here(path: Path) -> Path:
-    """Resolve a writable target and reject paths outside this isolated tool."""
+def _inside_output(path: Path) -> Path:
+    """Keep captures, reports, and visual diagnostics under project output."""
     resolved = path.resolve()
     try:
-        resolved.relative_to(HERE)
+        resolved.relative_to(OUTPUT_ROOT)
     except ValueError as exc:
         raise ValueError(
-            f"为确保不写入现有流程目录，路径必须位于 {HERE}: {resolved}"
+            f"Module 4-1 调试输出必须位于 {OUTPUT_ROOT}: {resolved}"
         ) from exc
     return resolved
 
@@ -311,14 +313,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--workpiece", choices=("1", "2"), default="1",
-        help="工件编号；1保持双面多yaw约束ICP，2使用FPFH/RANSAC粗配准和全6DoF ICP",
+        help="工件编号；1保持双面多yaw约束点面ICP，2使用FPFH/RANSAC粗配准和全6DoF ICP",
     )
     parser.add_argument(
         "--mode", choices=("xiangxin", "gzhu"), required=True,
         help="原子选择现场头部相机序列号、手眼标定、分辨率和桌面工作区",
     )
-    parser.add_argument("--capture-dir", type=Path, help="复用本工具目录下已有的 RGB-D 采集；省略时新采集")
-    parser.add_argument("--capture-root", type=Path, default=HERE / "captures")
+    parser.add_argument(
+        "--capture-dir", type=Path,
+        help="复用 output/module_4_1 下已有的 RGB-D 采集；省略时新采集",
+    )
+    parser.add_argument("--capture-root", type=Path, default=DEFAULT_CAPTURE_ROOT)
     parser.add_argument(
         "--result-file", type=Path,
         help="将本次最终报告额外复制到调用方指定路径（用于 loop 的精确握手）",
@@ -346,14 +351,14 @@ def main() -> int:
             raise FileNotFoundError(f"缺少依赖: {dependency}")
     if min(args.width, args.height, args.depth_fuse_frames) < 1 or args.max_uncertain_retries < 0:
         raise ValueError("--width、--height、--depth-fuse-frames 必须至少为 1，--max-uncertain-retries 必须非负")
-    args.capture_root = _inside_here(args.capture_root)
+    args.capture_root = _inside_output(args.capture_root)
     args.capture_root.mkdir(parents=True, exist_ok=True)
 
     gate = _load_quality_gate()
     capture_attempt = 0
     while True:
         capture_attempt += 1
-        capture_dir = _inside_here(args.capture_dir) if args.capture_dir else _capture(args)
+        capture_dir = _inside_output(args.capture_dir) if args.capture_dir else _capture(args)
         if not (capture_dir / "metadata.json").is_file():
             raise FileNotFoundError(f"不是有效的 D435i RGB-D 采集目录: {capture_dir}")
         # Do not duplicate SAM2/ICP behavior here.  Module 4 owns the project

@@ -3,8 +3,9 @@
 
 The CAD +Z face is the validated physical positive face (defined once in
 config).  Each SAM2 mask is registered twice: the positive and reverse faces
-towards the camera.  ICP may only translate and yaw about the table normal, so it cannot
-silently rotate one face hypothesis into the other.  A dense CAD z-buffer is
+towards the camera.  Point-to-plane ICP may only translate and yaw about the
+table normal, so it cannot silently rotate one face hypothesis into the other.
+A dense CAD z-buffer is
 then compared with the observed aligned depth; points on the CAD peg and wide
 head receive extra weight.  Ambiguous score pairs remain ``unknown``.
 """
@@ -29,7 +30,7 @@ BODY_HEAD_CALIBRATION = (
 sys.path[:0] = [str(ROOT), str(HERE)]
 from tool.inspection_support.mask_depth import mask_depth_to_points_cam, voxel_downsample_np, remove_radius_outliers_np
 from tool.inspection_support.stl_model import load_stl_triangles_m, sample_surface_points
-from tools.icp import tabletop_constrained_icp
+from tools.icp import tabletop_constrained_point_to_plane_icp
 from .geometry import workspace_roi_mask
 
 
@@ -69,8 +70,8 @@ def planar_basis(points, normal):
 
 
 def constrained_icp(source, target, initial, normal, max_iters=45, max_corr=.009):
-    """ICP whose incremental rotation is yaw-only around the detected table."""
-    return tabletop_constrained_icp(
+    """Point-to-plane ICP whose rotation is yaw-only about the table normal."""
+    return tabletop_constrained_point_to_plane_icp(
         source, target, initial, normal, max_iterations=max_iters, max_corr_m=max_corr
     )
 
@@ -116,11 +117,114 @@ def classify(cad_icp, cad_render, feature, observed, depth, mask, K, scale, cad_
     for side, initial in face_initials(cad_icp, observed, normal, cad_up):
         T, rmse, fitness = constrained_icp(cad_icp, observed, initial, normal)
         _score, render = depth_score(T, cad_render, feature, depth, mask, K, scale)
-        trials.append({'side': side, 'T': T, 'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render': render})
+        trials.append({'side': side, 'T': T, 'icp_method': 'point_to_plane',
+                       'icp_rmse_m': rmse, 'icp_fitness': fitness, 'render': render})
     quality_key = lambda x: (x['icp_fitness'], x['render']['match_fraction'], -x['icp_rmse_m'])
     best = {side: max((x for x in trials if x['side']==side), key=quality_key) for side in ('positive','reverse')}
     side = max(best, key=lambda name: quality_key(best[name]))
     return side, best
+
+
+def _project(points, K, shape):
+    points = np.asarray(points, dtype=float)
+    valid = np.isfinite(points).all(axis=1) & (points[:, 2] > .1)
+    points = points[valid]
+    uv = np.column_stack((
+        K[0, 0] * points[:, 0] / points[:, 2] + K[0, 2],
+        K[1, 1] * points[:, 1] / points[:, 2] + K[1, 2],
+    ))
+    uv = np.rint(uv).astype(np.int32)
+    height, width = shape[:2]
+    inside = ((0 <= uv[:, 0]) & (uv[:, 0] < width)
+              & (0 <= uv[:, 1]) & (uv[:, 1] < height))
+    return uv[inside]
+
+
+def draw_icp_alignment(image, mask, K, T, cad_render, side, quality):
+    """Overlay the selected aligned CAD, observed mask contour, and object axes."""
+    canvas = image.copy()
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    cv2.drawContours(canvas, contours, -1, (255, 255, 0), 2, cv2.LINE_AA)
+    aligned = transform(T, cad_render)
+    stride = max(1, len(aligned) // 7000)
+    pixels = _project(aligned[::stride], K, canvas.shape)
+    cad_layer = np.zeros(mask.shape, dtype=np.uint8)
+    if len(pixels):
+        cad_layer[pixels[:, 1], pixels[:, 0]] = 255
+        cad_layer = cv2.dilate(cad_layer, np.ones((3, 3), np.uint8))
+        selected = cad_layer > 0
+        color = np.array((255, 0, 255), dtype=np.float64)
+        canvas[selected] = (
+            .35 * canvas[selected].astype(np.float64) + .65 * color
+        ).astype(np.uint8)
+
+    origin = np.asarray(T[:3, 3], dtype=float)
+    axes = np.asarray([origin, *(origin + T[:3, :3][:, axis] * .04 for axis in range(3))])
+    projected = _project(axes, K, canvas.shape)
+    # _project preserves all points here when the pose lies inside the image.
+    if len(projected) == 4:
+        start = tuple(projected[0])
+        for endpoint, color, label in zip(
+            projected[1:], ((0, 0, 255), (0, 255, 0), (255, 0, 0)), ("X", "Y", "Z")
+        ):
+            end = tuple(endpoint)
+            cv2.arrowedLine(canvas, start, end, color, 3, cv2.LINE_AA, tipLength=.18)
+            cv2.putText(canvas, label, end, cv2.FONT_HERSHEY_SIMPLEX, .55, color, 2, cv2.LINE_AA)
+    label = (
+        f"{side} point-to-plane ICP  fitness={quality['icp_fitness']:.3f}  "
+        f"rmse={quality['icp_rmse_m'] * 1000.0:.2f}mm  "
+        f"depth={quality['render']['match_fraction']:.3f}"
+    )
+    cv2.rectangle(canvas, (8, 8), (min(canvas.shape[1] - 8, 920), 42), (0, 0, 0), -1)
+    cv2.putText(canvas, label, (16, 33), cv2.FONT_HERSHEY_SIMPLEX, .58,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    return canvas, aligned
+
+
+def write_icp_alignment_3d(path, observed, aligned_cad, table_n, side, quality):
+    """Save a headless 3-D view of observed points and the selected aligned CAD."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def sample(points, maximum):
+        points = np.asarray(points, dtype=float)
+        if len(points) <= maximum:
+            return points
+        return points[np.linspace(0, len(points) - 1, maximum).astype(int)]
+
+    observed_plot = sample(observed, 3500)
+    cad_plot = sample(aligned_cad, 5000)
+    both = np.vstack((observed_plot, cad_plot))
+    center = (both.min(axis=0) + both.max(axis=0)) * .5
+    radius = max(float(np.ptp(both, axis=0).max()) * .55, .03)
+    fig = plt.figure(figsize=(8.5, 7.0), dpi=150)
+    axis = fig.add_subplot(111, projection="3d")
+    axis.scatter(observed_plot[:, 0], observed_plot[:, 1], observed_plot[:, 2],
+                 s=2, c="#20c997", alpha=.65, label="observed depth")
+    axis.scatter(cad_plot[:, 0], cad_plot[:, 1], cad_plot[:, 2],
+                 s=2, c="#d633ff", alpha=.42, label="aligned CAD")
+    cloud_center = observed_plot.mean(axis=0)
+    axis.quiver(*cloud_center, *normalize(table_n), length=.05,
+                color="#0066ff", linewidth=2, label="table normal")
+    axis.set_xlim(center[0] - radius, center[0] + radius)
+    axis.set_ylim(center[1] - radius, center[1] + radius)
+    axis.set_zlim(center[2] - radius, center[2] + radius)
+    axis.set_xlabel("camera X / m")
+    axis.set_ylabel("camera Y / m")
+    axis.set_zlabel("camera Z / m")
+    axis.set_title(
+        f"{side} constrained point-to-plane ICP\n"
+        f"fitness={quality['icp_fitness']:.3f}, "
+        f"RMSE={quality['icp_rmse_m'] * 1000.0:.2f} mm"
+    )
+    axis.legend(loc="upper right")
+    axis.view_init(elev=24, azim=-62)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def main():
@@ -148,7 +252,8 @@ def main():
     scene_normal = table_normal(scene_points)
     cad_up = normalize(orientation['positive_face_normal_stl']); feature = (cad_render @ cad_up >= np.percentile(cad_render @ cad_up, 88))
     diagnostics = []
-    orient = rgb.copy()
+    alignment_overlay = d/'sam2_masks/icp_alignment_overlay.png'
+    orient = rgb.copy(); alignment = rgb.copy(); alignment_paths = []
     for i, raw_m in enumerate(masks):
         m = raw_m.astype(bool) & safe_roi
         if np.count_nonzero(m) < 350:
@@ -171,19 +276,33 @@ def main():
         # Buffer recovery path consumes this exact estimate to re-grasp a part
         # which has been corrected to its front side; recomputing a centre from
         # the mask would discard the CAD/ICP registration we just validated.
+        suffix = '' if len(masks) == 1 else f'_{i:03d}'
+        alignment, aligned_cad = draw_icp_alignment(
+            alignment, m, K, selected_T, cad_render, side, best[side]
+        )
+        alignment_3d_path = d/f'sam2_masks/icp_alignment_3d{suffix}.png'
+        write_icp_alignment_3d(
+            alignment_3d_path, pts, aligned_cad, scene_normal, side, best[side]
+        )
+        alignment_paths.append(str(alignment_3d_path))
         diag = {'object_key': f'sam2-{i}', 'classification': accepted_side,
                 'table_normal_camera': scene_normal.round(9).tolist(),
                 'selected_hypothesis': side,
                 'pose': {
                     'valid': accepted_side in {'positive', 'reverse'},
                     'orientation_valid': accepted_side in {'positive', 'reverse'},
-                    'method': 'tabletop_front_back_multi_yaw_constrained_icp',
+                    'method': 'tabletop_front_back_multi_yaw_constrained_point_to_plane_icp',
                     'T_head_camera_workpiece': selected_T.round(9).tolist(),
                     'T_body_base_workpiece': T_body_base_object.round(9).tolist(),
                     'calibration': str(BODY_HEAD_CALIBRATION),
                     'calibrated_head_pose_deg': body_head.get('head_pose_deg'),
+                    'visualization_3d': str(alignment_3d_path),
                 },
                 'reverse_geometry_quality': {'icp_fitness': reverse_fitness, 'minimum_icp_fitness': orientation['minimum_reverse_icp_fitness'], 'depth_match_fraction': reverse_match, 'minimum_depth_match_fraction': orientation['minimum_reverse_depth_match_fraction'], 'accepted': geometry_ok},
+                'visualization': {
+                    'icp_alignment_overlay': str(alignment_overlay),
+                    'icp_alignment_3d': str(alignment_3d_path),
+                },
                 'positive': {**{k:v for k,v in best['positive'].items() if k!='T'}, 'T_camera_object': best['positive']['T'].round(9).tolist()},
                 'reverse': {**{k:v for k,v in best['reverse'].items() if k!='T'}, 'T_camera_object': best['reverse']['T'].round(9).tolist()}}
         diagnostics.append(diag)
@@ -193,8 +312,12 @@ def main():
     overlay = d/'sam2_masks/orientation_overlay.png'
     diagnostics_path = d/'sam2_masks/orientation_diagnostics.json'
     cv2.imwrite(str(overlay), orient)
+    cv2.imwrite(str(alignment_overlay), alignment)
     diagnostics_path.write_text(json.dumps(diagnostics, indent=2))
-    print(json.dumps({'objects': len(diagnostics), 'diagnostics': str(diagnostics_path), 'orientation_overlay': str(overlay)}))
+    print(json.dumps({'objects': len(diagnostics), 'diagnostics': str(diagnostics_path),
+                      'orientation_overlay': str(overlay),
+                      'icp_alignment_overlay': str(alignment_overlay),
+                      'icp_alignment_3d': alignment_paths}))
 
 
 if __name__ == '__main__': main()

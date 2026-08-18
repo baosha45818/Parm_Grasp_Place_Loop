@@ -94,8 +94,8 @@ def load_mode(name: str) -> HeadD435Mode:
     if min(*calibration_size, fps, *(v for size in capture_sizes.values() for v in size)) < 1:
         raise RuntimeError(f"头部采集尺寸或 fps 无效: {path}")
     workspace_paths = {
-        "1": CONFIG_ROOT / f"{name}_workpiece_1_workspace.json",
-        "2": CONFIG_ROOT / "workpiece_2_workspace.json",
+        key: CONFIG_ROOT / f"{name}_workpiece_{key}_workspace.json"
+        for key in ("1", "2")
     }
     missing = [workspace for workspace in workspace_paths.values() if not workspace.is_file()]
     if missing:

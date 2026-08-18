@@ -3,7 +3,8 @@
 Module 4.1 使用一次头部 RGB-D 采集，同时发布工件正反和 ICP 位姿。它不计算
 抓取 TCP，也不控制机械臂或夹爪。
 
-- 工件1：正反两面各4个 yaw 初值，执行桌面约束 ICP。
+- 工件1：正反两面各4个 yaw 初值，执行桌面约束点面 ICP；目标法向来自观测点云，
+  优化量仅为绕桌面法向的 yaw 和 XYZ 平移，正反假设不会在 ICP 中互相翻转。
 - 工件2：FPFH/RANSAC 粗配准、语义半转候选和全6DoF点到平面 ICP。
 - 两种工件共用采集、SAM2客户端、桌面几何和一份配置驱动的 mask 实现。
 - 一次调用首次不确定时最多额外采集3次，即最多4次采集。
@@ -26,7 +27,7 @@ module_4_1_buffer_state_estimation/
 ├── configs/
 │   ├── workpiece_1.json
 │   ├── workpiece_2.json
-│   └── <mode>_workpiece_1_workspace.json / workpiece_2_workspace.json
+│   └── <mode>_workpiece_<1|2>_workspace.json
 ├── calibration/
 ├── assets/
 └── tests/
@@ -55,6 +56,28 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 ```text
 <capture-dir>/sam2_masks/orientation_diagnostics.json
 ```
+
+新采集和全部调试输出统一位于：
+
+```text
+output/module_4_1/captures/head_rgbd_<timestamp>/
+```
+
+`xiangxin` 和 `gzhu` 的 ROI 只存在于各自的
+`<mode>_workpiece_<id>_workspace.json`。通用工件配置不再携带 ROI，mask 与 ICP
+使用同一份 mode workspace。`workspace_roi_overlay.png` 会将 ROI 外部压暗并标出
+实际加载的配置文件。
+
+工件1还会为最终胜出的 ICP 假设写出：
+
+```text
+<capture-dir>/sam2_masks/icp_alignment_overlay.png  # RGB上的mask轮廓、CAD投影和XYZ轴
+<capture-dir>/sam2_masks/icp_alignment_3d.png       # 观测深度点与配准后CAD的三维对照
+```
+
+当同一帧有多个 mask 时，3D 图使用 `_000`、`_001` 等后缀。诊断 JSON 的
+`pose.method` 明确记录 `constrained_point_to_plane_icp`，每个假设也记录
+`icp_method: point_to_plane`。
 
 `module.py` 只调用上述统一入口，不再维护 `VISION_ROOTS`。
 

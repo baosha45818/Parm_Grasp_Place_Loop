@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from contracts import ModuleResult, Status
-from locks import acquire
+from locks import LockCancelled, acquire
 from module_registry import ModuleSpec
 
 
@@ -46,7 +46,40 @@ def _normalize(name: str, path: Path, returncode: int, run_id: str) -> ModuleRes
     # Module 3 松爪位规划失败时会安全回 graspup，但工件仍可能在左夹爪中；
     # 这是需要人工确认的放置失败，不能发布 Buffer 已就绪。
     if name in {"module_3_buffer", "module_3_middle"}:
+        expected_kind = "buffer" if name == "module_3_buffer" else "middle"
+        expected_stage = f"{expected_kind}_place"
+        if returncode == 0 and (
+            raw.get("placement_kind") != expected_kind
+            or raw.get("stage") != expected_stage
+        ):
+            return ModuleResult(
+                name,
+                Status.FAULT,
+                "INVALID_RESULT",
+                run_id,
+                outputs=raw,
+                source_result=str(path),
+                error={
+                    "exit_code": returncode,
+                    "reason": "Module 3 放置类型与总控调度分支不一致",
+                    "expected_placement_kind": expected_kind,
+                    "actual_placement_kind": raw.get("placement_kind"),
+                    "expected_stage": expected_stage,
+                    "actual_stage": raw.get("stage"),
+                },
+            )
         outcome = str(raw.get("outcome", "SUCCESS"))
+        if outcome == "planning_failed_recovered_at_graspup":
+            # Module 3 已在安全 graspup 丢弃工件并打开左夹爪；本轮放置无效，
+            # 必须重新从 Module 1 观察和抓取，绝不能发布 Buffer/Middle 已占用。
+            return ModuleResult(
+                name,
+                Status.RETRY,
+                outcome,
+                run_id,
+                outputs=raw,
+                source_result=str(path),
+            )
         if outcome == "release_motion_failed_object_retained":
             return ModuleResult(
                 name,
@@ -96,27 +129,43 @@ def run(
     stdout_path = runtime / "logs" / f"{spec.name}_{attempt}.log"
     stdout_path.parent.mkdir(parents=True, exist_ok=True)
     project_root = Path(__file__).resolve().parents[1]
-    with acquire(runtime / "locks", spec.resources), stdout_path.open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            command,
-            cwd=project_root,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
+    try:
+        with acquire(
+            runtime / "locks", spec.resources, stop_event=stop_event
+        ), stdout_path.open("w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                command,
+                cwd=project_root,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+            while process.poll() is None:
+                if stop_event is not None and stop_event.wait(0.2):
+                    _terminate_process_group(process)
+                    result = ModuleResult(
+                        spec.name, Status.CANCELLED, "STOP_REQUESTED", run_id,
+                        source_result=str(result_path),
+                    )
+                    result.outputs.update({"command": command, "log": str(stdout_path)})
+                    result.write(runtime / "results" / f"{spec.name}_{attempt}.json")
+                    return result
+                time.sleep(0.01)
+            returncode = process.returncode
+    except LockCancelled as exc:
+        result = ModuleResult(
+            spec.name, Status.CANCELLED, "STOP_REQUESTED", run_id,
+            source_result=str(result_path),
         )
-        while process.poll() is None:
-            if stop_event is not None and stop_event.wait(0.2):
-                _terminate_process_group(process)
-                result = ModuleResult(
-                    spec.name, Status.CANCELLED, "STOP_REQUESTED", run_id,
-                    source_result=str(result_path),
-                )
-                result.outputs.update({"command": command, "log": str(stdout_path)})
-                result.write(runtime / "results" / f"{spec.name}_{attempt}.json")
-                return result
-            time.sleep(0.01)
-        returncode = process.returncode
+        result.outputs.update({
+            "command": command,
+            "log": str(stdout_path),
+            "waiting_for_resource_lock": True,
+            "reason": str(exc),
+        })
+        result.write(runtime / "results" / f"{spec.name}_{attempt}.json")
+        return result
     normalized_input = result_path if spec.result_file_is_contract else Path("/nonexistent")
     result = _normalize(spec.name, normalized_input, returncode, run_id)
     result.outputs.setdefault("command", command)

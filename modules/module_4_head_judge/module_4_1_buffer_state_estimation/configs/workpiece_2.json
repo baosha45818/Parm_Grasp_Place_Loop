@@ -25,8 +25,6 @@
   "reverse_pose_selection": "FPFH/RANSAC global initialization plus four semantic half-turns and full-6DoF point-to-point ICP. Only candidates with STL +Z pointing into the table are accepted.",
   "reverse_pose_selection_description": "This replaces the former yaw-index initialization. The global stage evaluates reverse-compatible 6DoF CAD poses rather than constraining motion to tabletop yaw.",
   "mask": {
-    "reference_color_size_wh": [848, 480],
-    "safe_roi_polygon_px": [[181, 128], [500, 128], [504, 170], [504, 245], [511, 286], [511, 374], [524, 462], [488, 462], [420, 466], [287, 466], [175, 458], [90, 458], [120, 330], [170, 205]],
     "seed_height_mm": 3.0,
     "seed_max_gray": 105,
     "minimum_depth_m": 0.20,

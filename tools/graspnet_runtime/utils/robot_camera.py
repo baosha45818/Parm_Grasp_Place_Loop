@@ -291,24 +291,30 @@ class D405Camera:
             rs.stream.depth, self.width, self.height, rs.format.z16, self.fps
         )
         self._pipe = rs.pipeline(self._ctx)
-        profile = self._pipe.start(cfg)
-        self._align = rs.align(rs.stream.color)
-        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
-        self._color_intrinsics = _intrinsics_to_matrix(color_profile)
-        self._color_distortion = _profile_distortion(color_profile)
-        self._depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
-        if self.enable_postprocess:
-            # These filters preserve the aligned 640x480 profile. Do not add
-            # decimation here because it would invalidate ROI pixel coordinates.
-            self._spatial_filter = rs.spatial_filter()
-            self._temporal_filter = rs.temporal_filter()
-            if self.enable_hole_filling:
-                self._hole_filling_filter = rs.hole_filling_filter()
-        for _ in range(max(0, self.warmup_frames)):
-            try:
-                self._pipe.wait_for_frames(timeout_ms=2000)
-            except Exception:
-                break
+        try:
+            profile = self._pipe.start(cfg)
+            self._align = rs.align(rs.stream.color)
+            color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+            self._color_intrinsics = _intrinsics_to_matrix(color_profile)
+            self._color_distortion = _profile_distortion(color_profile)
+            self._depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
+            if self.enable_postprocess:
+                # These filters preserve the aligned 640x480 profile. Do not add
+                # decimation here because it would invalidate ROI pixel coordinates.
+                self._spatial_filter = rs.spatial_filter()
+                self._temporal_filter = rs.temporal_filter()
+                if self.enable_hole_filling:
+                    self._hole_filling_filter = rs.hole_filling_filter()
+            for _ in range(max(0, self.warmup_frames)):
+                try:
+                    self._pipe.wait_for_frames(timeout_ms=2000)
+                except Exception:
+                    break
+        except Exception:
+            # 直接采集没有 Broker 代为回收；任一配置或启动异常都必须立即
+            # stop pipeline，避免当前 Module 1 进程留下半开的 D405 句柄。
+            self.close()
+            raise
         return self
 
     def close(self) -> None:

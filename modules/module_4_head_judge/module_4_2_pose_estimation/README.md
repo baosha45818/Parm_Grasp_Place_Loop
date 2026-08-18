@@ -260,25 +260,98 @@ dot = positive_face_normal_camera · table_up_normal_camera
 
 ## 7. 位姿估计置信度、重拍和 BACK 确认
 
-每个工件输出 `pose_confidence`：
+### 7.1 两个互相独立的标签
 
-- `HIGH`：点数、ICP fitness、RMSE、深度评分、正反面分差和候选一致性都达到严格阈值；
-- `MEDIUM`：没有 LOW 原因，但未达到 HIGH 的全部条件；
-- `LOW`：存在模糊正反、点数不足、fitness 低、RMSE/深度评分过大或近似最优候选差异过大等问题。
+每个工件都有两个不同维度的结果，不能混为一谈：
 
-默认 `--low-confidence-retries=2`。因此 LOW 时会重新进行完整 RGB-D 采集、分割和配准，最多：
+| 字段 | 回答的问题 | 可能值 |
+| --- | --- | --- |
+| `orientation` | 估计的正面还是反面朝上？ | `FRONT`、`BACK`、`OTHER` |
+| `pose_confidence.level` | 这次 6D 位姿与正反判断是否可靠？ | `HIGH`、`MEDIUM`、`LOW` |
+
+`orientation` 来自 FRONT/BACK 两种 ICP 假设的深度评分比较：
+
+- `FRONT`：FRONT 假设明显优于 BACK；
+- `BACK`：BACK 假设明显优于 FRONT；
+- `OTHER`：两种假设分数差不足，正反面模糊。
+
+质量标签由点数、ICP fitness、RMSE、深度评分、正反分数差和近似最优候选的一致性共同决定：
+
+- `FRONT` 或 `BACK` 可以是 `HIGH`、`MEDIUM` 或 `LOW`；
+- `OTHER` 一定是 `LOW`，因为正反面本身未得到可靠区分；
+- `MEDIUM` 表示没有 LOW 原因，但还未达到 HIGH 的严格阈值。
+
+例如，`FRONT + LOW` 的含义是“正面假设暂时更好，但位姿质量仍不足”，不是“确认正面”；`BACK + HIGH` 则表示反面证据强，但仍需经过下文的连续 BACK 确认。
+
+### 7.2 多工件：最右工件是下游目标
+
+一张图中可以识别多个同型号工件。所有有效工件完成 ICP 后，输出会按**画面从右到左**排序：当前标定下，画面越右对应 `body_base Y` 越小，因此：
 
 ```text
-首次 + 2 次额外重拍 = 3 次完整尝试
+workpieces[0]：最右侧有效工件
+workpieces[1]：第二靠右工件
+...
 ```
 
-若全部尝试都只能得到 LOW，模块仍会发布其中“最不差”的结果，并在 `metadata.json` 中写入：
+Module 8.1 的默认 `--workpiece-index 0` 会将 `workpieces[0]` 传给 `buffer_grasp.py` 和 Module 7 的 `right_align.py`。因此桌上仅有一个工件时它自然是目标；桌上有多个时，默认优先处理最右工件。
+
+正反面 BACK 确认也只看这个最右目标。左侧非目标工件为 BACK 不会触发额外确认拍摄，也不会阻塞最右目标。
+
+### 7.3 BACK 必须连续两帧确认
+
+只要最右工件在某帧被判断为 BACK，模块不会马上发布它，而是额外采集一帧确认：
+
+```text
+最右 BACK → 下一帧最右 BACK
+  → 确认 BACK；在这两帧中仅按最右工件的 ICP 质量选较好的一帧发布
+
+最右 BACK → 下一帧最右 FRONT 或 OTHER
+  → 第一次 BACK 作废；不发布 BACK，按第二帧继续处理
+```
+
+这里的“连续”是严格相邻帧。`BACK → FRONT → BACK` 不会确认 BACK；最后一个 BACK 会作为新的第一次 BACK，再等待它自己的下一帧确认。
+
+### 7.4 LOW 质量重拍与最终 fallback
+
+若当前采集结果中任一有效工件的 `pose_confidence.level` 为 `LOW`，模块会丢弃该次正式发布机会，重新执行完整 RGB-D 采集、分割和 ICP。默认：
+
+```text
+--low-confidence-retries=2
+首次低质量采集 + 最多 2 次额外低质量重拍 = 最多 3 次普通低质量尝试
+```
+
+若某次采集不存在 LOW 工件，且未处于等待 BACK 确认状态，结果会立刻发布，不会为了凑满三次而继续拍摄。
+
+若所有允许的低质量尝试都未得到合格结果，模块仍会发布相对最好的低质量候选，并在 `metadata.json` 中写入：
 
 ```json
 "confidence_fallback_used": true
 ```
 
-若一次结果中所有工件（一般桌上只会有1个工件）均为 `BACK`，模块会额外拍摄一次作独立确认；两次都是 BACK 才正式发布，并选取 ICP 综合指标更好的那一次。
+未确认的 BACK 不会进入这个低质量 fallback 候选集。例如：
+
+```text
+BACK → FRONT(LOW) → BACK → FRONT(LOW)
+```
+
+两次 BACK 都因下一帧不是 BACK 而作废；最终只会在 FRONT(LOW) 候选中选择。每出现一次待确认 BACK，模块会多保留一次拍摄机会给它的确认帧，因此实际总拍摄次数可能超过普通的三次。
+
+### 7.5 与 Module 8.1 的衔接
+
+Module 4.2 只负责发布视觉结果，不控制机械臂。Module 8.1 读取最右目标（默认 `workpieces[0]`）后遵循：
+
+```text
+FRONT
+  → 再按 Q1/yaw 条件选择直接抓取或 Module 7 调整
+
+BACK
+  → Module 8.1 停在安全观察位，返回 OPERATOR_REQUIRED；不自动调整
+
+OTHER
+  → Module 8.1 停在安全观察位，返回 OPERATOR_REQUIRED；不自动调整
+```
+
+因此，`BACK` 和 `OTHER` 需要外层总控或人工处理后重新观察；Module 7 不负责将反面翻成正面。
 
 ## 8. 输出目录和文件
 
@@ -311,7 +384,7 @@ output/module_4_2/workpiece_<编号>/<递增序号>/
 - `workpiece_asset`：工件编号；
 - `stl`、`semantic_calibration`：本次实际使用的资产；
 - `coordinate_frame: "body_base"`；
-- `workpieces`：按 mask 面积从大到小排列的工件数组；
+- `workpieces`：按 `body_base` 的 Y 从小到大排列的工件数组；当前标定中 Y 越小表示画面越右，因此 `workpieces[0]` 是最右侧有效工件，后续条目从右到左排列。mask 面积仅决定 ICP 的处理顺序，不决定输出编号；
 - `rejected_components`：未能形成有效 ICP 位姿的连通域及原因。
 
 每个 `workpieces[i]` 中，下游常用字段为：

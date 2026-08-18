@@ -55,6 +55,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--left-tcp-static-rotation-deg", type=float, default=1.0)
     parser.add_argument("--expected-head-pitch", type=float, default=2.0)
     parser.add_argument("--expected-head-yaw", type=float, default=26.5)
+    parser.add_argument(
+        "--head-feedback-pitch-sign",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=1.0,
+        help="驱动 pitch 反馈转换为云台命令角的符号；gzhu 为 -1",
+    )
     parser.add_argument("--head-tolerance-deg", type=float, default=1.0)
     parser.add_argument(
         "--output-frame", choices=("camera", "body_base"), default="camera",
@@ -70,7 +77,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_head_pose_command_deg(host: str, timeout_s: float = 3.0) -> tuple[dict[str, float], dict[str, Any]]:
+def read_head_pose_command_deg(
+    host: str,
+    timeout_s: float = 3.0,
+    feedback_pitch_sign: float = 1.0,
+) -> tuple[dict[str, float], dict[str, Any]]:
     """读取云台并转换为 move_to() 的命令角符号约定。"""
     from parm_sdk import Head
 
@@ -92,9 +103,10 @@ def read_head_pose_command_deg(host: str, timeout_s: float = 3.0) -> tuple[dict[
         raise RuntimeError(f"云台存在报警: {state}")
     if not pitch.get("enabled") or not yaw.get("enabled"):
         raise RuntimeError(f"云台未使能: {state}")
-    # parm_sdk 20260811 的状态和 move_to() 使用同一命令坐标系：正 pitch 低头。
+    # 部署差异：gzhu 的驱动状态 pitch 与 move_to 命令角反号，xiangxin 同号。
+    # 后续外参传播必须使用命令角，不能直接把原始反馈代入运动学。
     command_pose = {
-        "pitch": float(pitch["position"]),
+        "pitch": feedback_pitch_sign * float(pitch["position"]),
         "yaw": float(yaw["position"]),
     }
     return command_pose, state
@@ -198,7 +210,10 @@ def main() -> int:
         raise ValueError("--head-tolerance-deg 必须是大于 0 的有限值")
     cfg = json.loads(args.config.read_text(encoding="utf-8"))
     expected = {"pitch": args.expected_head_pitch, "yaw": args.expected_head_yaw}
-    actual, raw_state = read_head_pose_command_deg(args.driver_host)
+    actual, raw_state = read_head_pose_command_deg(
+        args.driver_host,
+        feedback_pitch_sign=args.head_feedback_pitch_sign,
+    )
     error = pose_error_deg(actual, expected)
     if error > args.head_tolerance_deg:
         raise RuntimeError(

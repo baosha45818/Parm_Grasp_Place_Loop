@@ -12,12 +12,6 @@ import select
 import sys
 import threading
 
-# 既支持 ``python3 controller/main.py``，也支持从 controller 目录运行。
-# 否则退出清理时无法导入项目根目录下的 ``modules`` 包，Broker 会残留。
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
 from contracts import ModuleResult, Status, now_id
 from deployment import apply as apply_deployment
 from module_registry import ModuleSpec, registry
@@ -69,7 +63,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gripper-host", default=None, help="省略时由 --mode 决定")
     parser.add_argument("--force-host", default=None, help="省略时由 --mode 决定")
     parser.add_argument("--head-host", default=None, help="省略时由 --mode 决定")
-    parser.add_argument("--d405-serial", default=None, help="省略时由 --mode 决定")
     parser.add_argument("--prepare-speed", type=float, default=0.3)
     return parser.parse_args()
 
@@ -86,7 +79,6 @@ def context_for(name: str, state: RuntimeState, args: argparse.Namespace, result
         "planner_host": args.planner_host, "arm_host": args.arm_host,
         "gripper_host": args.gripper_host, "force_host": args.force_host,
         "head_host": args.head_host,
-        "d405_serial": args.d405_serial,
         "prepare_speed": str(args.prepare_speed),
     }
     if name in {"module_3_buffer", "module_3_middle"}:
@@ -94,7 +86,7 @@ def context_for(name: str, state: RuntimeState, args: argparse.Namespace, result
     if name in {"module_5_front", "module_5_reverse"}:
         common["buffer_result"] = state.artifacts["module_4_buffer_state"]
     if name == "module_8_handoff":
-        pointer = Path(state.artifacts["module_5_reverse"])
+        pointer = Path(state.artifacts.get("module_5_reverse_handoff", state.artifacts["module_5_reverse"]))
         payload = json.loads(pointer.read_text(encoding="utf-8"))
         common["handoff_result"] = str(payload.get("result") or pointer)
         common["handoff_ready"] = str(result.with_name(f"{result.stem}_ready.json"))
@@ -133,8 +125,21 @@ def wait_for_operator(module: str, state: RuntimeState, stop_event: threading.Ev
         if not answer:
             raise EOFError("人工处理终端输入已关闭")
         if answer in {"y", "yes"}:
+            if module in {"module_5_reverse", "module_5_reverse_handoff"} and state.left_arm == "HOLDS_WORKPIECE":
+                # 反抓已确认完成时，仅允许恢复交接准备；绝不回 M4 重抓。
+                return "module_5_reverse_handoff"
             # Buffer 的判断/重抓问题永远从观察位开始，不能直接复用旧 TF。
-            return "controller_observation_pose" if module in {"module_4_buffer_state", "module_5_front", "module_5_reverse"} else module
+            if module in {"module_4_buffer_state", "module_5_front", "module_5_reverse"}:
+                return "controller_observation_pose"
+            if module == "module_8_handoff":
+                # M8.2 异常后 handoff 状态会标为 UNKNOWN。操作者输入 y 表示
+                # 已把工件与双臂恢复为「左手在交接准备位、右手可接取」的现场，
+                # 才允许用全新的 M8.2 模块调用重新开始。
+                state.handoff = "LEFT_READY"
+                state.left_arm = "AT_HANDOFF"
+                state.right_arm = "IDLE"
+                return module
+            return module
         if answer in {"q", "quit"}:
             raise KeyboardInterrupt
     raise KeyboardInterrupt
@@ -191,18 +196,6 @@ def run_right_task(
         if result.status != Status.SUCCESS:
             return RightTaskFailure(task, index, result)
     return result
-
-
-def stop_camera_broker_on_exit() -> None:
-    """Ctrl+C 后释放左腕 D405，避免 Broker 残留占用相机设备。"""
-    try:
-        from modules.module_0_prepare.ensure_camera_broker import stop_camera_broker
-
-        stopped = stop_camera_broker()
-        if stopped:
-            print("[controller] Camera Broker 已停止，D405 已释放。", flush=True)
-    except Exception as exc:  # 退出路径不能因清理失败而掩盖原始停止请求。
-        print(f"[controller] 警告：停止 Camera Broker 失败：{exc}", file=sys.stderr, flush=True)
 
 
 def main() -> int:
@@ -298,15 +291,34 @@ def main() -> int:
             if next_module in {"module_3_middle", "module_8_handoff"}:
                 wait_right_clear()
 
+            # 交接区不使用文件锁；由单一总控的持久化状态机互斥。M8.2 只可
+            # 消费 M5.2 已明确发布的 LEFT_READY，启动前先落盘 TRANSFERRING，
+            # 便于停止或异常后准确呈现现场，而不会把交接工件误记为 Buffer 工件。
+            if next_module == "module_8_handoff":
+                if state.handoff != "LEFT_READY":
+                    print(
+                        "[controller] Module 8.2 未启动：交接状态必须为 LEFT_READY，"
+                        f"当前为 {state.handoff}。",
+                        flush=True,
+                    )
+                    next_module = wait_for_operator("module_8_handoff", state, stop_event)
+                    continue
+                state.handoff = "TRANSFERRING"
+                state.save(runtime / "state.json")
+
             result = run_one(next_module, state=state, runtime=runtime, args=args, specs=specs, stop_event=stop_event)
             decision = decide(
                 state, result,
                 max_buffer_observation_attempts=args.max_buffer_observation_attempts,
             )
+            # 规则层会更新 Buffer/交接位/持件状态；尤其是反抓成功后交接失败时，
+            # 必须在进入人工等待前落盘，不能让重启后误以为左手空闲。
+            state.save(runtime / "state.json")
             print(f"[controller] {next_module} -> {decision.next_module or 'STOP'}", flush=True)
 
             # 两条分支在这里把工件从左侧交给右侧；右侧开始后台工作，左臂立刻
-            # 可以从 Module 1 准备下一件。Buffer 锁仍由每个模块的资源声明保护。
+            # 可以从 Module 1 准备下一件。Buffer 单容量由 RuntimeState 和
+            # scheduler_rules 的状态转换保护，不使用短生命周期的文件锁。
             if result.status == Status.SUCCESS and next_module == "module_3_middle":
                 start_right(RightTask("FRONT"))
                 dispatched += 1
@@ -339,9 +351,6 @@ def main() -> int:
     finally:
         stop_event.set()
         executor.shutdown(wait=True, cancel_futures=False)
-        # Broker 是本总控运行期的 D405 独占者。无论是 Ctrl+C、模块异常
-        # 还是正常完成，只要主控退出就必须释放相机，不能留下孤儿进程。
-        stop_camera_broker_on_exit()
         signal.signal(signal.SIGINT, previous_sigint)
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGHUP, previous_sighup)

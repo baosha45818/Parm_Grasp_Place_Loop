@@ -50,6 +50,32 @@ Module 3 完成固定轨迹、松爪并回 `graspup`；不再把夹爪 `gripping
 判据。若工件未留在 Buffer，Module 4 的重复观察耗尽后会清空本次 Buffer 状态并回
 Module 1 抓下一件。
 
+## 四条固定主路径的本地轨迹缓存
+
+真实运行时，Module 3 只缓存以下四条固定工位的**主轨迹**：
+
+```text
+graspuptop → buffer      buffer → graspuptop
+graspuptop → middle      middle → graspuptop
+```
+
+缓存目录固定为 `trajactory/workpiece_1/`、`trajactory/workpiece_2/`，每条路径一个
+JSON 文件。首次运行仍会请求规划器；只有规划结果已真实执行、且机械臂已验证到达
+轨迹终点后才写入。之后相同工件、相同固定位置配置会直接播放文件中的轨迹，不再为
+这四条主路径请求规划器。
+
+若工件配置、速度、规划器类型或 `graspuptop` 关节位改变，缓存自动失效并在下一次
+真实成功执行后覆盖；若实际关节不在缓存首点容差内，也会为安全起见重新规划。松爪
+下探/回升、抓取和异常恢复动作不在缓存范围内。
+
+如需删除两种工件的全部缓存，可运行：
+
+```bash
+python3 modules/module_3_left_place/clear_trajactory.py --yes
+```
+
+不传 `--yes` 时脚本只显示待清理项，不会删除文件。
+
 ## 运行
 
 ### 无动作规划
@@ -123,8 +149,8 @@ modules/module_3_left_place/run.sh \
 - Buffer 候选不可达：真实模式回 `graspup`，下降到安全丢弃位，松爪并返回。
 - 离线轨迹起点与实际关节不一致：丢弃离线轨迹并在线重规划。
 - 松爪下降候选失败：记录每次失败；如果配置要求下降且所有候选都失败，
-  保持夹持并返回 `graspup`，写出
-  `release_motion_failed_object_retained`，不会在未经验证的高度松爪。
+  回退为在已验证到达的主目标位直接松爪，再返回 `graspup`。结果会写出
+  `release_fallback_at_target=true`，供后续调整下降高度。
 - 放置成功：松爪后依次返回 `graspup_top` 和 `graspup`。
 
 ## 输出与代码结构
@@ -137,11 +163,13 @@ output/module_3_left_place/buffer_place_<timestamp>.json
 
 真实成功结果包含 `outcome="success"`、`released=true` 和
 `returned_to_graspup=true`；纯规划结果包含 `outcome="planned"`。
-松爪下降全部失败时返回码为非零，结果包含 `released=false` 和
-`object_retained_in_left_gripper=true`。
+若下降松爪位不可达，真实成功结果仍为 `released=true`，并额外包含
+`release_fallback_at_target=true` 以及失败的下降尝试记录。
 
 - `run.sh`：独立启动入口。
-- `standalone_left_place.py`：handoff、规划、执行和失败恢复。
+- `standalone_left_place.py`：稳定的独立入口，以及放置阶段的线性编排；总控仍只调用它。
+- `placement_support.py`：命令行、handoff 校验、位姿转换、夹爪、关节到位和 Planner 配置。
+- `trajectory_cache.py`：四条固定主路径的缓存校验、读取与原子写入；不控制机械臂。
 - `placement_config.py`：读取并校验 `[buffer]` 或 `[middle]` 配置。
 - `placement_parameters.py`：`graspup`、`graspup_top` 与恢复运动常量。
 - `workpiece_*_placement_parameters.toml`：各工件固定 Buffer TCP。

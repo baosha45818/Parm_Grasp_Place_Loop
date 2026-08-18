@@ -13,6 +13,8 @@ class RuntimeState:
     workpiece: str
     buffer: str = "EMPTY"
     middle: str = "EMPTY"
+    # 反面工件离开 Buffer 后的独立工位状态；禁止再复用 buffer=HANDOFF_READY。
+    handoff: str = "EMPTY"
     left_arm: str = "IDLE"
     right_arm: str = "IDLE"
     orientation: str | None = None

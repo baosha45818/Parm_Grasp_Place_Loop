@@ -25,6 +25,9 @@ LEFT_OBSERVATION_DEG = [14.281, -29.886, -85.633, 102.504, 37.378, 56.016, 9.241
 # M4.1 发布的 ICP TF 必须与该实际云台姿态一致。
 BUFFER_HEAD_PITCH_DEG = 38.5
 BUFFER_HEAD_YAW_DEG = 0.0
+# gzhu 云台的 SDK 命令坐标与 get_state() 反馈坐标 pitch 符号相反。
+# 标定文件使用命令角 +38.5°，实际反馈到位值为 -38.5°。
+BUFFER_HEAD_FEEDBACK_PITCH_DEG = -38.5
 
 
 def _right_idle() -> list[float]:
@@ -113,18 +116,12 @@ def _open_grippers(host: str) -> None:
 
 
 def _preflight(args: argparse.Namespace) -> None:
-    from modules.module_0_prepare.ensure_camera_broker import ensure_camera_broker
     from modules.module_0_prepare.ensure_graspnet_service import ensure_graspnet_service
     from modules.module_0_prepare.ensure_sam2_service import ensure_sam2_service
     from modules.module_0_prepare.preflight_robot_infrastructure import preflight_robot_infrastructure
 
-    # 新总控的左侧链路只消费左腕 D405；Buffer 正反/位姿由 Module 4
-    # 独立控制头部 D435i。不要沿用旧流程而要求未部署的 Femto Bolt，
-    # 否则启动预检会在业务开始前反复失败。
-    ensure_camera_broker(
-        expected_d405_serial=args.d405_serial,
-        require_femto=False,
-    )
+    # Module 1 在自身进程中直接用 RealSense 驱动打开 D405；总控启动阶段
+    # 不占用、不探测任何相机，避免预检与实际采集争抢设备。
     ensure_sam2_service()
     ensure_graspnet_service()
     preflight_robot_infrastructure(
@@ -155,7 +152,7 @@ def _move_head(host: str) -> None:
             except (KeyError, TypeError, ValueError):
                 time.sleep(0.05)
                 continue
-            if (abs(pitch - BUFFER_HEAD_PITCH_DEG) <= 0.5
+            if (abs(pitch - BUFFER_HEAD_FEEDBACK_PITCH_DEG) <= 0.5
                     and abs(yaw - BUFFER_HEAD_YAW_DEG) <= 0.5):
                 time.sleep(1.0)
                 return
@@ -177,8 +174,6 @@ def main() -> int:
     parser.add_argument("--gripper-host", default="192.168.3.11")
     parser.add_argument("--force-host", default="192.168.3.22")
     parser.add_argument("--head-host", default="192.168.3.22")
-    parser.add_argument("--d405-serial", default=None,
-                        help="Camera Broker 必须占用的左腕 D405 序列号")
     parser.add_argument("--speed", type=float, default=0.3)
     args = parser.parse_args()
     if not 0.0 < args.speed <= 1.0:

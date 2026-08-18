@@ -127,9 +127,9 @@ Module 0 准备
 实际下一步不写死在 `main.py`：由 `scheduler_rules.py` 根据模块结果、Buffer 状态、
 双臂状态和资源锁返回。这样可以单独审阅、测试和修改规则。
 
-## 7. Buffer 状态和锁
+## 7. Buffer 状态与资源锁
 
-Buffer 是唯一需要在左右线之间共享的工位状态，但不能只保留一个“空/非空”布尔量。
+Buffer、Middle 与 Handoff 都是左右线共享的工位状态，不能只保留一个“空/非空”布尔量。
 `runtime_state.py` 应原子保存：
 
 ```text
@@ -141,22 +141,22 @@ EMPTY
 → EMPTY
 ```
 
-`runtime_state.py` 现同时记录 `buffer` 与 `middle`；`locks.py` 使用文件锁，且只允许
-控制器持有资源锁。正面工件进入 middle 后，右臂后台消费，左臂可从 Module 1 开始
-下一件；下一件到达 `M3(middle)` 前会等待上一件右臂完成。
+`runtime_state.py` 现记录 `buffer`、`middle` 与 `handoff`。这三个工位都不使用文件锁：
+模块进程退出后，工位仍可能被工件或机械臂占用，因此由单一总控的状态机保持其约束。
+文件锁只保护机械臂和相机等运行期硬件资源，且只允许控制器持有。正面工件进入 middle
+后，右臂后台消费，左臂可从 Module 1 开始下一件；下一件到达 `M3(middle)` 前会等待
+上一件右臂完成。
 
 | 锁 | 使用者 | 作用 |
 | --- | --- | --- |
-| `BUFFER` | Module 3、4.1、5.1、5.2、8.2 | 串行化 Buffer 的放入、观察、取走和交接状态变更。 |
 | `LEFT_ARM` | 所有左臂运动模块 | 防止左臂同时被两个模块控制。 |
 | `RIGHT_ARM` | 所有右臂运动模块 | 防止右臂同时被两个模块控制。 |
 | `HEAD_D435` | Module 4.1、4.2、需要头相机的交接流程 | 防止同一相机/标定链并发采集。 |
 | `LEFT_D405` | Module 1 | 独占左腕相机。 |
-| `HANDOFF_ZONE` | Module 5.2、8.2 | 禁止任何不相关动作进入交接区。 |
 
 Module 9 执行 Servo 时只持有 `RIGHT_ARM`，**不阻塞左臂普通任务**；失败时右臂退回
-`right place` 起始位置。左臂不得在
-Module 9 期间进入交接区，因此交接相关模块仍受 `HANDOFF_ZONE` 约束。
+`right place` 起始位置。交接动作仅由 `handoff=LEFT_READY` 放行，M8.2 启动前先将其
+置为 `TRANSFERRING`；M8.2 成功后才恢复为 `EMPTY`。
 
 旧总控里真正的共享互斥仅是 `buffer_state` 的 `multiprocessing.Value` 锁；
 `handoff_left_clear`、`right_idle_event` 等是事件同步，不是资源锁。新方案将这些

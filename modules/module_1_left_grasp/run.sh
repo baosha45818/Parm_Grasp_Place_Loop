@@ -88,10 +88,7 @@ if [[ "${D405_FPS}" != "5" && "${D405_FPS}" != "15" && "${D405_FPS}" != "30" ]];
   echo "PARM_D405_FPS must be one of: 5, 15, 30" >&2
   exit 2
 fi
-export GRASPNET_V7_DIRECT_PLANNER=1
-export GRASPNET_V7_D405_SERIAL="${D405_SERIAL}"
-export GRASPNET_V7_D405_FPS="${D405_FPS}"
-export GRASPNET_V7_DISABLE_FEMTO=1
+export PARM_D405_FPS="${D405_FPS}"
 export PARM_ARM_HOST="${ROBOT_HOST}"
 export PARM_GRIPPER_HOST="${GRIPPER_HOST}"
 export PARM_FORCE_SENSOR_HOST="${FORCE_SENSOR_HOST}"
@@ -154,14 +151,9 @@ else
   echo "-> reusing resident SAM service: ${SAM_SOCKET}"
 fi
 
-echo "-> verifying Camera Broker for traditional D405 capture"
 echo "-> mode ${MODULE_MODE}: D405 ${D405_SERIAL}, arm ${ROBOT_HOST}, gripper ${GRIPPER_HOST}, force sensor ${FORCE_SENSOR_HOST}"
 echo "-> D405 stream: 640x480 color+depth @ ${D405_FPS} FPS"
-(
-  cd "${LOOP_ROOT}"
-  "${PYTHON_BIN}" -c \
-    'import os; from modules.module_0_prepare.ensure_camera_broker import ensure_camera_broker; ensure_camera_broker(require_d405_eef_pose=False, expected_d405_serial=os.environ["PARM_D405_SERIAL"], expected_d405_fps=int(os.environ["GRASPNET_V7_D405_FPS"]), require_femto=False)'
-)
+echo "-> Module 1 will open D405 directly through pyrealsense2 for this capture"
 
 exec "${PYTHON_BIN}" "${HERE}/main.py" \
   --sam-socket "${SAM_SOCKET}" "$@"

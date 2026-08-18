@@ -61,6 +61,11 @@ NO_GRASP_EXIT_CODE = 20
 LEFT_GRIPPER_HELD_POSITION_MIN_PERCENT = 20.0
 
 
+def head_feedback_pitch_sign() -> float:
+    """返回当前部署中「驱动反馈 -> 云台命令角」的 pitch 符号。"""
+    return -1.0 if os.environ.get("PARM_DEPLOYMENT_MODE") == "gzhu" else 1.0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -239,6 +244,7 @@ def main() -> int:
         raise FileNotFoundError(
             f"自动分割配置不存在：{auto_mask_config}"
         )
+    feedback_sign = head_feedback_pitch_sign()
 
     # 1. 左手经共用高位准备点到共用观察位。
     observation_exit = run([
@@ -279,6 +285,7 @@ def main() -> int:
         str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
         "--pitch", str(observation["head_pose_deg"]["pitch"]),
         "--yaw", str(observation["head_pose_deg"]["yaw"]),
+        "--feedback-pitch-sign", str(feedback_sign),
         "--timeout-s", "60",
     ])
     run([
@@ -307,6 +314,7 @@ def main() -> int:
         str(observation["head_pose_deg"]["pitch"]),
         "--expected-head-yaw",
         str(observation["head_pose_deg"]["yaw"]),
+        "--head-feedback-pitch-sign", str(feedback_sign),
     ])
     result = newest_result(output_dir, previous)
     print(
@@ -363,6 +371,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     handoff = profile["handoff"]
     handoff_center = list(handoff["center_body_m"])
     head_pose = observation["head_pose_deg"]
+    feedback_sign = head_feedback_pitch_sign()
     if args.speed_multiplier <= 0.0:
         raise ValueError("--speed-multiplier must be positive")
     for path, label in (
@@ -411,6 +420,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
         str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
         "--pitch", str(head_pose["pitch"]),
         "--yaw", str(head_pose["yaw"]),
+        "--feedback-pitch-sign", str(feedback_sign),
         "--timeout-s", "60",
     ])
     run([
@@ -430,6 +440,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
         "--driver-host", args.driver_host,
         "--expected-head-pitch", str(head_pose["pitch"]),
         "--expected-head-yaw", str(head_pose["yaw"]),
+        "--head-feedback-pitch-sign", str(feedback_sign),
     ])
     result = newest_result(output_dir, previous)
     run([

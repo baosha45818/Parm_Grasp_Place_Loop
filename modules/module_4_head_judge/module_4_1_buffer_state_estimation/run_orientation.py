@@ -59,6 +59,7 @@ def run_orientation(
         "--capture-dir", capture_dir,
         "--out", masks_dir,
         "--config", config_path,
+        "--workspace", deployment.workspace_path(workpiece),
         "--socket", sam2_url,
     )
     if workpiece == "1":

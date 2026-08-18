@@ -1384,6 +1384,9 @@ def main() -> int:
                     raise RuntimeError(f"failed to write {pending_mask_path}")
                 count, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
                 labels_to_pose = [label for label in range(1, count) if int(stats[label, cv2.CC_STAT_AREA]) >= args.min_pose_area]
+                # Area order only sets the ICP processing order.  The public
+                # workpieces[] order is assigned after all valid poses have
+                # been estimated, using body_base Y (right to left).
                 labels_to_pose.sort(key=lambda label: int(stats[label, cv2.CC_STAT_AREA]), reverse=True)
                 poses, rejected = [], []
                 for label in labels_to_pose:
@@ -1397,6 +1400,16 @@ def main() -> int:
                     print(f"[retry] attempt={attempt}/{args.low_confidence_retries + 1} no valid pose discarded")
                     attempt += 1
                     continue
+
+                # The calibrated head camera maps image-right to decreasing
+                # body_base Y.  Publish the rightmost workpiece first, so
+                # workpieces[0] is the rightmost valid object and subsequent
+                # entries proceed from right to left.  Use X only as a stable
+                # tie-breaker when two centres have the same Y coordinate.
+                poses.sort(key=lambda pose: (
+                    float(pose["center_base_xy_m"][1]),
+                    float(pose["center_base_xy_m"][0]),
+                ))
 
                 write_icp_workpiece_frame(
                     rgb, poses, camera_matrix, distortion, pending_dir / "rgb_icp_workpiece_frame.png",
@@ -1417,9 +1430,16 @@ def main() -> int:
                     "mask_foreground_pixels": int(np.count_nonzero(mask)), "pose_components": len(poses),
                     "files": {"rgb": "rgb.png", "rgbd": "rgbd.npz", "seed_raw": "seed_raw.png", "seed_cleaned": "seed_cleaned.png", "seed_prompts": "seed_prompts.png", "mask": "mask.png", "pose_json": "mask_pose.json", "icp_workpiece_frame": "rgb_icp_workpiece_frame.png"},
                 }
-                is_back_detection = bool(poses) and all(pose["orientation"] == "BACK" for pose in poses)
+                # ``poses`` was sorted above from image-right to image-left.
+                # Module 8.1 operates workpieces[0], so only its orientation
+                # controls BACK confirmation.  A non-target workpiece being
+                # BACK must not trigger another capture or block the target.
+                is_back_detection = bool(poses) and poses[0]["orientation"] == "BACK"
                 if is_back_detection:
-                    current_back_key = back_icp_key(poses)
+                    # Choose between the two confirmation captures by the
+                    # rightmost target's ICP quality only; other workpieces
+                    # are diagnostics and must not influence this decision.
+                    current_back_key = back_icp_key([poses[0]])
                     if first_back_pose_json is None:
                         # Do not publish a single BACK detection: a fresh
                         # RGB-D capture is required before declaring BACK.
@@ -1462,6 +1482,17 @@ def main() -> int:
                     (run_dir / "metadata.json").write_text(json.dumps(selected_metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                     print(f"[done] capture={run_index} dir={run_dir} workpieces={selected_pose_count} pose_json={pose_path} back_confirmed=2 icp_selection={selected_pose_json['back_face_confirmation']['selection']}")
                     return 0
+                if first_back_pose_json is not None:
+                    # BACK confirmation is strictly consecutive.  Once the
+                    # confirmation capture says FRONT or OTHER, discard the
+                    # earlier BACK and require two new consecutive BACK
+                    # observations before returning BACK.
+                    first_back_key = None
+                    first_back_pose_json = None
+                    first_back_metadata = None
+                    first_back_pose_count = 0
+                    shutil.rmtree(back_dir)
+                    back_dir.mkdir()
                 low_poses = [pose for pose in poses if pose["pose_confidence"]["level"] == "LOW"]
                 if low_poses:
                     reasons = ",".join("+".join(pose["pose_confidence"]["low_reasons"]) for pose in low_poses)

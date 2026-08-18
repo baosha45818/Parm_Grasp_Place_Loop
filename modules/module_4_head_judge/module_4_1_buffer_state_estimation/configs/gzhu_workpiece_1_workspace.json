@@ -1,5 +1,5 @@
 {
   "reference_color_size_wh": [1280, 720],
   "safe_roi_polygon_px": [[0, 180], [760, 180], [760, 720], [0, 720]],
-  "description": "gzhu 头部 D435 反抓桌面工作区。"
+  "description": "gzhu 头部 D435 左侧桌面工作区；仅允许图像左侧 x=0..760、桌面 y=180..720。"
 }

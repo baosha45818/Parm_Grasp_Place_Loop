@@ -12,8 +12,6 @@ _PROFILES = {
         "gripper_host": "192.168.3.11",
         "force_host": "192.168.3.22",
         "head_host": "192.168.3.22",
-        # 左腕 D405：Planner-direct 标定链路。
-        "d405_serial": "260322270600",
     },
     "gzhu": {
         "planner_host": "127.0.0.1",
@@ -22,8 +20,6 @@ _PROFILES = {
         "force_host": "127.0.0.1",
         # gzhu 的头部云台服务与左/右夹爪服务均在本机。
         "head_host": "127.0.0.1",
-        # 左腕 D405：SDK + bridge 标定链路。
-        "d405_serial": "260322270242",
     },
 }
 
@@ -37,7 +33,6 @@ def apply(args: argparse.Namespace) -> None:
         ("gripper_host", "PARM_GRIPPER_HOST"),
         ("force_host", "PARM_FORCE_SENSOR_HOST"),
         ("head_host", "PARM_HEAD_HOST"),
-        ("d405_serial", "PARM_D405_SERIAL"),
     ):
         value = getattr(args, field)
         if value is None:

@@ -4,8 +4,10 @@
 `module_registry.py`，所有跨进程锁在 `locks.py`，运行状态和结果写在
 `runtime/<run_id>/`。
 
-每次启动都先执行 `controller_prepare`：检查相机/视觉服务与机器人基础设施，打开
+每次启动都先执行 `controller_prepare`：检查视觉服务与机器人基础设施，打开
 双夹爪，左臂回 `graspup`、右臂回 `Idle`。它不是业务模块，不做视觉或抓取判断。
+相机不在总控预检阶段打开：Module 1 直接管理左腕 D405，Module 4 直接管理头部
+D435i。
 
 `--mode xiangxin|gzhu` 不只选择 Module 4 的相机标定；它还统一为所有模块子进程
 设置该现场的机械臂、夹爪和力传感器地址。只有显式传入 `--arm-host`、
@@ -21,6 +23,11 @@ python3 controller/main.py --mode xiangxin --workpiece 1 --dry-run --simulate-fa
 后台运行复合模块 `M4.2 → M7 → M8.1`、再运行 `M9 → M10`。反面则经 `M5.2 →
 M8.2` 完成双臂交接，再由右臂后台运行 `M9 → M10`。工件交给右臂后，左臂可立即
 开始下一件；下一件将要使用 middle 或交接区时才等待右臂完成，所以不会争用工位。
+
+M1 成功时左手已在 `graspuptop` 持件。Buffer 是单容量：总控只会在其状态为
+`EMPTY` 时接受这次 M1 handoff，并将状态改为 `LEFT_PLACING` 后调用 M3(buffer)。
+若状态仍表示上一件正在 Buffer 生命周期中，总控拒绝放置并保持左手在
+`graspuptop`，不会用新件覆盖旧件。
 
 真实执行必须显式提供 `--live`，不会调用旧
 `modules/modular_dual_arm_loop.py` 或 `tests/loop/simple_dual_arm_loop.py`。

@@ -15,6 +15,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="192.168.3.22")
     parser.add_argument("--pitch", type=float, required=True)
     parser.add_argument("--yaw", type=float, required=True)
+    parser.add_argument(
+        "--feedback-pitch-sign",
+        type=float,
+        choices=(-1.0, 1.0),
+        default=1.0,
+        help=(
+            "驱动 pitch 反馈换算为 move_to 命令角的符号；"
+            "gzhu 现场使用 -1，xiangxin 使用 +1"
+        ),
+    )
     parser.add_argument("--settle-s", type=float, default=1.0)
     parser.add_argument("--timeout-s", type=float, default=15.0)
     return parser.parse_args()
@@ -56,16 +66,22 @@ def main() -> int:
             last_state = state
             last_pitch = pitch
             last_yaw = yaw
-            if abs(pitch - args.pitch) <= 0.5 and abs(yaw - args.yaw) <= 0.5:
+            command_pitch = args.feedback_pitch_sign * pitch
+            if abs(command_pitch - args.pitch) <= 0.5 and abs(yaw - args.yaw) <= 0.5:
                 if args.settle_s:
                     time.sleep(args.settle_s)
-                print(f"[head] 已到观察位: pitch={pitch:.2f}deg, yaw={yaw:.2f}deg")
+                print(
+                    "[head] 已到观察位: "
+                    f"命令 pitch={command_pitch:.2f}deg, yaw={yaw:.2f}deg；"
+                    f"驱动反馈 pitch={pitch:.2f}deg",
+                )
                 return 0
             time.sleep(0.05)
     raise RuntimeError(
         "云台未在超时内到达指定观察位："
-        f"目标 pitch={args.pitch:.2f}°, yaw={args.yaw:.2f}°；"
-        f"最后反馈 pitch={last_pitch!r}°, yaw={last_yaw!r}°；"
+        f"命令目标 pitch={args.pitch:.2f}°, yaw={args.yaw:.2f}°；"
+        f"反馈换算符号={args.feedback_pitch_sign:+.0f}；"
+        f"最后驱动反馈 pitch={last_pitch!r}°, yaw={last_yaw!r}°；"
         f"最后状态={last_state}"
     )
 

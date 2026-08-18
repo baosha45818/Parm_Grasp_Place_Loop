@@ -101,16 +101,43 @@ def _component_box(stats: np.ndarray, label: int, shape: tuple[int, int], paddin
     ]
 
 
+def _largest_connected_component(mask: np.ndarray) -> np.ndarray:
+    """Return only the largest 8-connected foreground component."""
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask.astype(np.uint8), connectivity=8
+    )
+    if count <= 1:
+        return np.zeros_like(mask, dtype=bool)
+    label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    return labels == label
+
+
+def _interior_prompt_region(mask: np.ndarray, minimum_distance_px: float) -> np.ndarray:
+    """Exclude thin branches and boundary pixels from positive SAM prompts."""
+    mask = mask.astype(bool)
+    if not np.any(mask) or minimum_distance_px <= 0.0:
+        return mask
+    distance = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    interior = distance >= float(minimum_distance_px)
+    return interior if np.any(interior) else mask
+
+
 def generate_masks(
     capture: Path,
     output: Path,
     *,
     workpiece: str,
     config_path: Path,
+    workspace_path: Path,
     sam2_url: str,
 ) -> Path:
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    mask_config = config["mask"]
+    workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
+    mask_config = dict(config["mask"])
+    mask_config.update({
+        "reference_color_size_wh": workspace["reference_color_size_wh"],
+        "safe_roi_polygon_px": workspace["safe_roi_polygon_px"],
+    })
     metadata, rgb, depth, matrix = _load_inputs(capture)
     xyz = depth_to_xyz(depth, matrix, float(metadata["depth_scale_m"]))
     valid = (depth > 0) & np.isfinite(xyz).all(axis=2)
@@ -128,10 +155,17 @@ def generate_masks(
     maximum_gray = mask_config.get("seed_max_gray")
     if maximum_gray is not None:
         raw_seed &= cv2.cvtColor(rgb, cv2.COLOR_BGR2GRAY) <= int(maximum_gray)
-    cleaned = cv2.morphologyEx(
+    opened = cv2.morphologyEx(
         raw_seed.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8)
-    )
-    cleaned = cv2.dilate(cleaned, np.ones((5, 5), np.uint8), iterations=1).astype(bool)
+    ).astype(bool)
+    # For a single-workpiece policy, select the component before dilation.
+    # Otherwise two nearby but independent depth islands can be dilated into
+    # one component and subsequently receive positive SAM prompts.
+    if mask_config["component_selection"] == "largest":
+        opened = _largest_connected_component(opened)
+    cleaned = cv2.dilate(
+        opened.astype(np.uint8), np.ones((5, 5), np.uint8), iterations=1
+    ).astype(bool)
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
         cleaned.astype(np.uint8), connectivity=8
     )
@@ -142,20 +176,55 @@ def generate_masks(
     ]
     if mask_config["component_selection"] == "largest" and candidates:
         candidates = [max(candidates, key=lambda label: int(stats[label, cv2.CC_STAT_AREA]))]
+    selected_seed = np.isin(labels, candidates)
 
     _ensure_sam2(sam2_url)
     output.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output / "seed_raw.png"), raw_seed.astype(np.uint8) * 255)
     cv2.imwrite(str(output / "seed_cleaned.png"), cleaned.astype(np.uint8) * 255)
+    cv2.imwrite(str(output / "seed_selected.png"), selected_seed.astype(np.uint8) * 255)
+    roi_overlay = rgb.copy()
+    roi_overlay[~roi] = (0.28 * roi_overlay[~roi]).astype(np.uint8)
+    roi_contours, _ = cv2.findContours(
+        roi.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    cv2.drawContours(roi_overlay, roi_contours, -1, (0, 255, 255), 3, cv2.LINE_AA)
+    cv2.putText(
+        roi_overlay, f"workspace: {workspace_path.name}", (16, 34),
+        cv2.FONT_HERSHEY_SIMPLEX, .72, (0, 255, 255), 2, cv2.LINE_AA,
+    )
+    cv2.imwrite(str(output / "workspace_roi_overlay.png"), roi_overlay)
     prompt_overlay = rgb.copy()
     mask_overlay = rgb.copy()
     masks: list[np.ndarray] = []
     diagnostics: list[dict] = []
     pixel_columns = np.indices(depth.shape)[1]
+    reference_width, reference_height = mask_config["reference_color_size_wh"]
+    prompt_scale = min(
+        rgb.shape[1] / float(reference_width),
+        rgb.shape[0] / float(reference_height),
+    )
+    positive_margin_px = (
+        float(mask_config.get("positive_min_boundary_distance_px", 0.0))
+        * prompt_scale
+    )
 
     for label in candidates:
         seed_component = labels == label
-        positives = farthest_points(seed_component, int(mask_config["positive_points"]))
+        # In largest-component mode ``opened`` is already the selected raw
+        # component.  Generate prompts from it, not from its dilated copy, so
+        # dilation cannot move a positive point onto nearby background.
+        prompt_seed_component = (
+            opened
+            if mask_config["component_selection"] == "largest"
+            else seed_component
+        )
+        positive_region = _interior_prompt_region(
+            prompt_seed_component, positive_margin_px
+        )
+        positives = farthest_points(
+            positive_region, int(mask_config["positive_points"])
+        )
         if mask_config["sam_box_mode"] == "component":
             box = _component_box(
                 stats, label, depth.shape, int(mask_config["sam_box_padding_px"])
@@ -186,18 +255,26 @@ def generate_masks(
         for x, y in negatives:
             cv2.circle(prompt_overlay, (x, y), 5, (0, 0, 255), -1)
         mask = prompt_segment(rgb, box, positives, negatives, sam2_url).astype(bool) & roi
+        sam2_pixels_before_component_filter = int(np.count_nonzero(mask))
         if bool(mask_config["retain_prompt_components"]):
             mask = retain_prompt_components(mask, positives, cleaned)
         if bool(mask_config["require_valid_depth_in_final_mask"]):
             mask &= valid
+        if mask_config["component_selection"] == "largest":
+            mask = _largest_connected_component(mask)
         accepted = int(np.count_nonzero(mask)) >= int(mask_config["minimum_mask_area_px"])
         diagnostics.append(
             {
                 "seed_label": int(label),
                 "positives_xy": positives,
+                "positive_min_boundary_distance_px": positive_margin_px,
                 "negatives_xy": negatives,
                 "box_xyxy": box,
                 "sam2_mask_pixels": int(np.count_nonzero(mask)),
+                "sam2_mask_pixels_before_component_filter": (
+                    sam2_pixels_before_component_filter
+                ),
+                "final_component_selection": mask_config["component_selection"],
                 "accepted": accepted,
             }
         )
@@ -220,6 +297,8 @@ def generate_masks(
         "workpiece_id": str(workpiece),
         "method": "config_driven_tabletop_geometry_sam2",
         "config": str(config_path),
+        "workspace_config": str(workspace_path),
+        "workspace_roi_overlay": str(output / "workspace_roi_overlay.png"),
         "plane": plane.tolist(),
         "table_plane_camera": plane.tolist(),
         "safe_roi": mask_config["safe_roi_polygon_px"],
@@ -240,6 +319,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--config", type=Path, default=None)
     parser.add_argument(
+        "--workspace", type=Path, default=None,
+        help="由 --mode 选择的现场桌面 ROI 配置；统一入口会始终显式传入",
+    )
+    parser.add_argument(
         "--socket",
         default=os.environ.get("PARM_SAM2_URL", f"unix://{DEFAULT_SOCKET}"),
     )
@@ -253,13 +336,19 @@ def main() -> int:
     config_path = (
         args.config or CONFIG_ROOT / f"workpiece_{args.workpiece}.json"
     ).expanduser().resolve()
+    workspace_path = (
+        args.workspace
+        or os.environ.get("PARM_HEAD_TABLETOP_WORKSPACE")
+        or CONFIG_ROOT / f"xiangxin_workpiece_{args.workpiece}_workspace.json"
+    )
+    workspace_path = Path(workspace_path).expanduser().resolve()
     generate_masks(
         capture, output, workpiece=args.workpiece,
-        config_path=config_path, sam2_url=args.socket,
+        config_path=config_path, workspace_path=workspace_path,
+        sam2_url=args.socket,
     )
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

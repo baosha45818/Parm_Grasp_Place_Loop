@@ -15,8 +15,41 @@ class Decision:
 
 def decide(state: RuntimeState, result: ModuleResult, *, max_buffer_observation_attempts: int) -> Decision:
     if result.status in {Status.FAULT, Status.OPERATOR_REQUIRED, Status.CANCELLED}:
+        if (
+            result.module in {"module_5_reverse", "module_5_reverse_handoff"}
+            and result.outputs.get("left_gripper_holds_object") is True
+        ):
+            # 反抓已成功、仅交接准备失败：工件不再位于 Buffer，左手仍夹持。
+            # 禁止回 M4/M5 重新观察或重抓，否则会碰撞或掉件。
+            state.buffer = "EMPTY"
+            state.handoff = "EMPTY"
+            state.left_arm = "HOLDS_WORKPIECE"
+            state.orientation = "BACK"
+            return Decision(None, operator_required=True)
+        # M8.2 异常时无法仅由退出码确认工件仍在哪只手；保留现场并交人工确认，
+        # 禁止把不明交接状态伪装成 Buffer 或空交接位。
+        if result.module == "module_8_handoff":
+            state.handoff = "UNKNOWN"
         return Decision(None, operator_required=result.status != Status.CANCELLED)
     if result.status == Status.RETRY:
+        if (
+            result.module in {"module_3_buffer", "module_3_middle"}
+            and result.outcome == "planning_failed_recovered_at_graspup"
+        ):
+            # M3 的失败恢复已经在 graspup 安全丢弃并松开夹爪。当前工件不能
+            # 再进入 M4/M5；由 M1 从输入区重新观察、重新抓取。
+            # Buffer 放置失败可与右臂消费上一件 Middle 工件并行，绝不能清空
+            # 该上一件的 Middle 状态。Middle 放置失败则尚未发布新件，两工位
+            # 都应为空。
+            state.buffer = "EMPTY"
+            if result.module == "module_3_middle":
+                state.middle = "EMPTY"
+            state.handoff = "EMPTY"
+            state.left_arm = "IDLE"
+            state.orientation = None
+            state.buffer_reset_reason = "Module 3 放置规划失败，已在 graspup 安全松爪并重新抓取"
+            state.artifacts.pop("module_4_buffer_state", None)
+            return Decision("module_1_left_grasp")
         if result.module in {"module_5_front", "module_5_reverse"}:
             count = state.retries.get(result.module, 0) + 1
             state.retries[result.module] = count
@@ -43,8 +76,16 @@ def decide(state: RuntimeState, result: ModuleResult, *, max_buffer_observation_
     name, outcome = result.module, result.outcome
     if name == "controller_prepare" and result.status == Status.SUCCESS:
         state.left_arm, state.right_arm = "IDLE", "IDLE"
+        state.handoff = "EMPTY"
         return Decision("module_1_left_grasp")
     if name == "module_1_left_grasp" and result.status == Status.SUCCESS:
+        # M1 的成功 handoff 已经是 ``graspuptop``。在这里先校验单容量
+        # Buffer 确实为空，绝不能用新工件的 LEFT_PLACING 状态覆盖上一件的
+        # OCCUPIED / LEFT_REGRASPING 状态。校验失败时保持左手在 M1 的
+        # graspuptop 持件位，由总控转人工处理，而不是调用 M3 再次落件。
+        if state.buffer != "EMPTY":
+            state.left_arm = "HOLDS_WORKPIECE"
+            return Decision(None, operator_required=True)
         # 新工件进入 Buffer 生命周期；两个重试预算均从零开始，绝不继承上一件。
         state.retries.clear()
         state.buffer_reset_reason = None
@@ -73,11 +114,12 @@ def decide(state: RuntimeState, result: ModuleResult, *, max_buffer_observation_
     if name == "module_8_right_front" and result.status == Status.SUCCESS:
         state.right_arm = "HOLDS_WORKPIECE"
         return Decision("module_9_right_place")
-    if name == "module_5_reverse" and result.status == Status.SUCCESS:
-        state.buffer, state.left_arm = "HANDOFF_READY", "AT_HANDOFF"
+    if name in {"module_5_reverse", "module_5_reverse_handoff"} and result.status == Status.SUCCESS:
+        # 工件已由左手从 Buffer 取走；它现在占用的是交接位而非 Buffer。
+        state.buffer, state.handoff, state.left_arm = "EMPTY", "LEFT_READY", "AT_HANDOFF"
         return Decision("module_8_handoff")
     if name == "module_8_handoff" and result.status == Status.SUCCESS:
-        state.buffer, state.left_arm, state.right_arm = "EMPTY", "IDLE", "HOLDS_WORKPIECE"
+        state.handoff, state.left_arm, state.right_arm = "EMPTY", "IDLE", "HOLDS_WORKPIECE"
         return Decision("module_9_right_place")
     if name == "module_9_right_place" and result.status == Status.SUCCESS:
         return Decision("module_10_right_idle")

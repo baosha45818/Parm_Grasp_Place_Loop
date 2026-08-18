@@ -85,8 +85,9 @@ modules/module_1_left_grasp/run.sh \
 --mode xiangxin
 ```
 
-`run.sh` 会检查或启动 `tools/sam2-service`，并通过 Module 0 Camera Broker
-检查对应 D405。`gzhu` 的本机夹爪和力传感器服务需要在运行前已经监听。
+`run.sh` 会检查或启动 `tools/sam2-service`。D405 由 `main.py` 在每次观察时直接
+通过 `pyrealsense2` 打开、采集并关闭；不使用 Camera Broker。`gzhu` 的本机夹爪和
+力传感器服务需要在运行前已经监听。
 
 如需外部控制器在最终运动前放行，可设置 `MODULE1_EXECUTION_PERMIT_FILE`；
 文件内容必须为 `allow`。未设置时不会等待外部门禁。
@@ -112,12 +113,12 @@ Module 3 只接受其中 `weight_check_enabled=true` 且
 
 ## 代码结构
 
-- `run.sh`：模式绑定、SAM2 和 Camera Broker 启动检查。
+- `run.sh`：模式绑定、SAM2 启动检查。
 - `main.py`：采集、Planner 预检、真实抓取、重试和 handoff 编排。
 - `icp_pipeline.py`：SAM 深度点云、STL 姿态、工件语义、抓取与碰撞筛选。
 - `weight_verification.py`：抓取前后力传感器采样与单工件判定。
 - `tools/icp.py`：公共纯数值配准，包括 PCA 多初值和 Open3D ICP。
-- `tools/graspnet_runtime`：精简后的 Camera Broker 与 Planner 执行工具。
+- `tools/graspnet_runtime/utils/robot_camera.py`：D405 的直接驱动适配器。
 
 运行产物写入 `output/module_1_left_grasp/`，包括 SAM/ICP 可视化、候选报告、
 Planner 预检、最终抓取计划和 handoff。
@@ -131,7 +132,7 @@ Module 1 的业务步骤均通过命名函数表达；`main()` 只负责参数�
 
 | 函数 | 职责 |
 | --- | --- |
-| `capture_log()` | 通过 Camera Broker 采集 D405 RGB-D，并固化采集时的手眼链元数据 |
+| `capture_log()` | 直接通过 pyrealsense2 采集 D405 RGB-D，并固化采集时的手眼链元数据 |
 | `traditional_perception()` | 调用 `icp_pipeline.py` 完成一次纯感知规划 |
 | `ranked_planner_records()` | 从感知报告提取有序 Planner 候选 |
 | `paired_pregrasp_and_descent()` | 将预抓取 PTP 与 10 cm LIN 下探作为同一候选进行规划 |
