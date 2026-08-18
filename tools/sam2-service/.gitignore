@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+output/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+
+# Logs and runtime data
+*.log
+logs/
+tmp/
+outputs/
+
+# Model weights
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.engine
+
+# Dataset/cache
+data/
+cache/
+*.h5
+*.hdf5
+
+# System
+.DS_Store
+
+efficientvit_**

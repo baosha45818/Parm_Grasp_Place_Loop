@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""执行左臂放置，消费 Inspect 位姿或显式的无 Inspect DIRECT 交接。"""
+"""Module 3：把 Module 1 已验证的单个工件放到固定左臂 Buffer。"""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 import json
-import math
 import os
 from pathlib import Path
 import sys
 import threading
 import time
+
 
 ROOT = Path(__file__).resolve().parents[2]
 PYTHON = ROOT / ".venv/bin/python"
@@ -26,110 +26,63 @@ from scipy.spatial.transform import Rotation
 
 from loop_config import LoopConfig
 from loop_types import ObjectPose
-from modules.module_3_left_place.module_3_1_front_place.implementation import (
-    PROFILE as FRONT_PROFILE,
-)
-from modules.module_3_left_place.module_3_3_reversed_place.implementation import (
-    PROFILE as REVERSED_PROFILE,
-)
+from modules.module_3_left_place.placement_config import load_workpiece_parameters
 from modules.module_3_left_place.placement_parameters import (
     DISCARD_BELOW_GRASPUP_M,
     GRASPUP_ABOVE_JOINTS_DEG,
     GRASPUP_ABOVE_PLANNING_TIMEOUT_S,
-    GRASPUP_LIFT_M,
     GRASPUP_JOINTS_DEG,
+    GRASPUP_LIFT_M,
 )
-from modules.module_3_left_place.branch_profile import PlaceBranchProfile
-from modules.module_3_left_place.placement_config import load_workpiece_parameters
-from modules.stage_result import (
-    read_stage_result,
-    validate_inspection_success,
-    write_stage_result,
-)
-from tool.planner_runtime import PlannerRuntime
+from modules.stage_result import write_stage_result
+from tools.planner_runtime import PlannerRuntime
 
 
-WORKPIECE_PARAMETERS = {
-    "1": load_workpiece_parameters("1"),
-    "2": load_workpiece_parameters("2"),
-}
-WORKPIECE_1 = WORKPIECE_PARAMETERS["1"]
-
-PLACE_PROFILES = {
-    FRONT_PROFILE.classification: FRONT_PROFILE,
-    REVERSED_PROFILE.classification: REVERSED_PROFILE,
-}
-DIRECT_PROFILE = PlaceBranchProfile(
-    module_id="3-direct",
-    classification="DIRECT",
-    placement_branch="BRANCH_1_DIRECT",
-    target_argument="direct_place_target_object_xyz",
-    default_target_xyz_m=(0.0, 0.0, 0.0),
-    target_z_candidates_m=(),
-    release_z_candidates_m=(),
-)
-PLACE_PROFILES[DIRECT_PROFILE.classification] = DIRECT_PROFILE
+MODULE_ID = "3-buffer-place"
+CLASSIFICATION = "BUFFER"
+PLACEMENT_BRANCH = "BUFFER_DIRECT"
+LEFT_GRIPPER_HAND = 1
 GRIPPER_HOLD_STABLE_S = 0.5
 GRIPPER_HOLD_POLL_S = 0.1
 GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
-def select_face_candidate_order(
-    object_z_in_left_eef: np.ndarray,
-    *,
-    threshold_deg: float,
-    workpiece: str,
-) -> tuple[str, str, float, float]:
-    """Classify the held object's +Z against left_eef -X/+X.
-
-    ``front_then_reversed`` is the current branch convention for object +Z
-    aligned with left_eef -X. For workpiece1, every axis-selection path has
-    direct place as the final fallback after its normal candidates are
-    exhausted; non-axial poses enter direct place immediately.
-    """
-    object_z = np.asarray(object_z_in_left_eef, dtype=float)
-    if object_z.shape != (3,) or not np.all(np.isfinite(object_z)):
-        raise ValueError("left_eef 中的工件 +Z 必须是三个有限数")
-    magnitude = float(np.linalg.norm(object_z))
-    if magnitude <= 1e-9:
-        raise ValueError("left_eef 中的工件 +Z 不能为零向量")
-    object_z /= magnitude
-    minus_x_angle = float(np.degrees(np.arccos(np.clip(-object_z[0], -1.0, 1.0))))
-    plus_x_angle = float(np.degrees(np.arccos(np.clip(object_z[0], -1.0, 1.0))))
-    if minus_x_angle < threshold_deg:
-        face_branch_mode = "front_then_reversed"
-    elif plus_x_angle < threshold_deg:
-        face_branch_mode = "reversed_then_front"
-    else:
-        face_branch_mode = "alternating"
-    if str(workpiece) == "1" and face_branch_mode == "front_then_reversed":
-        candidate_order = "front_then_reversed_then_direct"
-    elif str(workpiece) == "1" and face_branch_mode == "reversed_then_front":
-        candidate_order = "reversed_then_direct"
-    elif str(workpiece) == "1" and face_branch_mode == "alternating":
-        candidate_order = "direct_only"
-    else:
-        candidate_order = face_branch_mode
-    return face_branch_mode, candidate_order, minus_x_angle, plus_x_angle
-
-
 def parse_args() -> argparse.Namespace:
+    """解析独立运行参数，并落实真实运动的双参数授权门禁。"""
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--workpiece", choices=("1", "2"), default="1")
     parser.add_argument(
-        "--workpiece",
-        choices=("1", "2"),
-        default="1",
-        help="工件类型；默认1保持既有放置参数",
+        "--weight-handoff-file",
+        type=Path,
+        required=True,
+        help="Module 1 verified SINGLE handoff JSON",
     )
-    parser.add_argument("--inspection-result", type=Path, required=True)
-    parser.add_argument("--result-file", type=Path, required=True)
-    parser.add_argument("--planner-host", default="127.0.0.1")
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
-    parser.add_argument("--gripper-hand", type=int, default=1, choices=(1, 2))
     parser.add_argument(
-        "--execute-url",
-        default="http://127.0.0.1:5667/middle/waypoint/execute",
+        "--result-file",
+        type=Path,
+        default=(
+            ROOT
+            / "output/module_3_left_place"
+            / f"buffer_place_{time.strftime('%Y%m%d_%H%M%S')}.json"
+        ),
+    )
+    parser.add_argument("--planner-host", default="127.0.0.1")
+    parser.add_argument(
+        "--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11")
+    )
+    parser.add_argument(
+        "--gripper-host",
+        default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"),
+    )
+    parser.add_argument(
+        "--gripper-hand",
+        type=int,
+        default=LEFT_GRIPPER_HAND,
+        choices=(LEFT_GRIPPER_HAND,),
+        help="compatibility option; Module 3 uses the left gripper (hand=1)",
+    )
+    parser.add_argument(
+        "--execute-url", default="http://127.0.0.1:5667/middle/waypoint/execute"
     )
     left_scale = float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0"))
     parser.add_argument("--preset-speed", type=float, default=0.2 * left_scale)
@@ -138,7 +91,6 @@ def parse_args() -> argparse.Namespace:
         "--post-graspup-planner",
         choices=("rrtconnect", "rrtstar"),
         default="rrtstar",
-        help="graspup 上方到工件目标的离线笛卡尔规划算法；默认 RRTstar。",
     )
     parser.add_argument("--offline-start-tolerance-deg", type=float, default=1.0)
     parser.add_argument(
@@ -147,114 +99,23 @@ def parse_args() -> argparse.Namespace:
         dest="placement_planning_inflight",
         type=int,
         default=8,
-        help=(
-            "最终放置候选的最大在飞离线规划数；默认8（5604同时规划2条、"
-            "最多预取6条），使用滑动窗口补充候选"
-        ),
     )
     parser.add_argument("--graspup-lift-m", type=float, default=GRASPUP_LIFT_M)
-    parser.add_argument(
-        "--pre-place-middle-joints-deg",
-        nargs=7,
-        type=float,
-        help=(
-            "可选的放置前中间关节位。提供后先 RRTStar 到该位，"
-            "再直接 RRTStar 到 graspup_top，不经 graspup。"
-        ),
-    )
-    parser.add_argument(
-        "--target-xy-radius-m",
-        type=float,
-        default=WORKPIECE_1.TARGET_XY_RADIUS_M,
-    )
-    parser.add_argument(
-        "--branch1-front-target-object-xyz",
-        "--front-target-object-xyz",
-        dest="front_target_object_xyz",
-        nargs=3,
-        type=float,
-        default=WORKPIECE_1.FRONT_TARGET_OBJECT_XYZ_M,
-    )
-    parser.add_argument(
-        "--branch1-front-target-z-candidates-m",
-        "--front-target-z-candidates-m",
-        dest="front_target_z_candidates_m",
-        nargs="+",
-        type=float,
-        default=WORKPIECE_1.FRONT_TARGET_Z_CANDIDATES_M,
-    )
-    parser.add_argument(
-        "--branch1-front-release-object-z-candidates-m",
-        "--front-release-object-z-candidates-m",
-        dest="front_release_object_z_candidates_m",
-        nargs="*",
-        type=float,
-        default=WORKPIECE_1.FRONT_RELEASE_Z_CANDIDATES_M,
-    )
-    parser.add_argument(
-        "--branch1-reversed-target-object-xyz",
-        "--reversed-target-object-xyz",
-        dest="reversed_target_object_xyz",
-        nargs=3,
-        type=float,
-        default=WORKPIECE_1.REVERSED_TARGET_OBJECT_XYZ_M,
-    )
-    parser.add_argument(
-        "--branch1-reversed-target-z-candidates-m",
-        "--reversed-target-z-candidates-m",
-        dest="reversed_target_z_candidates_m",
-        nargs="+",
-        type=float,
-        default=WORKPIECE_1.REVERSED_TARGET_Z_CANDIDATES_M,
-    )
-    parser.add_argument(
-        "--branch1-reversed-release-object-z-candidates-m",
-        "--reversed-release-object-z-candidates-m",
-        dest="reversed_release_object_z_candidates_m",
-        nargs="*",
-        type=float,
-        default=WORKPIECE_1.REVERSED_RELEASE_Z_CANDIDATES_M,
-    )
-    parser.add_argument("--weight-handoff-file", type=Path)
+    parser.add_argument("--pre-place-middle-joints-deg", nargs=7, type=float)
     parser.add_argument("--placement-ready-file", type=Path)
     parser.add_argument("--placement-permit-file", type=Path)
     parser.add_argument("--placement-permit-poll-s", type=float, default=0.2)
-    parser.add_argument("--auto-confirm-motion", action="store_true")
-    parser.add_argument("--skip-motion", action="store_true")
+    parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--confirm-real-place", action="store_true")
     args = parser.parse_args()
-    # 两个工件使用同一套参数覆盖规则；显式命令行值始终优先于参数文件。
-    workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
-    supplied = set(sys.argv[1:])
-
-    def was_supplied(*options: str) -> bool:
-        return any(
-            token == option or token.startswith(f"{option}=")
-            for token in supplied
-            for option in options
-        )
-
-    defaults = (
-        ("front_target_object_xyz", ("--branch1-front-target-object-xyz", "--front-target-object-xyz"), workpiece_parameters.FRONT_TARGET_OBJECT_XYZ_M),
-        ("front_target_z_candidates_m", ("--branch1-front-target-z-candidates-m", "--front-target-z-candidates-m"), workpiece_parameters.FRONT_TARGET_Z_CANDIDATES_M),
-        ("front_release_object_z_candidates_m", ("--branch1-front-release-object-z-candidates-m", "--front-release-object-z-candidates-m"), workpiece_parameters.FRONT_RELEASE_Z_CANDIDATES_M),
-        ("reversed_target_object_xyz", ("--branch1-reversed-target-object-xyz", "--reversed-target-object-xyz"), workpiece_parameters.REVERSED_TARGET_OBJECT_XYZ_M),
-        ("reversed_target_z_candidates_m", ("--branch1-reversed-target-z-candidates-m", "--reversed-target-z-candidates-m"), workpiece_parameters.REVERSED_TARGET_Z_CANDIDATES_M),
-        ("reversed_release_object_z_candidates_m", ("--branch1-reversed-release-object-z-candidates-m", "--reversed-release-object-z-candidates-m"), workpiece_parameters.REVERSED_RELEASE_Z_CANDIDATES_M),
-    )
-    for attribute, options, value in defaults:
-        if not was_supplied(*options):
-            setattr(args, attribute, list(value))
+    if args.execute != args.confirm_real_place:
+        parser.error("physical motion requires both --execute and --confirm-real-place")
+    args.skip_motion = not args.execute
     return args
 
 
-def confirm_motion(args: argparse.Namespace, prompt: str) -> None:
-    if args.auto_confirm_motion:
-        print(f"{prompt}[自动确认]", flush=True)
-        return
-    input(prompt)
-
-
 def matrix_pose(matrix: np.ndarray) -> ObjectPose:
+    """把 4×4 齐次矩阵转换为 Planner 使用的 ``ObjectPose``。"""
     return ObjectPose(
         frame_id="body_base",
         position=np.asarray(matrix[:3, 3], dtype=float).tolist(),
@@ -263,6 +124,7 @@ def matrix_pose(matrix: np.ndarray) -> ObjectPose:
 
 
 def planner_matrix(response: dict) -> np.ndarray:
+    """把 Planner TF 响应转换为 4×4 齐次矩阵并校验字段完整性。"""
     data = response.get("data") or response
     translation = data.get("translation") or {}
     rotation = data.get("rotation") or {}
@@ -277,6 +139,7 @@ def planner_matrix(response: dict) -> np.ndarray:
 
 
 def read_left_joints_deg(arm_host: str) -> np.ndarray:
+    """从 Arm SDK 读取左臂七关节角，单位为度。"""
     from parm_sdk import Arm
 
     with Arm(host=arm_host) as arm:
@@ -298,6 +161,7 @@ def wait_for_left_joint_target(
     tolerance_deg: float = 0.5,
     timeout_s: float = 90.0,
 ) -> None:
+    """轮询实际关节角，直到左臂到达指定目标或超时。"""
     from parm_sdk import Arm
 
     target = np.asarray(target_joints_deg, dtype=float)
@@ -328,15 +192,17 @@ def wait_for_left_joint_target(
 
 
 def wait_for_left_graspup(arm_host: str) -> None:
-    wait_for_left_joint_target(
-        arm_host,
-        GRASPUP_JOINTS_DEG,
-        label="graspup",
-    )
+    """等待左臂到达固定 ``graspup`` 安全关节位。"""
+    wait_for_left_joint_target(arm_host, GRASPUP_JOINTS_DEG, label="graspup")
 
 
-def validate_increasing_candidates(name: str, values: list[float]) -> list[float]:
+def validate_z_candidates(
+    name: str, values: tuple[float, ...], *, allow_empty: bool = False
+) -> list[float]:
+    """校验严格递增的 Z 候选；松爪候选可显式为空。"""
     candidates = np.asarray(values, dtype=float)
+    if allow_empty and candidates.size == 0:
+        return []
     if (
         candidates.size == 0
         or not np.all(np.isfinite(candidates))
@@ -346,91 +212,19 @@ def validate_increasing_candidates(name: str, values: list[float]) -> list[float
     return candidates.tolist()
 
 
-def validate_optional_increasing_candidates(name: str, values: list[float]) -> list[float]:
-    """空 release 列表表示在 target 位直接松爪，不存在第二段 LIN。"""
-    if not values:
-        return []
-    return validate_increasing_candidates(name, values)
-
-
-def workpiece_object_target(
-    workpiece_parameters,
-    xyz: np.ndarray,
-    classification: str,
-    roll_deg: float,
-    pitch_deg: float,
-    yaw_deg: float,
-) -> np.ndarray:
-    """按工件参数文件定义，生成正面或反面的目标工件位姿。"""
-    base_rpy_deg = np.asarray(
-        workpiece_parameters.REVERSED_BASE_RPY_DEG
-        if classification == "REVERSED"
-        else workpiece_parameters.FRONT_BASE_RPY_DEG,
-        dtype=float,
-    )
-    if base_rpy_deg.shape != (3,) or not np.all(np.isfinite(base_rpy_deg)):
-        raise ValueError(f"{classification} 基准 RPY 必须是三个有限角度: {base_rpy_deg}")
-    if workpiece_parameters.ROTATION_CONVENTION == "body_base_yaw_then_local_x":
-        rotation = Rotation.from_euler("z", yaw_deg, degrees=True) * Rotation.from_euler(
-            "XYZ", base_rpy_deg, degrees=True
-        )
-    elif workpiece_parameters.ROTATION_CONVENTION == "body_base_yaw_then_local_rp":
-        # Keep the original body_base yaw convention, then add roll/pitch in
-        # the already oriented workpiece frame.  Zero roll/pitch is exactly
-        # the legacy ``body_base_yaw_then_local_x`` pose.
-        rotation = (
-            Rotation.from_euler("z", yaw_deg, degrees=True)
-            * Rotation.from_euler("XYZ", base_rpy_deg, degrees=True)
-            * Rotation.from_euler("XY", [roll_deg, pitch_deg], degrees=True)
-        )
-    elif workpiece_parameters.ROTATION_CONVENTION == "local_rpy":
-        rotation = Rotation.from_euler("XYZ", base_rpy_deg, degrees=True) * Rotation.from_euler(
-            "XYZ", [roll_deg, pitch_deg, yaw_deg], degrees=True
-        )
-    else:
-        raise RuntimeError(
-            "未知工件放置旋转定义: "
-            f"{workpiece_parameters.ROTATION_CONVENTION!r}"
-        )
-    result = np.eye(4)
-    result[:3, :3] = rotation.as_matrix()
-    result[:3, 3] = xyz
-    return result
-
-
-def tool_positive_z_points_toward_body_base_negative_z(
-    T_body_tool: np.ndarray,
-) -> bool:
-    """仅接受末端局部 +Z 在 body_base Z 方向上朝下的目标。"""
-    return float(T_body_tool[2, 2]) < 0.0
-
-
-def resolve_place_profile(classification: str, branch: str):
-    profile = PLACE_PROFILES.get(classification)
-    if profile is None:
-        raise RuntimeError(f"没有对应的左放子模块: {classification!r}")
-    if branch != profile.placement_branch:
-        raise RuntimeError(
-            f"Inspect 分类与放置分支不一致: classification={classification}, "
-            f"branch={branch}, expected={profile.placement_branch}"
-        )
-    return profile
-
-
 def open_left_gripper(args: argparse.Namespace) -> float | None:
+    """确认左夹爪可用后完全打开，并返回驱动报告的最终开度。"""
     from parm_sdk import Gripper
     from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
 
     with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-        hand_state = gripper.get_state().get(args.gripper_hand)
+        hand_state = gripper.get_state().get(LEFT_GRIPPER_HAND)
         if hand_state is None:
-            raise RuntimeError(
-                f"左夹爪 hand={args.gripper_hand} 没有同步状态或未连接"
-            )
+            raise RuntimeError("左夹爪 hand=1 没有同步状态或未连接")
         if not is_gripper_usable(hand_state):
             raise RuntimeError("左夹爪尚未初始化，禁止发送打开指令")
         response = gripper.move(
-            args.gripper_hand,
+            LEFT_GRIPPER_HAND,
             100.0,
             force=100.0,
             speed=80.0,
@@ -438,30 +232,26 @@ def open_left_gripper(args: argparse.Namespace) -> float | None:
             preempt=False,
             timeout=60.0,
         )
-    # 新夹爪驱动把同步终态放在 envelope.devices[device_id]；保留旧 data
-    # 位置读取作为兼容回退，保证放置结果记录的最终开度不是 None。
     payload = response.get("data") or response
     devices = payload.get("devices") or {}
-    device_id = "left_gripper" if args.gripper_hand == 1 else "right_gripper"
-    interfaces = (devices.get(device_id) or {}).get("state_interfaces") or {}
+    interfaces = (devices.get("left_gripper") or {}).get("state_interfaces") or {}
     position = interfaces.get("gripper/position")
     if position is None:
         position = payload.get("position")
     return None if position is None else float(position)
 
 
-def publish_ready(
-    args: argparse.Namespace,
-    payload: dict,
-) -> None:
+def publish_ready(args: argparse.Namespace, payload: dict) -> None:
+    """如配置了外部协调文件，则原子写出当前阶段状态。"""
     if args.placement_ready_file is not None:
         write_stage_result(args.placement_ready_file, payload)
 
 
 def wait_permit(args: argparse.Namespace) -> None:
-    if args.placement_permit_file is None:
+    """仅在显式配置时等待外部 Buffer 执行许可。"""
+    if args.skip_motion or args.placement_permit_file is None:
         return
-    print(f"[left-place] 等待 Buffer 许可: {args.placement_permit_file}", flush=True)
+    print(f"[module3] 等待 Buffer 许可: {args.placement_permit_file}", flush=True)
     while not args.placement_permit_file.is_file():
         time.sleep(float(args.placement_permit_poll_s))
     content = args.placement_permit_file.read_text(encoding="utf-8").strip().lower()
@@ -469,186 +259,165 @@ def wait_permit(args: argparse.Namespace) -> None:
         raise RuntimeError(f"放置许可内容无效: {content!r}")
 
 
-def main() -> int:
-    args = parse_args()
-    args.result_file.parent.mkdir(parents=True, exist_ok=True)
-    # Keep the two placement motion records separate from inspection and all
-    # generic planner diagnostics, even when this module is launched by a wrapper.
-    os.environ["PARM_PLANNING_RECORD_DIR"] = str(
-        ROOT / "output" / "left_place_trajectories" / time.strftime("%Y%m%d_%H%M%S")
-    )
-    placement_trace_path = args.result_file.parent / "placement_planning_attempts.jsonl"
-
-    def append_placement_trace(record: dict) -> None:
-        """Keep object placement targets beside the generic PlannerRuntime joint traces."""
-        payload = {
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "planning_scheduler": planning_scheduler_log,
-            **record,
-        }
-        payload.setdefault("from", {
-            "source": "offline_graspup_above_start_state",
-            "joint_angles_deg": payload.get("planning_start_joints_deg"),
-        })
-        payload.setdefault("to", {
-            "kind": "object_placement_point",
-            **(payload.get("placement_point") or {}),
-        })
-        payload.setdefault("logical_motion", {
-            "from": "left_graspup_top",
-            "to": (
-                "left_release_position"
-                if payload.get("record_type") == "release_descent"
-                else "left_place_position"
-            ),
-        })
-        with placement_trace_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+def validate_runtime_args(args: argparse.Namespace) -> None:
+    """校验会影响运动安全、并发数和外部门禁的运行参数。"""
     if (args.placement_ready_file is None) != (args.placement_permit_file is None):
         raise ValueError("placement ready/permit 文件必须同时提供")
     if not np.isfinite(args.graspup_lift_m) or not np.isclose(
         args.graspup_lift_m, GRASPUP_LIFT_M, atol=1e-9
     ):
-        raise ValueError("--graspup-lift-m 当前必须为原版固定值 0.10m")
+        raise ValueError("--graspup-lift-m 当前必须为固定值 0.10m")
     if args.pre_place_middle_joints_deg is not None and not np.all(
         np.isfinite(args.pre_place_middle_joints_deg)
     ):
         raise ValueError("--pre-place-middle-joints-deg 必须包含七个有限角度")
-    if not np.isfinite(args.target_xy_radius_m) or args.target_xy_radius_m < 0.0:
-        raise ValueError("--target-xy-radius-m 必须是非负的有限值")
-    if args.offline_start_tolerance_deg <= 0.0:
-        raise ValueError("--offline-start-tolerance-deg 必须大于0")
+    for name, value in (
+        ("--preset-speed", args.preset_speed),
+        ("--motion-speed", args.motion_speed),
+    ):
+        if not np.isfinite(value) or not 0.0 < value <= 1.0:
+            raise ValueError(f"{name} 必须是 (0, 1] 内的有限数值")
+    if (
+        not np.isfinite(args.offline_start_tolerance_deg)
+        or args.offline_start_tolerance_deg <= 0.0
+    ):
+        raise ValueError("--offline-start-tolerance-deg 必须是大于0的有限数值")
     if not 1 <= args.placement_planning_inflight <= 16:
-        raise ValueError(
-            "--placement-planning-inflight 必须在[1, 16]内；"
-            "默认8条候选在飞请求，由 RRTstar 队列依次处理"
+        raise ValueError("--placement-planning-inflight 必须在[1, 16]内")
+    if (
+        not np.isfinite(args.placement_permit_poll_s)
+        or args.placement_permit_poll_s <= 0.0
+    ):
+        raise ValueError("--placement-permit-poll-s 必须是大于0的有限数值")
+
+
+def load_verified_handoff(path: Path) -> dict:
+    """读取 Module 1 handoff，并只接受经过重量验证的单个工件。"""
+    if not path.is_file():
+        raise FileNotFoundError(f"Module 1 handoff 不存在: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("weight_check_enabled") is not True:
+        raise RuntimeError("Module 1 handoff 未启用重量检查")
+    weight_check = payload.get("weight_check")
+    if not isinstance(weight_check, dict):
+        raise RuntimeError("Module 1 handoff 缺少 weight_check")
+    if weight_check.get("classification") != "SINGLE":
+        raise RuntimeError(
+            "Module 3 只接受 Module 1 验证过的 SINGLE 工件，实际为 "
+            f"{weight_check.get('classification')!r}"
         )
+    return payload
 
-    inspection = read_stage_result(
-        args.inspection_result,
-        expected_stage="left_inspect",
-    )
-    if inspection["outcome"] != "success":
-        forwarded = {
-            "stage": "left_place",
-            "outcome": inspection["outcome"],
-            "placement_branch": None,
-            "source_inspection": str(args.inspection_result),
-        }
-        write_stage_result(args.result_file, forwarded)
-        publish_ready(args, {
-            "stage": "left_place_ready",
-            **{key: value for key, value in forwarded.items() if key != "stage"},
-            "result_path": str(args.result_file),
-        })
-        return 0
 
-    direct_only_without_inspect = bool(inspection.get("direct_only_without_inspect"))
-    if not direct_only_without_inspect:
-        validate_inspection_success(inspection)
-    # Normal mode uses ICP's transfer-end relation to construct Cartesian
-    # targets. DIRECT-only mode deliberately has no ICP pose; it plans to a
-    # fixed, calibrated left_eef target from the workpiece TOML instead.
-    classification = "FRONT"
-    branch = FRONT_PROFILE.placement_branch
-    profile = FRONT_PROFILE
-    T_tool_object = (
-        np.eye(4, dtype=float)
-        if direct_only_without_inspect
-        else np.asarray(inspection["T_tool_object"], dtype=float)
-    )
-    post_graspup_planner = {
-        "rrtconnect": "ompl",
-        "rrtstar": "rrtstar",
-    }[args.post_graspup_planner]
-    left_placement_frame = (
-        "left_eef" if direct_only_without_inspect else "left_hand_transfer_end"
-    )
-    planning_scheduler_log = {
-        "mode": "sliding_window",
-        "max_inflight": int(args.placement_planning_inflight),
-        "planner": post_graspup_planner,
-        "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
-        "face_priority_policy": (
-            "direct_only_without_inspect_fixed_left_eef_target"
-            if direct_only_without_inspect else
-            "object_plus_z_vs_left_eef_x_selects_face_candidate_order; "
-            "workpiece1_axis_candidates_fall_back_to_direct_place; "
-            "workpiece1_non_axial_uses_direct_place"
-        ),
-        "inspect_skipped": direct_only_without_inspect,
-        "left_placement_frame": left_placement_frame,
-    }
-    tool_z_rejected_count = 0
-
-    planner_cfg = LoopConfig(
+def build_planner_config(args: argparse.Namespace) -> LoopConfig:
+    """集中构造 Module 3 的 Planner/执行配置，避免主流程散落参数。"""
+    return LoopConfig(
         planner_host=args.planner_host,
         execute_url=args.execute_url,
         base_frame="body_base",
         left_group="left_arm",
         right_group="right_arm",
-        left_tool_frame=left_placement_frame,
+        left_tool_frame="left_eef",
         right_tool_frame="right_hand_transfer_end",
         max_velocity=args.motion_speed,
         max_acceleration=args.motion_speed,
         idle_poll_seconds=0.2,
-        live=not args.skip_motion,
+        live=True,
         poses={},
     )
-    planner = PlannerRuntime(planner_cfg)
-    weight_handoff = None
-    holding_checks: list[dict] = []
-    object_dropped = threading.Event()
-    drop_details: list[dict] = []
 
-    if args.weight_handoff_file is not None:
-        weight_payload = json.loads(
-            args.weight_handoff_file.read_text(encoding="utf-8")
+
+def main() -> int:
+    """按“校验→到位→规划→放置→松爪→回程”的顺序执行 Module 3。"""
+    # 阶段 1：解析参数、同步 SDK 主机并完成所有静态校验。
+    args = parse_args()
+    os.environ["PARM_ARM_HOST"] = str(args.arm_host)
+    os.environ["PARM_GRIPPER_HOST"] = str(args.gripper_host)
+    if args.skip_motion:
+        print(
+            "[module3] plan-only: robot/gripper motion is disabled; "
+            "only Planner feasibility is evaluated",
+            flush=True,
         )
-    else:
-        weight_payload = inspection.get("graspnet_weight_handoff")
-    if weight_payload is not None:
-        if weight_payload.get("weight_check_enabled") is not True:
-            raise RuntimeError("GraspNet handoff 未启用重量检查")
-        weight_handoff = weight_payload.get("weight_check")
-        if not isinstance(weight_handoff, dict):
-            raise RuntimeError("GraspNet handoff 缺少首次重量检查数据")
-        workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
-        allowed_handoff_classes = set(workpiece_parameters.ALLOWED_HANDOFF_WEIGHT_CLASSES)
-        if weight_handoff.get("classification") not in allowed_handoff_classes:
-            raise RuntimeError(
-                "首次重量判断不在允许集合 "
-                f"{sorted(allowed_handoff_classes)}，禁止执行 Left Place"
-            )
+    args.result_file.parent.mkdir(parents=True, exist_ok=True)
+    validate_runtime_args(args)
+
+    # 阶段 2：验证 Module 1 交接文件，读取唯一的固定 Buffer 目标。
+    load_verified_handoff(args.weight_handoff_file)
+
+    parameters = load_workpiece_parameters(args.workpiece)
+    target_xyz = np.asarray(parameters.target_left_eef_xyz_m, dtype=float)
+    if target_xyz.shape != (3,) or not np.all(np.isfinite(target_xyz)):
+        raise ValueError("Buffer target_left_eef_xyz_m 必须包含三个有限数值")
+    target_z_candidates = validate_z_candidates(
+        "[buffer].target_z_candidates_m", parameters.target_z_candidates_m
+    )
+    release_z_candidates = validate_z_candidates(
+        "[buffer].release_z_candidates_m",
+        parameters.release_z_candidates_m,
+        allow_empty=True,
+    )
+    post_graspup_planner = {
+        "rrtconnect": "ompl",
+        "rrtstar": "rrtstar",
+    }[args.post_graspup_planner]
+    scheduler = {
+        "mode": "sliding_window",
+        "max_inflight": int(args.placement_planning_inflight),
+        "planner": post_graspup_planner,
+        "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
+        "policy": "fixed_left_eef_buffer_target",
+        "left_placement_frame": "left_eef",
+    }
+    planning_attempts: list[dict] = []
+    holding_checks: list[dict] = []
+    drop_details: list[dict] = []
+    placement_trace_path = args.result_file.parent / "placement_planning_attempts.jsonl"
+    os.environ["PARM_PLANNING_RECORD_DIR"] = str(
+        ROOT / "output/left_place_trajectories" / time.strftime("%Y%m%d_%H%M%S")
+    )
+
+    def append_trace(record: dict) -> None:
+        """追加一条带调度器上下文的规划诊断记录。"""
+        payload = {
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "planning_scheduler": scheduler,
+            **record,
+        }
+        with placement_trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+    planner_cfg = build_planner_config(args)
+    planner = PlannerRuntime(planner_cfg)
+    object_dropped = threading.Event()
+
     def gripper_holds_object(label: str) -> bool:
+        """确认左夹爪连续稳定报告 ``gripping``，失败时锁死后续持件运动。"""
         if args.skip_motion:
             return True
         if object_dropped.is_set():
             return False
+        state = None
+        stable_samples = 0
+        record = None
         try:
             from parm_sdk import Gripper
 
             with Gripper(host=args.gripper_host, status_port=7702) as gripper:
                 deadline = time.monotonic() + GRIPPER_HOLD_TIMEOUT_S
-                stable_since: float | None = None
-                stable_samples = 0
-                state = None
+                stable_since = None
                 while time.monotonic() < deadline:
-                    candidate = gripper.get_state().get(args.gripper_hand)
-                    if not isinstance(candidate, dict):
-                        stable_since = None
-                        stable_samples = 0
-                    else:
+                    candidate = gripper.get_state().get(LEFT_GRIPPER_HAND)
+                    if isinstance(candidate, dict):
                         state = candidate
-                        motion_state = str(candidate.get("motion_state", "")).lower()
-                        if motion_state == "gripping":
+                        if str(candidate.get("motion_state", "")).lower() == "gripping":
                             stable_since = stable_since or time.monotonic()
                             stable_samples += 1
                             if time.monotonic() - stable_since >= GRIPPER_HOLD_STABLE_S:
                                 record = {
                                     "before_motion": label,
                                     "source": "gripper_state",
-                                    "motion_state": motion_state,
+                                    "motion_state": "gripping",
                                     "position_percent": candidate.get("position"),
                                     "initialized": candidate.get("initialized"),
                                     "stable_duration_s": GRIPPER_HOLD_STABLE_S,
@@ -659,30 +428,23 @@ def main() -> int:
                         else:
                             stable_since = None
                             stable_samples = 0
+                    else:
+                        stable_since = None
+                        stable_samples = 0
                     time.sleep(GRIPPER_HOLD_POLL_S)
-                else:
-                    record = None
-            if record is not None:
-                holding_checks.append(record)
-                print(
-                    f"[运动前持件复检] {label}: "
-                    f"motion_state={record.get('motion_state')} passed=True",
-                    flush=True,
-                )
-                return True
-            if not isinstance(state, dict):
-                raise RuntimeError(f"未收到 hand={args.gripper_hand} 夹爪状态: {state}")
-            motion_state = state.get("motion_state")
-            record = {
-                "before_motion": label,
-                "source": "gripper_state",
-                "motion_state": motion_state,
-                "position_percent": state.get("position"),
-                "initialized": state.get("initialized"),
-                "stable_duration_s": 0.0,
-                "stable_samples": stable_samples,
-                "passed": False,
-            }
+            if record is None:
+                if not isinstance(state, dict):
+                    raise RuntimeError("未收到 hand=1 夹爪状态")
+                record = {
+                    "before_motion": label,
+                    "source": "gripper_state",
+                    "motion_state": state.get("motion_state"),
+                    "position_percent": state.get("position"),
+                    "initialized": state.get("initialized"),
+                    "stable_duration_s": 0.0,
+                    "stable_samples": stable_samples,
+                    "passed": False,
+                }
         except Exception as exc:
             record = {
                 "before_motion": label,
@@ -693,39 +455,44 @@ def main() -> int:
             }
         holding_checks.append(record)
         print(
-            f"[运动前持件复检] {label}: "
-            f"motion_state={record.get('motion_state')} passed={record['passed']}",
+            f"[运动前持件复检] {label}: motion_state="
+            f"{record.get('motion_state')} passed={record['passed']}",
             flush=True,
         )
         if not record["passed"]:
             drop_details.append(record)
             object_dropped.set()
-            print("[工件掉落] 左夹爪未报告 gripping，禁止当前及后续持件运动", flush=True)
+            print("[工件掉落] 左夹爪未报告 gripping，禁止后续持件运动", flush=True)
             return False
         return True
 
     def write_terminal_outcome(outcome: str, **extra) -> None:
-        payload = {
-            "stage": "left_place",
-            "outcome": outcome,
-            "place_module": profile.module_id,
-            "classification": classification,
-            "placement_branch": branch,
-            "holding_checks": holding_checks,
-            "planning_scheduler": planning_scheduler_log,
-            **extra,
-        }
-        write_stage_result(args.result_file, payload)
-        publish_ready(args, {
-            "stage": "left_place_ready",
-            "outcome": outcome,
-            "place_module": profile.module_id,
-            "classification": classification,
-            "placement_branch": branch,
-            "result_path": str(args.result_file),
-        })
+        """统一写出提前结束或恢复结束的终态结果。"""
+        write_stage_result(
+            args.result_file,
+            {
+                "stage": "buffer_place",
+                "outcome": outcome,
+                "module": "module_3_left_place",
+                "place_module": MODULE_ID,
+                "classification": CLASSIFICATION,
+                "placement_branch": PLACEMENT_BRANCH,
+                "holding_checks": holding_checks,
+                "planning_scheduler": scheduler,
+                **extra,
+            },
+        )
+        publish_ready(
+            args,
+            {
+                "stage": "buffer_place_ready",
+                "outcome": outcome,
+                "result_path": str(args.result_file),
+            },
+        )
 
     def finish_dropped_cycle() -> None:
+        """掉件后回到安全位、打开夹爪并把本轮记录为已恢复。"""
         print("[工件掉落恢复] 正在回 graspup 并打开左夹爪", flush=True)
         planner.config = replace(
             planner.config,
@@ -746,372 +513,134 @@ def main() -> int:
         )
         print("[工件掉落恢复完成] 本轮正常结束", flush=True)
 
-    approach_thread = None
-    timeout_thread = None
+    def return_to_graspup_after_buffer() -> None:
+        """从 Buffer 区域依次返回 ``graspup_top`` 和 ``graspup``。"""
+        planner.config = replace(
+            planner.config,
+            max_velocity=float(args.preset_speed),
+            max_acceleration=float(args.preset_speed),
+        )
+        planner.move_left_joints(
+            GRASPUP_ABOVE_JOINTS_DEG, planner=post_graspup_planner
+        )
+        wait_for_left_joint_target(
+            args.arm_host, GRASPUP_ABOVE_JOINTS_DEG, label="graspup_top"
+        )
+        planner.move_left_joints(GRASPUP_JOINTS_DEG, planner=post_graspup_planner)
+        wait_for_left_graspup(args.arm_host)
+
+    approach_reached = threading.Event()
+    approach_finished = threading.Event()
+    plan_found = threading.Event()
+    planning_finished = threading.Event()
+    planning_timed_out = threading.Event()
     approach_errors: list[BaseException] = []
     timeout_errors: list[BaseException] = []
+    approach_thread = None
+    timeout_thread = None
 
     try:
-        planner.open(required_frames={"body_base", left_placement_frame})
+        # 阶段 3：真实模式先复检持件状态，并把机械臂送到 graspup_top。
+        # 纯规划模式只连接 Planner，不创建 Arm/Gripper 执行动作。
+        planner.open(required_frames={"body_base", "left_eef"})
         if not args.skip_motion:
-            # Module 1 已完成同姿态重量分类。Module 3 的任意姿态只判断
-            # 新夹爪驱动是否仍报告 gripping，不做跨姿态力传感器估重。
             if not gripper_holds_object("Module 3开始（graspup）"):
                 finish_dropped_cycle()
                 return 0
-
-        workpiece_parameters = WORKPIECE_PARAMETERS[args.workpiece]
-        threshold = float(workpiece_parameters.BODY_BASE_Z_FACE_SELECTION_MAX_ANGLE_DEG)
-        if direct_only_without_inspect:
-            face_branch_mode = "direct_only_without_inspect"
-            candidate_order = "direct_only"
-            minus_x_angle = float("nan")
-            plus_x_angle = float("nan")
-        else:
-            T_left_eef_object = np.asarray(inspection["T_left_eef_object"], dtype=float)
-            object_z_in_left_eef = T_left_eef_object[:3, 2]
-            (
-                face_branch_mode,
-                candidate_order,
-                minus_x_angle,
-                plus_x_angle,
-            ) = select_face_candidate_order(
-                object_z_in_left_eef,
-                threshold_deg=threshold,
-                workpiece=args.workpiece,
-            )
-        planning_scheduler_log["face_branch_mode"] = face_branch_mode
-        planning_scheduler_log["candidate_order"] = candidate_order
-        face_specs = [
-            {
-                "classification": "FRONT",
-                "branch": "BRANCH_1_FRONT",
-                "profile": FRONT_PROFILE,
-                "center": np.asarray(args.front_target_object_xyz, dtype=float),
-                "target_z": validate_increasing_candidates(
-                    "--front-target-z-candidates-m", args.front_target_z_candidates_m,
-                ),
-                "release_z": validate_optional_increasing_candidates(
-                    "--front-release-object-z-candidates-m", args.front_release_object_z_candidates_m,
-                ),
-                "yaw": list(workpiece_parameters.FRONT_YAW_CANDIDATES_DEG),
-                "roll": list(workpiece_parameters.FRONT_ROLL_CANDIDATES_DEG),
-                "pitch": list(workpiece_parameters.FRONT_PITCH_CANDIDATES_DEG),
-            },
-            {
-                "classification": "REVERSED",
-                "branch": "BRANCH_1_REVERSED",
-                "profile": REVERSED_PROFILE,
-                "center": np.asarray(args.reversed_target_object_xyz, dtype=float),
-                "target_z": validate_increasing_candidates(
-                    "--reversed-target-z-candidates-m", args.reversed_target_z_candidates_m,
-                ),
-                "release_z": validate_optional_increasing_candidates(
-                    "--reversed-release-object-z-candidates-m", args.reversed_release_object_z_candidates_m,
-                ),
-                "yaw": list(workpiece_parameters.REVERSED_YAW_CANDIDATES_DEG),
-                "roll": list(workpiece_parameters.REVERSED_ROLL_CANDIDATES_DEG),
-                "pitch": list(workpiece_parameters.REVERSED_PITCH_CANDIDATES_DEG),
-            },
-        ]
-        direct_spec = None
-        if str(args.workpiece) == "1" or direct_only_without_inspect:
-            direct_object_xyz = workpiece_parameters.DIRECT_OBJECT_TARGET_XYZ_M
-            direct_object_target_z = (
-                workpiece_parameters.DIRECT_OBJECT_TARGET_Z_CANDIDATES_M
-            )
-            direct_object_release_z = (
-                workpiece_parameters.DIRECT_OBJECT_RELEASE_Z_CANDIDATES_M
-            )
-            direct_left_eef_xyz = workpiece_parameters.DIRECT_LEFT_EEF_TARGET_XYZ_M
-            direct_left_eef_target_z = (
-                workpiece_parameters.DIRECT_LEFT_EEF_TARGET_Z_CANDIDATES_M
-            )
-            direct_left_eef_release_z = (
-                workpiece_parameters.DIRECT_LEFT_EEF_RELEASE_Z_CANDIDATES_M
-            )
-            direct_spec = {
-                "classification": "DIRECT",
-                "branch": "BRANCH_1_DIRECT",
-                "profile": DIRECT_PROFILE,
-                "center": np.asarray(
-                    direct_left_eef_xyz if direct_only_without_inspect else direct_object_xyz,
-                    dtype=float,
-                ),
-                # 无 ICP 的 DIRECT 固定 left_eef XY，和 object DIRECT 一样
-                # 由 target_z_candidates_m 遍历高度；名义 XYZ 的 Z 不参与规划。
-                "target_z": (
-                    validate_increasing_candidates(
-                        "[direct left eef place].target_z_candidates_m",
-                        direct_left_eef_target_z,
-                    ) if direct_only_without_inspect else
-                    validate_increasing_candidates(
-                        "[direct object place].target_z_candidates_m",
-                        direct_object_target_z,
-                    )
-                ),
-                "release_z": validate_optional_increasing_candidates(
-                    (
-                        "[direct left eef place].release_z_candidates_m"
-                        if direct_only_without_inspect else
-                        "[direct object place].release_z_candidates_m"
-                    ),
-                    (
-                        direct_left_eef_release_z
-                        if direct_only_without_inspect else direct_object_release_z
-                    ),
-                ),
-                # DIRECT 保持 graspup_top 的末端 RPY，不使用工件局部 RPY 候选。
-                "yaw": [0.0],
-                "roll": [0.0],
-                "pitch": [0.0],
-                "keep_graspup_top_tool_rpy": True,
-                "fixed_tool_target": direct_only_without_inspect,
-            }
-            if candidate_order == "direct_only":
-                face_specs = [direct_spec]
-        direct_fallback_needed = candidate_order in {
-            "front_then_reversed_then_direct",
-            "reversed_then_direct",
-        }
-        if any(spec["center"].shape != (3,) or not np.all(np.isfinite(spec["center"])) for spec in face_specs):
-            raise ValueError("目标工件 XYZ 必须包含三个有限米制数值")
-        angle_text = (
-            "未执行 Inspect/ICP"
-            if direct_only_without_inspect else
-            f"+Z->left_eef-X={minus_x_angle:.1f}deg, +Z->left_eef+X={plus_x_angle:.1f}deg"
-        )
-        print(
-            f"[工件{args.workpiece}候选] {angle_text}, "
-            f"姿态判定={face_branch_mode}, 实际遍历={candidate_order}; "
-            + (
-                "直接保持 graspup_top 末端 RPY 并移动工件中心。"
-                if candidate_order == "direct_only"
-                else "先正面、反面候选；全部无解后再直接放置。"
-                if candidate_order == "front_then_reversed_then_direct"
-                else "先反面候选；全部无解后再直接放置。"
-                if candidate_order == "reversed_then_direct"
-                else "正反面均会纳入规划。"
-            ),
-            flush=True,
-        )
-        planning_attempts: list[dict] = []
-        planning_submission_count = 0
-        planning_completion_count = 0
-        selected = None
-        selected_plan = None
-
-        approach_reached = threading.Event()
-        approach_finished = threading.Event()
-        plan_found = threading.Event()
-        planning_finished = threading.Event()
-        planning_timed_out = threading.Event()
-        normal_candidates_timed_out = threading.Event()
-
-        if not args.skip_motion:
-            if args.pre_place_middle_joints_deg is None:
-                confirm_message = (
-                    "确认回 graspup 并沿 body_base +Z 上移0.100m路径安全，"
-                    "按回车开始边运动边离线规划..."
-                )
-            else:
-                confirm_message = (
-                    "确认先回左臂反抓中间位、再到 graspup_top 的 RRTStar 路径安全，"
-                    "按回车开始边运动边离线规划..."
-                )
-            confirm_motion(args, confirm_message)
-
-            def move_to_graspup_above() -> None:
-                motion_planner = PlannerRuntime(planner_cfg)
+            def move_to_graspup_top() -> None:
+                """真实模式下把持件左臂送到离线规划起点 ``graspup_top``。"""
+                motion = PlannerRuntime(planner_cfg)
                 try:
-                    motion_planner.open(
-                        required_frames={"body_base", left_placement_frame}
-                    )
-                    motion_planner.config = replace(
-                        motion_planner.config,
+                    motion.open(required_frames={"body_base", "left_eef"})
+                    motion.config = replace(
+                        motion.config,
                         max_velocity=float(args.preset_speed),
                         max_acceleration=float(args.preset_speed),
                     )
                     if args.pre_place_middle_joints_deg is not None:
-                        middle_joints = [
-                            float(value)
-                            for value in args.pre_place_middle_joints_deg
-                        ]
-                        if not gripper_holds_object("回左臂反抓中间位"):
+                        middle = [float(value) for value in args.pre_place_middle_joints_deg]
+                        if not gripper_holds_object("移动到放置前中间位"):
                             return
-                        motion_planner.set_next_plan_context(
-                            "left_front_buffer_regrasp", "left_reverse_grasp_middle"
-                        )
-                        print(
-                            "[运动线程] 正在 RRTStar 回左臂反抓中间位；"
-                            f"终点关节={np.round(middle_joints, 4).tolist()}",
-                            flush=True,
-                        )
-                        motion_planner.move_left_joints(
-                            middle_joints,
-                            planner="rrtstar",
-                        )
-                        wait_for_left_joint_target(
-                            args.arm_host,
-                            middle_joints,
-                            label="左臂反抓中间位",
-                        )
-                        # This hold check is deliberately adjacent to the final
-                        # middle -> graspup_top motion, so a dropped object is
-                        # never carried into the placement trajectory.
-                        if not gripper_holds_object("从反抓中间位移动到graspup_top"):
+                        motion.set_next_plan_context("module1_handoff", "pre_place_middle")
+                        motion.move_left_joints(middle, planner="rrtstar")
+                        wait_for_left_joint_target(args.arm_host, middle, label="放置前中间位")
+                        if not gripper_holds_object("从中间位移动到graspup_top"):
                             return
-                        motion_planner.set_next_plan_context(
-                            "left_reverse_grasp_middle", "left_graspup_top"
-                        )
-                        print(
-                            "[运动线程] 正在 RRTStar 从左臂反抓中间位到 graspup_top",
-                            flush=True,
-                        )
-                        motion_planner.move_left_joints(
-                            GRASPUP_ABOVE_JOINTS_DEG,
-                            planner="rrtstar",
-                        )
+                        motion.set_next_plan_context("pre_place_middle", "left_graspup_top")
+                        motion.move_left_joints(GRASPUP_ABOVE_JOINTS_DEG, planner="rrtstar")
                         wait_for_left_joint_target(
                             args.arm_host,
                             GRASPUP_ABOVE_JOINTS_DEG,
                             label="graspup_top",
                         )
-                        approach_reached.set()
-                        print(
-                            "[运动线程] 已从左臂反抓中间位到达 graspup_top；"
-                            f"规划剩余等待上限={GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s",
-                            flush=True,
+                    else:
+                        if not gripper_holds_object("从当前位置回graspup"):
+                            return
+                        motion.set_next_plan_context("module1_handoff", "left_graspup")
+                        motion.move_left_joints(GRASPUP_JOINTS_DEG, planner="rrtstar")
+                        wait_for_left_graspup(args.arm_host)
+                        response = motion.lookup_transform("body_base", "left_eef")
+                        if response is None:
+                            raise RuntimeError("规划器没有返回 graspup 末端位姿")
+                        above = planner_matrix(response)
+                        above[2, 3] += float(args.graspup_lift_m)
+                        motion.config = replace(
+                            motion.config,
+                            max_velocity=float(args.motion_speed),
+                            max_acceleration=float(args.motion_speed),
                         )
-                        return
-
-                    if not gripper_holds_object("从观察位回graspup"):
-                        return
-                    motion_planner.set_next_plan_context(
-                        "left_inspection_pose", "left_graspup"
-                    )
-                    motion_planner.move_left_joints(GRASPUP_JOINTS_DEG)
-                    wait_for_left_graspup(args.arm_host)
-                    response = motion_planner.lookup_transform(
-                        "body_base",
-                        left_placement_frame,
-                    )
-                    if response is None:
-                        raise RuntimeError("规划器没有返回 graspup 末端位姿")
-                    above = planner_matrix(response)
-                    above[2, 3] += float(args.graspup_lift_m)
-                    motion_planner.config = replace(
-                        motion_planner.config,
-                        max_velocity=float(args.motion_speed),
-                        max_acceleration=float(args.motion_speed),
-                    )
-                    if not gripper_holds_object("从graspup移动到graspup_above"):
-                        return
-                    motion_planner.set_next_plan_context(
-                        "left_graspup", "left_graspup_top"
-                    )
-                    print(
-                        "[运动线程] 正在规划 graspup -> graspup_above 的 LIN 轨迹",
-                        flush=True,
-                    )
-                    above_plan = motion_planner.plan_cartesian_pose(
-                        "left",
-                        matrix_pose(above),
-                        planner="lin",
-                    )
-                    if above_plan is None:
-                        raise RuntimeError("graspup_above LIN 规划返回空结果")
-                    above_trajectory = (
-                        (above_plan.get("data") or {}).get("trajectory") or []
-                    )
-                    if not above_trajectory or len(above_trajectory[-1]) != 7:
-                        raise RuntimeError(
-                            "graspup_above LIN 规划没有返回七关节终点"
+                        if not gripper_holds_object("从graspup移动到graspup_top"):
+                            return
+                        motion.set_next_plan_context("left_graspup", "left_graspup_top")
+                        above_plan = motion.plan_cartesian_pose(
+                            "left", matrix_pose(above), planner="lin"
                         )
-                    above_endpoint = [
-                        float(value) for value in above_trajectory[-1]
-                    ]
-                    print(
-                        "[运动线程] 开始执行 graspup -> graspup_above LIN；"
-                        f"终点关节={np.round(above_endpoint, 4).tolist()}",
-                        flush=True,
-                    )
-                    motion_planner.execute_planned_result(above_plan)
+                        if above_plan is None:
+                            raise RuntimeError("graspup_top LIN 规划返回空结果")
+                        motion.execute_planned_result(above_plan)
                     approach_reached.set()
-                    print(
-                        "[运动线程] graspup -> graspup_above LIN 已同步执行完成；"
-                        f"规划剩余等待上限={GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s",
-                        flush=True,
-                    )
+                    print("[运动线程] 已到达 graspup_top", flush=True)
                 except BaseException as exc:
                     approach_errors.append(exc)
                 finally:
                     approach_finished.set()
-                    motion_planner.close()
+                    motion.close()
 
             approach_thread = threading.Thread(
-                target=move_to_graspup_above,
-                name="module3-graspup-above-motion",
+                target=move_to_graspup_top,
+                name="module3-graspup-top-motion",
                 daemon=False,
             )
             approach_thread.start()
 
-            def recover_after_timeout() -> None:
+            def recover_after_planning_failure() -> None:
+                """到位后长期无可行解时执行安全丢弃并返回 ``graspup``。"""
                 while not approach_finished.is_set():
                     if approach_reached.wait(timeout=0.05):
                         break
                 if not approach_reached.is_set():
                     return
-                deadline = (
-                    time.monotonic() + GRASPUP_ABOVE_PLANNING_TIMEOUT_S
-                )
-                while not plan_found.is_set():
-                    if planning_finished.is_set():
-                        break
+                deadline = time.monotonic() + GRASPUP_ABOVE_PLANNING_TIMEOUT_S
+                while not plan_found.is_set() and not planning_finished.is_set():
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         break
                     plan_found.wait(timeout=min(0.05, remaining))
                 if plan_found.is_set():
                     return
-                if direct_fallback_needed:
-                    normal_candidates_timed_out.set()
-                    print(
-                        "[正反候选超时] 到达 graspup 上方后"
-                        f"{GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s仍无可行正反候选；"
-                        "停止继续提交正反候选，改进入 DIRECT 回退。",
-                        flush=True,
-                    )
-                    return
                 planning_timed_out.set()
-                print(
-                    "[规划超时] 到达 graspup 上方后"
-                    f"{GRASPUP_ABOVE_PLANNING_TIMEOUT_S:.1f}s仍无可行解；"
-                    "正在执行原版丢弃恢复",
-                    flush=True,
-                )
+                print("[规划失败恢复] 无可行 Buffer 轨迹，执行安全丢弃", flush=True)
                 recovery = PlannerRuntime(planner_cfg)
                 try:
-                    recovery.open(
-                        required_frames={"body_base", left_placement_frame}
-                    )
+                    recovery.open(required_frames={"body_base", "left_eef"})
                     recovery.config = replace(
                         recovery.config,
                         max_velocity=float(args.preset_speed),
                         max_acceleration=float(args.preset_speed),
                     )
-                    recovery.set_next_plan_context(
-                        "left_graspup_top", "left_graspup"
-                    )
-                    recovery.move_left_joints(
-                        GRASPUP_JOINTS_DEG,
-                        planner="rrtstar",
-                    )
+                    recovery.move_left_joints(GRASPUP_JOINTS_DEG, planner="rrtstar")
                     wait_for_left_graspup(args.arm_host)
-                    response = recovery.lookup_transform(
-                        "body_base",
-                        left_placement_frame,
-                    )
+                    response = recovery.lookup_transform("body_base", "left_eef")
                     if response is None:
                         raise RuntimeError("规划器没有返回 graspup 末端位姿")
                     discard = planner_matrix(response)
@@ -1121,13 +650,8 @@ def main() -> int:
                         max_velocity=float(args.motion_speed),
                         max_acceleration=float(args.motion_speed),
                     )
-                    recovery.set_next_plan_context(
-                        "left_graspup", "left_timeout_discard_position"
-                    )
                     recovery.move_cartesian_pose(
-                        "left",
-                        matrix_pose(discard),
-                        planner="lin",
+                        "left", matrix_pose(discard), planner="lin"
                     )
                     open_left_gripper(args)
                     recovery.config = replace(
@@ -1135,13 +659,7 @@ def main() -> int:
                         max_velocity=float(args.preset_speed),
                         max_acceleration=float(args.preset_speed),
                     )
-                    recovery.set_next_plan_context(
-                        "left_timeout_discard_position", "left_graspup"
-                    )
-                    recovery.move_left_joints(
-                        GRASPUP_JOINTS_DEG,
-                        planner="rrtstar",
-                    )
+                    recovery.move_left_joints(GRASPUP_JOINTS_DEG, planner="rrtstar")
                     wait_for_left_graspup(args.arm_host)
                 except BaseException as exc:
                     timeout_errors.append(exc)
@@ -1149,602 +667,192 @@ def main() -> int:
                     recovery.close()
 
             timeout_thread = threading.Thread(
-                target=recover_after_timeout,
-                name="module3-planning-timeout-recovery",
+                target=recover_after_planning_failure,
+                name="module3-planning-failure-recovery",
                 daemon=False,
             )
             timeout_thread.start()
 
+        if not args.skip_motion:
+            while not approach_reached.wait(timeout=0.05):
+                if approach_finished.is_set():
+                    if approach_errors:
+                        raise RuntimeError(
+                            f"到达 graspup_top 失败: {approach_errors[0]}"
+                        ) from approach_errors[0]
+                    if object_dropped.is_set():
+                        finish_dropped_cycle()
+                        return 0
+                    raise RuntimeError("到达 graspup_top 前运动线程已结束")
+
+        # 阶段 4：读取 graspup_top 末端旋转。Buffer 只改变 TCP 平移，
+        # 不猜测工件相对夹爪的姿态。
+        response = planner.lookup_transform("body_base", "left_eef")
+        if response is None:
+            raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
+        target_rotation = planner_matrix(response)[:3, :3].copy()
+        scheduler["orientation_source"] = "body_base_T_left_eef_at_graspup_top"
+        scheduler["tool_rpy_deg"] = Rotation.from_matrix(target_rotation).as_euler(
+            "xyz", degrees=True
+        ).tolist()
         print(
-            "[离线规划] start_state=GRASPUP_ABOVE_JOINTS_DEG="
-            f"{GRASPUP_ABOVE_JOINTS_DEG}",
-            flush=True,
-        )
-        print(
-            "[离线规划并发] 最多"
-            f"{args.placement_planning_inflight}条在飞请求；"
-            "完成一条失败候选就立刻补发下一条",
+            f"[Buffer] 保持 graspup_top left_eef RPY="
+            f"{np.round(scheduler['tool_rpy_deg'], 3).tolist()}",
             flush=True,
         )
 
-        direct_tool_rotation = None
-        if candidate_order == "direct_only":
-            # 直接放置的姿态必须来自真正到达 graspup_top 后的实时末端，而不是
-            # Inspect 时的姿态或假定的 FK。这样末端 RPY 在整段直接放置中不变。
-            if not args.skip_motion:
-                while not approach_reached.wait(timeout=0.05):
-                    if approach_finished.is_set():
-                        if approach_errors:
-                            raise RuntimeError(
-                                f"到达 graspup_top 失败: {approach_errors[0]}"
-                            ) from approach_errors[0]
-                        raise RuntimeError("到达 graspup_top 前运动线程已结束")
-            response = planner.lookup_transform("body_base", left_placement_frame)
-            if response is None:
-                raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
-            direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
-            planning_scheduler_log["direct_orientation_source"] = (
-                f"body_base_T_{left_placement_frame}_at_graspup_top"
-            )
-            planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
-                direct_tool_rotation
-            ).as_euler("xyz", degrees=True).tolist()
-            print(
-                f"[直接放置] 保持 graspup_top {left_placement_frame} RPY="
-                f"{np.round(planning_scheduler_log['direct_tool_rpy_deg'], 3).tolist()}",
-                flush=True,
-            )
-
-        def plan_offline_candidate(
-            target_tool: np.ndarray,
-            *,
-            use_left_eef_collision_box: bool,
-        ) -> dict:
-            # Separate SDK connections are required: one PlannerRuntime would
-            # serialize requests behind the SDK client's internal lock.
+        def plan_candidate(target_tool: np.ndarray) -> dict:
+            """使用独立 Planner 连接，从固定关节起点规划一个 Buffer 候选。"""
             candidate_planner = PlannerRuntime(planner_cfg)
             try:
-                candidate_planner.open(
-                    required_frames={"body_base", left_placement_frame}
-                )
-                response = candidate_planner.plan_cartesian_pose(
+                candidate_planner.open(required_frames={"body_base", "left_eef"})
+                result = candidate_planner.plan_cartesian_pose(
                     "left",
                     matrix_pose(target_tool),
                     planner=post_graspup_planner,
                     start_joints_deg=GRASPUP_ABOVE_JOINTS_DEG,
                     rrtstar_goal_tolerance=(post_graspup_planner == "rrtstar"),
-                    use_left_eef_collision_box=use_left_eef_collision_box,
+                    use_left_eef_collision_box=False,
                 )
-                if response is None:
+                if result is None:
                     raise RuntimeError("离线规划返回空结果")
-                return response
+                return result
             finally:
                 candidate_planner.close()
 
+        print(
+            f"[离线规划] start_state={GRASPUP_ABOVE_JOINTS_DEG}; "
+            f"最多{args.placement_planning_inflight}条在飞请求",
+            flush=True,
+        )
+        # 阶段 5：按配置顺序并发预取 Z 候选；首个成功结果停止补发。
+        selected = None
+        selected_plan = None
+        submitted = 0
+        completed = 0
+        next_index = 0
+        in_flight = {}
         try:
-            # T_tool_object is already final when Module 2 succeeds, while
-            # the offline start is the fixed GRASPUP_ABOVE_JOINTS_DEG. Submit
-            # candidate plans immediately and overlap them with PC -> graspup
-            # -> graspup_top motion. Execution still waits for the motion and
-            # validates the planned trajectory's first joint state.
-            radius_layers = tuple(
-                float(args.target_xy_radius_m) * float(factor)
-                for factor in workpiece_parameters.XY_RADIUS_FACTORS
-            )
-            for radius_index, radius in enumerate(radius_layers):
-                candidates = []
-                ordered_by_branch = []
-                for spec in face_specs:
-                    branch_candidates = []
-                    if radius == 0.0:
-                        face_samples = [{
-                            "name": f"{spec['classification'].lower()}_center",
-                            "radius_m": 0.0,
-                            "direction_deg": None,
-                            "xy": spec["center"][:2].copy(),
-                        }]
-                    else:
-                        face_samples = []
-                        for direction in range(
-                            0, 360, int(workpiece_parameters.XY_SAMPLE_DIRECTION_STEP_DEG)
-                        ):
-                            angle = math.radians(direction)
-                            face_samples.append({
-                                "name": f"{spec['classification'].lower()}_r{radius:.3f}_{direction}deg",
-                                "radius_m": radius,
-                                "direction_deg": direction,
-                                "xy": spec["center"][:2] + radius * np.array(
-                                    [math.cos(angle), math.sin(angle)]
-                                ),
-                            })
-                    for sample in face_samples:
-                        for z_index, target_z in enumerate(spec["target_z"]):
-                            for yaw_index, yaw in enumerate(spec["yaw"]):
-                                for roll_index, roll in enumerate(spec["roll"]):
-                                    for pitch_index, pitch in enumerate(spec["pitch"]):
-                                        branch_candidates.append((
-                                            spec, sample, z_index, float(target_z),
-                                            yaw_index, roll_index, pitch_index,
-                                            float(roll), float(pitch), float(yaw),
-                                        ))
-                    branch_candidates.sort(
-                        key=lambda item: (
-                            item[5] + item[6], item[5], item[6],
-                            item[4], item[2], str(item[1]["name"]),
-                        )
-                    )
-                    ordered_by_branch.append(branch_candidates)
-                if candidate_order == "direct_only":
-                    candidates = ordered_by_branch[0]
-                else:
-                    front_candidates, reversed_candidates = ordered_by_branch
-                    if candidate_order in {
-                        "front_then_reversed",
-                        "front_then_reversed_then_direct",
-                    }:
-                        candidates = front_candidates + reversed_candidates
-                    elif candidate_order == "reversed_then_front":
-                        candidates = reversed_candidates + front_candidates
-                    elif candidate_order == "reversed_then_direct":
-                        candidates = reversed_candidates
-                    elif candidate_order == "reversed_only":
-                        candidates = reversed_candidates
-                    else:
-                        candidates = []
-                        for index in range(max(len(front_candidates), len(reversed_candidates))):
-                            if index < len(front_candidates):
-                                candidates.append(front_candidates[index])
-                            if index < len(reversed_candidates):
-                                candidates.append(reversed_candidates[index])
-                print(
-                    f"[候选层] radius={radius:.3f}m，共{len(candidates)}项",
-                    flush=True,
-                )
-                next_candidate_index = 0
-                in_flight = {}
-                layer_successes = []
-                with ThreadPoolExecutor(
-                    max_workers=int(args.placement_planning_inflight),
-                    thread_name_prefix="module3-placement-plan",
-                ) as planning_executor:
-                    while in_flight or next_candidate_index < len(candidates):
-                        while (
-                            not layer_successes
-                            and len(in_flight) < int(args.placement_planning_inflight)
-                            and next_candidate_index < len(candidates)
-                            and not planning_timed_out.is_set()
-                            and not normal_candidates_timed_out.is_set()
-                            and not object_dropped.is_set()
-                        ):
-                            candidate = candidates[next_candidate_index]
-                            (spec, sample, z_index, target_z, yaw_index,
-                             roll_index, pitch_index, roll, pitch, yaw) = candidate
-                            rotation_index = roll_index
-                            base_rpy_deg = (
-                                "graspup_top_tool_rpy"
-                                if spec.get("keep_graspup_top_tool_rpy")
-                                else list(
-                                    workpiece_parameters.REVERSED_BASE_RPY_DEG
-                                    if spec["classification"] == "REVERSED"
-                                    else workpiece_parameters.FRONT_BASE_RPY_DEG
-                                )
-                            )
-                            candidate_classification = str(spec["classification"])
-                            candidate_branch = str(spec["branch"])
-                            candidate_profile = spec["profile"]
-                            candidate_release_z = list(spec["release_z"])
-                            xyz = np.array(
-                                [sample["xy"][0], sample["xy"][1], target_z],
-                                dtype=float,
-                            )
-                            if spec.get("keep_graspup_top_tool_rpy"):
-                                if direct_tool_rotation is None:
-                                    raise RuntimeError("direct place 缺少 graspup_top 末端旋转")
-                                target_tool = np.eye(4)
-                                target_tool[:3, :3] = direct_tool_rotation
-                                # DIRECT-only uses a calibrated TCP point, not an
-                                # absent/guessed ICP object-to-tool transform.
-                                target_tool[:3, 3] = (
-                                    xyz if spec.get("fixed_tool_target") else
-                                    xyz - direct_tool_rotation @ T_tool_object[:3, 3]
-                                )
-                                target_object = target_tool @ T_tool_object
-                            else:
-                                target_object = workpiece_object_target(
-                                    workpiece_parameters,
-                                    xyz,
-                                    candidate_classification,
-                                    roll,
-                                    pitch,
-                                    yaw,
-                                )
-                                target_tool = target_object @ np.linalg.inv(T_tool_object)
-                            attempt = {
-                                "place_module": candidate_profile.module_id,
-                                "classification": candidate_classification,
-                                "placement_branch": candidate_branch,
-                                "release_z_candidates_m": candidate_release_z,
-                                "priority_index": next_candidate_index,
-                                "xy_layer": sample["name"],
-                                "xy_radius_m": radius,
-                                "xy_direction_deg": sample["direction_deg"],
-                                "z_index": z_index,
-                                "object_z_m": target_z,
-                                "yaw_deg": yaw,
-                                "rotation_index": rotation_index,
-                                "object_base_rpy_deg": base_rpy_deg,
-                                "object_local_roll_deg": roll,
-                                "object_local_roll_index": roll_index,
-                                "object_local_pitch_deg": pitch,
-                                "object_local_pitch_index": pitch_index,
-                                "target_object_xyz": (
-                                    None if spec.get("fixed_tool_target") else xyz.tolist()
-                                ),
-                                "target_tool_xyz": target_tool[:3, 3].tolist(),
-                                "placement_point": {
-                                    "frame_id": "body_base",
-                                    "object_xyz_m": (
-                                        None if spec.get("fixed_tool_target") else xyz.tolist()
-                                    ),
-                                    "tool_xyz_m": target_tool[:3, 3].tolist(),
-                                    "target_kind": (
-                                        "fixed_left_eef"
-                                        if spec.get("fixed_tool_target") else "object_center"
-                                    ),
-                                },
-                                "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
-                                "planning_submission_order": planning_submission_count + 1,
-                                "planning_inflight_after_submit": len(in_flight) + 1,
-                                # 正面工件运输时，用请求级左端方块近似已夹持工件。
-                                "use_left_eef_collision_box": (
-                                    candidate_classification == "FRONT"
-                                ),
-                                "target_object": target_object,
-                                "target_tool": target_tool,
+            with ThreadPoolExecutor(
+                max_workers=int(args.placement_planning_inflight),
+                thread_name_prefix="module3-buffer-plan",
+            ) as executor:
+                while in_flight or next_index < len(target_z_candidates):
+                    while (
+                        selected is None
+                        and len(in_flight) < int(args.placement_planning_inflight)
+                        and next_index < len(target_z_candidates)
+                        and not planning_timed_out.is_set()
+                        and not object_dropped.is_set()
+                    ):
+                        z_index = next_index
+                        target_z = float(target_z_candidates[z_index])
+                        target_tool = np.eye(4)
+                        target_tool[:3, :3] = target_rotation
+                        target_tool[:3, 3] = [target_xyz[0], target_xyz[1], target_z]
+                        attempt = {
+                            "place_module": MODULE_ID,
+                            "classification": CLASSIFICATION,
+                            "placement_branch": PLACEMENT_BRANCH,
+                            "priority_index": z_index,
+                            "z_index": z_index,
+                            "target_left_eef_z_m": target_z,
+                            "target_tool_xyz": target_tool[:3, 3].tolist(),
+                            "target_kind": "fixed_left_eef",
+                            "release_z_candidates_m": release_z_candidates,
+                            "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
+                            "planning_submission_order": submitted + 1,
+                            "planning_inflight_after_submit": len(in_flight) + 1,
+                            "use_left_eef_collision_box": False,
+                            "target_tool": target_tool,
+                        }
+                        if float(target_tool[2, 2]) >= 0.0:
+                            rejected = {
+                                key: value
+                                for key, value in attempt.items()
+                                if key != "target_tool"
                             }
-                            # 不论候选顺序如何（包括工件1的 direct_only），每个
-                            # 末端目标都必须先通过 +Z 朝 body_base -Z 的硬约束。
-                            if not tool_positive_z_points_toward_body_base_negative_z(
-                                target_tool
-                            ):
-                                tool_z_rejected_count += 1
-                                rejected_attempt = {
-                                    key: value for key, value in attempt.items()
-                                    if key not in {"target_object", "target_tool"}
-                                }
-                                rejected_attempt.pop("planning_submission_order")
-                                rejected_attempt.pop("planning_inflight_after_submit")
-                                rejected_attempt.update({
+                            rejected.update(
+                                {
                                     "planned": False,
                                     "rejected_before_planning": True,
-                                    "planning_inflight_at_rejection": len(in_flight),
-                                    "error": (
-                                        "目标末端约束不满足："
-                                        f"{left_placement_frame} +Z 在 body_base 的 "
-                                        "Z 投影必须为负"
-                                    ),
-                                    "target_tool_positive_z_in_body_base": (
-                                        target_tool[:3, 2].tolist()
-                                    ),
-                                    "target_tool_positive_z_body_base_z_component": (
-                                        float(target_tool[2, 2])
-                                    ),
-                                })
-                                planning_attempts.append(rejected_attempt)
-                                append_placement_trace(rejected_attempt)
-                                print(
-                                    "[跳过放置候选] "
-                                    f"{left_placement_frame} +Z="
-                                    f"{np.round(target_tool[:3, 2], 6).tolist()}, "
-                                    f"body_base Z投影={target_tool[2, 2]:+.6f}（必须<0）",
-                                    flush=True,
-                                )
-                                next_candidate_index += 1
-                                continue
-                            future = planning_executor.submit(
-                                plan_offline_candidate,
-                                target_tool,
-                                use_left_eef_collision_box=bool(
-                                    attempt["use_left_eef_collision_box"]
-                                ),
+                                    "error": "left_eef +Z在body_base Z上的投影必须为负",
+                                    "target_tool_positive_z_in_body_base": target_tool[
+                                        :3, 2
+                                    ].tolist(),
+                                }
                             )
-                            in_flight[future] = attempt
-                            planning_submission_count += 1
-                            print(
-                                f"[提交 {next_candidate_index + 1}/{len(candidates)}] "
-                                f"radius={radius:.3f} sample={sample['name']} "
-                                f"z={target_z:.3f} yaw={yaw} base_rpy={base_rpy_deg} "
-                                f"roll={roll:+.1f} pitch={pitch:+.1f}; "
-                                f"当前在飞={len(in_flight)}",
-                                flush=True,
-                            )
-                            next_candidate_index += 1
-
-                        if not in_flight:
-                            break
-                        future = next(as_completed(in_flight))
-                        attempt = in_flight.pop(future)
-                        planning_completion_count += 1
-                        try:
-                            response = future.result()
-                        except Exception as exc:
-                            failed_attempt = {
-                                key: value for key, value in attempt.items()
-                                if key not in {"target_object", "target_tool"}
-                            }
-                            failed_attempt.update({
+                            planning_attempts.append(rejected)
+                            append_trace(rejected)
+                            next_index += 1
+                            continue
+                        future = executor.submit(plan_candidate, target_tool)
+                        in_flight[future] = attempt
+                        submitted += 1
+                        next_index += 1
+                        print(
+                            f"[提交 {z_index + 1}/{len(target_z_candidates)}] "
+                            f"Buffer left_eef z={target_z:.3f}",
+                            flush=True,
+                        )
+                    if not in_flight:
+                        break
+                    future = next(as_completed(in_flight))
+                    attempt = in_flight.pop(future)
+                    completed += 1
+                    try:
+                        plan = future.result()
+                    except Exception as exc:
+                        failed = {
+                            key: value for key, value in attempt.items() if key != "target_tool"
+                        }
+                        failed.update(
+                            {
                                 "planned": False,
                                 "error": f"{type(exc).__name__}: {exc}",
-                                "planning_completion_order": planning_completion_count,
+                                "planning_completion_order": completed,
                                 "planning_inflight_after_complete": len(in_flight),
-                            })
-                            planning_attempts.append(failed_attempt)
-                            append_placement_trace(failed_attempt)
-                            continue
-
-                        if (
-                            direct_fallback_needed
-                            and normal_candidates_timed_out.is_set()
-                        ):
-                            timed_out_attempt = {
-                                key: value for key, value in attempt.items()
-                                if key not in {"target_object", "target_tool"}
                             }
-                            timed_out_attempt.update({
-                                "planned": False,
-                                "ignored_after_normal_candidate_timeout": True,
-                                "error": (
-                                    "正反候选阶段超过6秒；"
-                                    "结果不再选用，转入DIRECT回退"
-                                ),
-                                "planning_completion_order": planning_completion_count,
-                                "planning_inflight_after_complete": len(in_flight),
-                            })
-                            planning_attempts.append(timed_out_attempt)
-                            append_placement_trace(timed_out_attempt)
-                            continue
-
-                        successful = {
-                            key: value for key, value in attempt.items()
-                            if key not in {"target_object", "target_tool"}
-                        }
-                        target_object = attempt["target_object"]
-                        target_tool = attempt["target_tool"]
-                        successful.update({
+                        )
+                        planning_attempts.append(failed)
+                        append_trace(failed)
+                        continue
+                    successful = {
+                        key: value for key, value in attempt.items() if key != "target_tool"
+                    }
+                    data = plan.get("data") or {}
+                    trajectory = data.get("trajectory") or []
+                    target_tool = attempt["target_tool"]
+                    successful.update(
+                        {
                             "planned": True,
-                            "planning_completion_order": planning_completion_count,
+                            "planning_completion_order": completed,
                             "planning_inflight_after_complete": len(in_flight),
-                            "radius_layer_index": radius_index,
-                            "target_object_pose": {
-                                "position": target_object[:3, 3].tolist(),
-                                "orientation_xyzw": Rotation.from_matrix(
-                                    target_object[:3, :3]
-                                ).as_quat().tolist(),
-                            },
                             "target_tool_pose": {
                                 "position": target_tool[:3, 3].tolist(),
                                 "orientation_xyzw": Rotation.from_matrix(
                                     target_tool[:3, :3]
                                 ).as_quat().tolist(),
                             },
-                        })
-                        data = response.get("data") or {}
-                        trajectory = data.get("trajectory") or []
-                        successful["planned_trajectory_joint_deg"] = trajectory
-                        successful["planned_start_joints_deg"] = (
-                            trajectory[0] if trajectory else GRASPUP_ABOVE_JOINTS_DEG
-                        )
-                        successful["planned_end_joints_deg"] = trajectory[-1] if trajectory else None
-                        successful["sample_frequency_hz"] = data.get("sample_frequency")
-                        planning_attempts.append(successful)
-                        append_placement_trace(successful)
-                        layer_successes.append((successful, response))
+                            "planned_trajectory_joint_deg": trajectory,
+                            "planned_start_joints_deg": (
+                                trajectory[0] if trajectory else GRASPUP_ABOVE_JOINTS_DEG
+                            ),
+                            "planned_end_joints_deg": trajectory[-1] if trajectory else None,
+                            "sample_frequency_hz": data.get("sample_frequency"),
+                        }
+                    )
+                    planning_attempts.append(successful)
+                    append_trace(successful)
+                    if selected is None and not planning_timed_out.is_set():
+                        selected = successful
+                        selected_plan = plan
                         plan_found.set()
                         print(
-                            "[找到可行候选] "
-                            f"radius={radius:.3f} sample={successful['xy_layer']} "
-                            f"z={successful['object_z_m']:.3f} "
-                            f"yaw={successful['yaw_deg']} "
-                            f"base_rpy={successful['object_base_rpy_deg']}; "
-                            "停止补发更低优先级候选",
+                            f"[找到可行Buffer候选] left_eef z="
+                            f"{successful['target_left_eef_z_m']:.3f}",
                             flush=True,
                         )
-
-                if layer_successes:
-                    # 正反两面共用滑动窗口：最先返回的可行解立即被选中，
-                    # 后续不再提交新的候选；已在飞的请求不影响已选结果。
-                    selected, selected_plan = layer_successes[0]
-                    classification = str(selected["classification"])
-                    branch = str(selected["placement_branch"])
-                    profile = resolve_place_profile(classification, branch)
-                    release_z_candidates = list(selected["release_z_candidates_m"])
-                if (
-                    selected is not None
-                    or planning_timed_out.is_set()
-                    or normal_candidates_timed_out.is_set()
-                ):
-                    break
-
-            # 工件1的轴向正反候选均无解，或正反候选阶段超过6秒后，才进入
-            # DIRECT。此阶段刻意不与前面的滑动窗口并发，保证回退优先级明确。
-            if (
-                selected is None
-                and direct_fallback_needed
-                and not planning_timed_out.is_set()
-                and not object_dropped.is_set()
-            ):
-                if direct_spec is None:
-                    raise RuntimeError("工件1 direct place 回退参数不完整")
-                print(
-                    "[直接放置回退] "
-                    + (
-                        "正反候选阶段已超时；"
-                        if normal_candidates_timed_out.is_set()
-                        else "正反候选已全部无解；"
-                    )
-                    + "开始保持 graspup_top 末端 RPY 的 DIRECT 规划。",
-                    flush=True,
-                )
-                if not args.skip_motion:
-                    while not approach_reached.wait(timeout=0.05):
-                        if approach_finished.is_set():
-                            if approach_errors:
-                                raise RuntimeError(
-                                    f"到达 graspup_top 失败: {approach_errors[0]}"
-                                ) from approach_errors[0]
-                            raise RuntimeError("到达 graspup_top 前运动线程已结束")
-                response = planner.lookup_transform(
-                    "body_base", left_placement_frame
-                )
-                if response is None:
-                    raise RuntimeError("规划器没有返回 graspup_top 末端位姿")
-                direct_tool_rotation = planner_matrix(response)[:3, :3].copy()
-                planning_scheduler_log["direct_orientation_source"] = (
-                    f"body_base_T_{left_placement_frame}_at_graspup_top"
-                )
-                planning_scheduler_log["direct_tool_rpy_deg"] = Rotation.from_matrix(
-                    direct_tool_rotation
-                ).as_euler("xyz", degrees=True).tolist()
-                direct_target_z = validate_increasing_candidates(
-                    "[direct object place].target_z_candidates_m",
-                    direct_spec["target_z"],
-                )
-                direct_release_z = list(direct_spec["release_z"])
-                for direct_z_index, target_z in enumerate(direct_target_z):
-                    if planning_timed_out.is_set() or object_dropped.is_set():
-                        break
-                    xyz = np.array(
-                        [direct_spec["center"][0], direct_spec["center"][1], target_z],
-                        dtype=float,
-                    )
-                    target_tool = np.eye(4)
-                    target_tool[:3, :3] = direct_tool_rotation
-                    target_tool[:3, 3] = (
-                        xyz - direct_tool_rotation @ T_tool_object[:3, 3]
-                    )
-                    target_object = target_tool @ T_tool_object
-                    attempt = {
-                        "place_module": DIRECT_PROFILE.module_id,
-                        "classification": "DIRECT",
-                        "placement_branch": "BRANCH_1_DIRECT",
-                        "release_z_candidates_m": direct_release_z,
-                        "priority_index": planning_submission_count,
-                        "xy_layer": "direct_center",
-                        "xy_radius_m": 0.0,
-                        "xy_direction_deg": None,
-                        "z_index": direct_z_index,
-                        "object_z_m": float(target_z),
-                        "yaw_deg": 0.0,
-                        "rotation_index": 0,
-                        "object_base_rpy_deg": "graspup_top_tool_rpy",
-                        "object_local_roll_deg": 0.0,
-                        "object_local_roll_index": 0,
-                        "object_local_pitch_deg": 0.0,
-                        "object_local_pitch_index": 0,
-                        "target_object_xyz": xyz.tolist(),
-                        "target_tool_xyz": target_tool[:3, 3].tolist(),
-                        "placement_point": {
-                            "frame_id": "body_base",
-                            "object_xyz_m": xyz.tolist(),
-                            "tool_xyz_m": target_tool[:3, 3].tolist(),
-                        },
-                        "planning_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
-                        "planning_submission_order": planning_submission_count + 1,
-                        "planning_inflight_after_submit": 1,
-                        "target_object": target_object,
-                        "target_tool": target_tool,
-                    }
-                    if not tool_positive_z_points_toward_body_base_negative_z(
-                        target_tool
-                    ):
-                        tool_z_rejected_count += 1
-                        rejected_attempt = {
-                            key: value for key, value in attempt.items()
-                            if key not in {"target_object", "target_tool"}
-                        }
-                        rejected_attempt.update({
-                            "planned": False,
-                            "rejected_before_planning": True,
-                            "planning_inflight_at_rejection": 0,
-                            "error": (
-                                f"目标末端约束不满足：{left_placement_frame} +Z "
-                                "在 body_base 的 Z 投影必须为负"
-                            ),
-                            "target_tool_positive_z_in_body_base": (
-                                target_tool[:3, 2].tolist()
-                            ),
-                            "target_tool_positive_z_body_base_z_component": (
-                                float(target_tool[2, 2])
-                            ),
-                        })
-                        planning_attempts.append(rejected_attempt)
-                        append_placement_trace(rejected_attempt)
-                        continue
-                    planning_submission_count += 1
-                    print(
-                        "[提交 DIRECT] "
-                        f"z={target_z:.3f}m, 保持 graspup_top RPY="
-                        f"{np.round(planning_scheduler_log['direct_tool_rpy_deg'], 3).tolist()}",
-                        flush=True,
-                    )
-                    try:
-                        response = plan_offline_candidate(target_tool)
-                    except Exception as exc:
-                        planning_completion_count += 1
-                        failed_attempt = {
-                            key: value for key, value in attempt.items()
-                            if key not in {"target_object", "target_tool"}
-                        }
-                        failed_attempt.update({
-                            "planned": False,
-                            "error": f"{type(exc).__name__}: {exc}",
-                            "planning_completion_order": planning_completion_count,
-                            "planning_inflight_after_complete": 0,
-                        })
-                        planning_attempts.append(failed_attempt)
-                        append_placement_trace(failed_attempt)
-                        continue
-                    planning_completion_count += 1
-                    data = response.get("data") or {}
-                    trajectory = data.get("trajectory") or []
-                    selected = {
-                        key: value for key, value in attempt.items()
-                        if key not in {"target_object", "target_tool"}
-                    }
-                    selected.update({
-                        "planned": True,
-                        "planning_completion_order": planning_completion_count,
-                        "planning_inflight_after_complete": 0,
-                        "radius_layer_index": "direct_fallback",
-                        "target_object_pose": {
-                            "position": target_object[:3, 3].tolist(),
-                            "orientation_xyzw": Rotation.from_matrix(
-                                target_object[:3, :3]
-                            ).as_quat().tolist(),
-                        },
-                        "target_tool_pose": {
-                            "position": target_tool[:3, 3].tolist(),
-                            "orientation_xyzw": Rotation.from_matrix(
-                                target_tool[:3, :3]
-                            ).as_quat().tolist(),
-                        },
-                        "planned_trajectory_joint_deg": trajectory,
-                        "planned_start_joints_deg": (
-                            trajectory[0] if trajectory else GRASPUP_ABOVE_JOINTS_DEG
-                        ),
-                        "planned_end_joints_deg": trajectory[-1] if trajectory else None,
-                        "sample_frequency_hz": data.get("sample_frequency"),
-                    })
-                    planning_attempts.append(selected)
-                    append_placement_trace(selected)
-                    selected_plan = response
-                    classification = "DIRECT"
-                    branch = "BRANCH_1_DIRECT"
-                    profile = DIRECT_PROFILE
-                    release_z_candidates = direct_release_z
-                    plan_found.set()
-                    print("[DIRECT 可行] 正反候选无解后已找到直接放置轨迹。", flush=True)
-                    break
         finally:
             planning_finished.set()
 
@@ -1753,36 +861,26 @@ def main() -> int:
         if timeout_thread is not None:
             timeout_thread.join()
         if approach_errors:
-            raise RuntimeError(
-                f"运动到 graspup 上方失败: {approach_errors[0]}"
-            ) from approach_errors[0]
+            raise RuntimeError(f"到达 graspup_top 失败: {approach_errors[0]}") from approach_errors[0]
         if timeout_errors:
-            raise RuntimeError(
-                f"规划超时恢复失败: {timeout_errors[0]}"
-            ) from timeout_errors[0]
+            raise RuntimeError(f"规划失败恢复异常: {timeout_errors[0]}") from timeout_errors[0]
         if object_dropped.is_set():
             finish_dropped_cycle()
             return 0
         if planning_timed_out.is_set():
             write_terminal_outcome(
-                "planning_timeout_recovered_at_graspup",
+                "planning_failed_recovered_at_graspup",
                 completed_without_error=True,
                 planning_attempts=planning_attempts,
                 returned_to_graspup=True,
             )
             return 0
-        if selected is None:
-            if tool_z_rejected_count and planning_submission_count == 0:
-                raise RuntimeError(
-                    "全部放置候选均不满足末端朝下约束："
-                    f"{left_placement_frame} +Z 在 body_base 的 Z 投影必须<0"
-                )
-            raise RuntimeError("全部 XY/Z/yaw/局部X候选均规划失败")
+        if selected is None or selected_plan is None:
+            raise RuntimeError("全部 Buffer Z 候选均规划失败")
 
+        # 阶段 6：真实执行前核对离线轨迹起点；不一致时在线重规划。
         planning_mode = "dry_run"
         if not args.skip_motion:
-            if selected_plan is None:
-                raise RuntimeError("离线规划结果为空")
             trajectory = ((selected_plan.get("data") or {}).get("trajectory") or [])
             if not trajectory:
                 raise RuntimeError("离线规划结果缺少可执行轨迹")
@@ -1792,21 +890,14 @@ def main() -> int:
             actual_start = read_left_joints_deg(args.arm_host)
             delta = (actual_start - offline_start + 180.0) % 360.0 - 180.0
             start_error = float(np.max(np.abs(delta)))
-            selected["offline_start_state_deg"] = GRASPUP_ABOVE_JOINTS_DEG
             selected["offline_trajectory_first_point_deg"] = offline_start.tolist()
             selected["actual_execution_start_deg"] = actual_start.tolist()
             selected["offline_start_max_error_deg"] = start_error
             if start_error <= args.offline_start_tolerance_deg:
                 planning_mode = "offline"
-                print(
-                    "[离线轨迹起点校验通过] 最大关节误差="
-                    f"{start_error:.4f}deg",
-                    flush=True,
-                )
             else:
                 print(
-                    "[离线轨迹起点误差超限] 丢弃离线轨迹并在线重规划："
-                    f"{start_error:.4f}deg",
+                    f"[离线起点误差{start_error:.4f}deg] 在线重规划",
                     flush=True,
                 )
                 target_tool = np.eye(4)
@@ -1814,74 +905,51 @@ def main() -> int:
                     selected["target_tool_pose"]["orientation_xyzw"]
                 ).as_matrix()
                 target_tool[:3, 3] = selected["target_tool_pose"]["position"]
-                planner.set_next_plan_context(
-                    "left_graspup_top", "left_place_position"
-                )
                 selected_plan = planner.plan_cartesian_pose(
                     "left",
                     matrix_pose(target_tool),
                     planner=post_graspup_planner,
                     rrtstar_goal_tolerance=(post_graspup_planner == "rrtstar"),
-                    use_left_eef_collision_box=(classification == "FRONT"),
+                    use_left_eef_collision_box=False,
                 )
                 if selected_plan is None:
                     raise RuntimeError("在线重规划结果为空")
                 planning_mode = "online_replan_after_start_mismatch"
 
-        publish_ready(args, {
-            "stage": "left_place_ready",
-            "outcome": "success",
-            "place_module": profile.module_id,
-            "classification": classification,
-            "placement_branch": branch,
-            "result_path": str(args.result_file),
-            "selected_candidate": selected,
-            "at": "graspup_above_final_placement_planned",
-        })
+        # 阶段 7：发布“轨迹已准备”状态，等待可选外部门禁，然后执行放置。
+        publish_ready(
+            args,
+            {
+                "stage": "buffer_place_ready",
+                "outcome": "success",
+                "result_path": str(args.result_file),
+                "selected_candidate": selected,
+            },
+        )
         wait_permit(args)
-
         if not args.skip_motion:
-            confirm_motion(
-                args,
-                f"确认最终 {args.post_graspup_planner.upper()} 轨迹安全，"
-                "按回车执行...",
-            )
-            # Keep this check directly adjacent to execution: after it passes,
-            # no permit wait or replanning may occur before the held-object move.
-            if not gripper_holds_object("从graspup_top移动到最终目标工件位姿"):
+            if not gripper_holds_object("从graspup_top移动到Buffer"):
                 finish_dropped_cycle()
                 return 0
             planner.execute_planned_result(selected_plan)
 
-        fixed_left_eef_target = direct_only_without_inspect
-        selected_object = np.eye(4)
-        selected_object[:3, :3] = Rotation.from_quat(
-            selected["target_object_pose"]["orientation_xyzw"]
-        ).as_matrix()
-        selected_object[:3, 3] = selected["target_object_pose"]["position"]
-        selected_object_z = float(selected_object[2, 3])
-        selected_tool_z = float(selected["target_tool_pose"]["position"][2])
-        active_release_z = [
-            float(value)
-            for value in release_z_candidates
-            if float(value) <= (
-                selected_tool_z if fixed_left_eef_target else selected_object_z
-            ) + 1e-9
-        ]
-        release_motion_required = bool(release_z_candidates)
-        if release_motion_required and not active_release_z:
-            raise RuntimeError(
-                "松爪 Z 候选中没有不高于已选放置目标 Z 的候选"
-            )
-        release_attempts = []
-        release_succeeded = not release_motion_required
+        # 阶段 8：到达 Buffer 后处理可选松爪下降，并打开左夹爪。
         target_tool = np.eye(4)
         target_tool[:3, :3] = Rotation.from_quat(
             selected["target_tool_pose"]["orientation_xyzw"]
         ).as_matrix()
         target_tool[:3, 3] = selected["target_tool_pose"]["position"]
-        selected_release_tool = target_tool if not release_motion_required else None
-        if not release_motion_required:
+        target_tool_z = float(target_tool[2, 3])
+        active_release_z = [
+            float(value) for value in release_z_candidates if float(value) <= target_tool_z + 1e-9
+        ]
+        release_required = bool(release_z_candidates)
+        if release_required and not active_release_z:
+            raise RuntimeError("松爪 Z 候选中没有不高于已选 Buffer Z 的候选")
+        release_attempts: list[dict] = []
+        release_succeeded = not release_required
+        selected_release_tool = target_tool if not release_required else None
+        if not release_required:
             record = {
                 "record_type": "release_descent",
                 "skipped_by_empty_release_z_candidates": True,
@@ -1889,181 +957,109 @@ def main() -> int:
                 "error": None,
             }
             release_attempts.append(record)
-            append_placement_trace(record)
-            release_frame = "left_eef" if fixed_left_eef_target else "object_center"
-            print(
-                f"[松爪位] {release_frame} release_z_candidates_m=[]；"
-                "跳过第二段 LIN，直接松爪。",
-                flush=True,
-            )
-        elif not args.skip_motion:
-            confirm_motion(
-                args,
-                f"确认依次尝试松爪Z={active_release_z}的 LIN 路径安全，"
-                "按回车开始...",
-            )
+            append_trace(record)
+            print("[松爪位] release_z_candidates_m=[]；在Buffer目标直接松爪", flush=True)
         for release_z in active_release_z:
-            if fixed_left_eef_target:
-                release_object = None
-                release_tool = target_tool.copy()
-                release_tool[2, 3] = release_z
-            else:
-                release_object = selected_object.copy()
-                release_object[2, 3] = release_z
-                release_tool = release_object @ np.linalg.inv(T_tool_object)
+            release_tool = target_tool.copy()
+            release_tool[2, 3] = release_z
             record = {
                 "record_type": "release_descent",
-                "placement_point": {
-                    "frame_id": "body_base",
-                    "object_xyz_m": (
-                        None if release_object is None else release_object[:3, 3].tolist()
-                    ),
-                    "tool_xyz_m": release_tool[:3, 3].tolist(),
-                    "target_kind": (
-                        "fixed_left_eef" if fixed_left_eef_target else "object_center"
-                    ),
-                },
                 "release_z_m": release_z,
-                "release_z_frame": (
-                    "left_eef" if fixed_left_eef_target else "object_center"
-                ),
+                "release_z_frame": "left_eef",
                 "target_tool_xyz": release_tool[:3, 3].tolist(),
                 "succeeded": False,
                 "error": None,
             }
             try:
                 if not args.skip_motion:
-                    planner.set_next_plan_context(
-                        "left_place_position", "left_release_position"
-                    )
                     planner.move_cartesian_pose(
-                        "left",
-                        matrix_pose(release_tool),
-                        planner="lin",
+                        "left", matrix_pose(release_tool), planner="lin"
                     )
                 record["succeeded"] = True
                 release_succeeded = True
                 selected_release_tool = release_tool
                 release_attempts.append(record)
-                append_placement_trace(record)
+                append_trace(record)
                 break
             except Exception as exc:
                 record["error"] = f"{type(exc).__name__}: {exc}"
                 release_attempts.append(record)
-                append_placement_trace(record)
-                print(
-                    f"[松爪候选失败] z={release_z}: {record['error']}",
-                    flush=True,
-                )
+                append_trace(record)
+                print(f"[松爪候选失败] z={release_z}: {record['error']}", flush=True)
 
-        if not release_succeeded and not args.skip_motion:
-            print(
-                "[下降失败恢复] 所有松爪候选均失败；"
-                "按原版在机械臂当前位置打开左夹爪",
-                flush=True,
-            )
-        final_position = None
-        if not args.skip_motion:
-            final_position = open_left_gripper(args)
-
-        if release_succeeded and release_motion_required and not args.skip_motion:
-            confirm_motion(
-                args,
-                "确认松爪后回到下降前末端位姿路径安全，按回车执行 LIN...",
-            )
-            planner.set_next_plan_context(
-                "left_release_position", "left_place_position"
-            )
-            planner.move_cartesian_pose(
-                "left",
-                matrix_pose(target_tool),
-                planner="lin",
-            )
-
-        if not args.skip_motion:
-            confirm_motion(
-                args,
-                "确认回 graspup 路径安全，按回车规划并执行...",
-            )
-            planner.config = replace(
-                planner.config,
-                max_velocity=float(args.preset_speed),
-                max_acceleration=float(args.preset_speed),
-            )
-            # If a release LIN was configured, the successful path above first
-            # returns to ``target_tool``.  Both faces then withdraw through the
-            # same high clearance pose instead of planning directly from the
-            # low placement pose to graspup.
-            planner.set_next_plan_context(
-                "left_place_position", "left_graspup_top"
-            )
-            planner.move_left_joints(
-                GRASPUP_ABOVE_JOINTS_DEG,
-                planner=post_graspup_planner,
-                use_left_eef_collision_box=(classification == "FRONT"),
-            )
-            wait_for_left_joint_target(
-                args.arm_host,
-                GRASPUP_ABOVE_JOINTS_DEG,
-                label="graspup_top",
-            )
-            planner.set_next_plan_context("left_graspup_top", "left_graspup")
-            planner.move_left_joints(
-                GRASPUP_JOINTS_DEG,
-                planner=post_graspup_planner,
-            )
-            wait_for_left_graspup(args.arm_host)
-
-        if not release_succeeded:
-            # 工件虽已按原版打开，但没有到达任何经规划验证的松爪位。
-            # 禁止总控把它当作反抓区内的工件继续 Module 5，按安全丢弃恢复处理。
+        # 所有必需下降候选都失败时，工件仍由左夹爪持有。禁止在未经验证的
+        # 高度松爪；先安全返回 graspup，再用非零状态结束本轮。
+        if release_required and not release_succeeded:
+            if not args.skip_motion:
+                if not gripper_holds_object("松爪下降失败后返回graspup"):
+                    finish_dropped_cycle()
+                    return 1
+                return_to_graspup_after_buffer()
             write_terminal_outcome(
-                "held_object_dropped",
-                completed_without_error=True,
+                "release_motion_failed_object_retained",
+                completed_without_error=False,
                 release_motion_succeeded=False,
                 release_motion_attempts=release_attempts,
+                released=False,
                 released_at_verified_target=False,
-                gripper_final_position_percent=final_position,
+                object_retained_in_left_gripper=not args.skip_motion,
+                gripper_final_position_percent=None,
                 returned_to_graspup=not args.skip_motion,
             )
-            print(
-                "[下降失败恢复完成] 未到达有效松爪位；"
-                "禁止进入反抓，buffer保持为空并开始下一轮。",
-                flush=True,
-            )
-            return 0
+            return 1
 
-        write_stage_result(args.result_file, {
-            "stage": "left_place",
-            "outcome": "success",
-            "place_module": profile.module_id,
-            "classification": classification,
-            "placement_branch": branch,
-            "selected_candidate": selected,
-            "planning_mode": planning_mode,
-            "planning_scheduler": planning_scheduler_log,
-            "planning_attempts": planning_attempts,
-            "release_motion_succeeded": release_succeeded,
-            "release_motion_attempts": release_attempts,
-            # 松爪阶段只改变工件 Z，高度之外的姿态与已选放置候选完全相同。
-            "release_object_base_rpy_deg": selected["object_base_rpy_deg"],
-            "release_tool_pose": (
-                {
-                    "frame_id": "body_base",
-                    "position": selected_release_tool[:3, 3].tolist(),
-                    "orientation_xyzw": Rotation.from_matrix(
-                        selected_release_tool[:3, :3]
-                    ).as_quat().tolist(),
-                }
-                if selected_release_tool is not None else None
-            ),
-            "gripper_final_position_percent": final_position,
-            "holding_checks": holding_checks,
-            "released": not args.skip_motion,
-            "returned_to_graspup": not args.skip_motion,
-        })
+        final_position = None
+        # 阶段 9：确认松爪位有效后打开夹爪，再按 Buffer → graspup_top →
+        # graspup 安全回程。
+        if not args.skip_motion:
+            final_position = open_left_gripper(args)
+        if release_succeeded and release_required and not args.skip_motion:
+            planner.move_cartesian_pose("left", matrix_pose(target_tool), planner="lin")
+        if not args.skip_motion:
+            return_to_graspup_after_buffer()
+
+        # 阶段 10：写出可供新总控消费的最终结果。
+        write_stage_result(
+            args.result_file,
+            {
+                "schema_version": 1,
+                "stage": "buffer_place",
+                "outcome": "success" if args.execute else "planned",
+                "module": "module_3_left_place",
+                "source_module1_handoff": str(args.weight_handoff_file.resolve()),
+                "workpiece": args.workpiece,
+                "place_module": MODULE_ID,
+                "classification": CLASSIFICATION,
+                "placement_branch": PLACEMENT_BRANCH,
+                "selected_candidate": selected,
+                "planning_mode": planning_mode,
+                "planning_scheduler": scheduler,
+                "planning_attempts": planning_attempts,
+                "release_motion_succeeded": release_succeeded,
+                "release_motion_attempts": release_attempts,
+                "release_tool_pose": (
+                    {
+                        "frame_id": "body_base",
+                        "position": selected_release_tool[:3, 3].tolist(),
+                        "orientation_xyzw": Rotation.from_matrix(
+                            selected_release_tool[:3, :3]
+                        ).as_quat().tolist(),
+                    }
+                    if selected_release_tool is not None
+                    else None
+                ),
+                "gripper_final_position_percent": final_position,
+                "holding_checks": holding_checks,
+                "released": not args.skip_motion,
+                "returned_to_graspup": not args.skip_motion,
+            },
+        )
         print(
-            f"[left-place] {branch} 放置结束，已验证回到 graspup",
+            (
+                "[module3] Buffer放置完成，已返回 graspup"
+                if args.execute
+                else "[module3] Buffer纯规划完成；未发送机械臂或夹爪命令"
+            ),
             flush=True,
         )
         return 0

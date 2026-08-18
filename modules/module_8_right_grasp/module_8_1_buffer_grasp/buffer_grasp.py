@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-from collections.abc import Callable
 import importlib
 import json
 import math
@@ -23,7 +22,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, TypeVar
+from typing import Any
 
 MODULE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_ROOT.parents[2]
@@ -45,6 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from planning_log import planner_start_pose, planning_event
+from tool.planner_task_retry import retry_task_creation
 
 
 DEFAULT_LINE_ENTRY_CLEARANCE_M = 0.020
@@ -62,32 +62,6 @@ WORKPIECE_CONFIGS = {
     1: MODULE_ROOT / "configs/workpiece_1_grasp.toml",
     2: MODULE_ROOT / "configs/workpiece_2_grasp.toml",
 }
-
-
-# Self-contained copies of the helpers formerly imported from
-# move_by_eef_pose.py, move_by_joints.py and tool/planner_task_retry.py.
-# Keep this block here so this executable can be deployed without those files.
-ResultT = TypeVar("ResultT")
-TASK_CREATION_ATTEMPTS = 5
-TASK_CREATION_RETRY_DELAYS_S = (1.0, 2.0, 3.0, 5.0)
-TASK_CREATION_FAILURE_TEXT = "Failed to create planning task"
-
-
-def retry_task_creation(request: Callable[[], ResultT], *, label: str) -> ResultT:
-    """Retry only the planner's transient pre-IK task-allocation failures."""
-    for attempt in range(1, TASK_CREATION_ATTEMPTS + 1):
-        try:
-            return request()
-        except Exception as exc:
-            if TASK_CREATION_FAILURE_TEXT not in str(exc) or attempt == TASK_CREATION_ATTEMPTS:
-                raise
-            delay_s = TASK_CREATION_RETRY_DELAYS_S[attempt - 1]
-            print(
-                f"[planner] {label} 创建规划任务失败；{delay_s:.1f}s 后重试 "
-                f"{attempt + 1}/{TASK_CREATION_ATTEMPTS}", flush=True,
-            )
-            time.sleep(delay_s)
-    raise AssertionError("unreachable")
 
 
 def import_sdk() -> Any:
@@ -882,9 +856,9 @@ def parse_args() -> argparse.Namespace:
         "--tcp-yaw-toward-workpiece-y-deg", type=float, default=-3.0,
         help="TCP 相对工件的本地 +Z 偏转（度；默认 -3）",
     )
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
     parser.add_argument("--planner", choices=("rrtstar",), default="rrtstar", help="固定使用 RRTstar")
     parser.add_argument("--final-approach-mode", choices=("servo", "rrt"), default="servo",
@@ -979,16 +953,17 @@ def main() -> int:
     local_yaw_correction = rpy_to_rotvec([
         0.0, 0.0, math.radians(args.tcp_yaw_toward_workpiece_y_deg),
     ])
-    # First obtain the yaw requested by the workpiece orientation and its
-    # calibrated local-Z correction.  The final approach must keep the TCP
-    # level in body_base, so discard the resulting roll/pitch before planning
-    # the rear alignment and executing ServoPose.
+    # Obtain the yaw requested by the workpiece orientation and its calibrated
+    # local-Z correction.  Preserve the observed workpiece roll and pitch at
+    # the final TCP target, rather than forcing the approach to stay level.
     workpiece_aligned_orientation = compose_pose(
         [0.0, 0.0, 0.0, *workpiece_orientation],
         [0.0, 0.0, 0.0, *local_yaw_correction],
     )[3:]
     workpiece_aligned_rpy = rotvec_to_rpy(workpiece_aligned_orientation)
-    orientation = rpy_to_rotvec([0.0, 0.0, workpiece_aligned_rpy[2]])
+    orientation = rpy_to_rotvec([
+        workpiece_rpy[0], workpiece_rpy[1], workpiece_aligned_rpy[2],
+    ])
     tcp_local_offset_base = rotate_vector(
         rotvec_to_quat(orientation), list(args.tcp_local_offset_at_grasp_m)
     )
@@ -1000,8 +975,9 @@ def main() -> int:
     # TCP target, so the final advance remains exactly along TCP +X.
     approach_anchor_xyz = grasp_xyz.copy()
     target_rpy = rotvec_to_rpy(orientation)
-    # Roll and pitch are fixed at zero, so the rear approach and final Servo
-    # advance remain horizontal in body_base along the level TCP +X axis.
+    # The rear approach and final Servo advance follow the observed, possibly
+    # tilted TCP +X axis.  Its XY projection must still be non-zero so a rear
+    # approach line can be generated.
     tcp_x_axis = rotate_vector(rotvec_to_quat(orientation), [1.0, 0.0, 0.0])
     tcp_x_xy_norm_sq = sum(component * component for component in tcp_x_axis[:2])
     if tcp_x_xy_norm_sq < 1e-9:

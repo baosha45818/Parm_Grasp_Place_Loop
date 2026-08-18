@@ -1,0 +1,16 @@
+# Install into /mnt/data2/shurenbin/.conda/envs/dp.
+numpy
+aiohttp
+opencv-python
+torch
+torchvision
+hydra-core
+iopath
+pillow
+timm
+einops
+segment-anything
+onnx
+onnxsim
+onnxruntime
+wandb

@@ -241,30 +241,43 @@ def reconnect_servo_arm(session: PlacementSession, sdk: object, label: str, reco
     if isinstance(session.arm, ServoArmProxy):
         session.arm.dispose_servo_worker()
     stop_worker = ServoWorker(session.args.arm_host)
+    stale_stop_confirmed = False
     try:
         session.log_event(
             "servo_recovery_stop_stale_session_sent", label=label,
             recovery_index=recovery_index,
         )
         stop_worker.stop()
+        stale_stop_confirmed = True
     except Exception as stop_exc:
         session.log_event(
             "servo_recovery_stop_stale_session_error", label=label,
             recovery_index=recovery_index,
             exception_type=type(stop_exc).__name__, exception=str(stop_exc),
         )
-        raise RuntimeError(
-            f"{label} 恢复前无法停止旧 ServoPose 会话：{stop_exc}"
-        ) from stop_exc
+        # The controller itself may be briefly unavailable.  In that case
+        # the old worker cannot acknowledge a stop, but failing the entire
+        # recovery here prevents the reconnect loop below from ever seeing
+        # the controller return.  Defer the mandatory stale-session stop
+        # until a fresh SDK client reconnects.
+        if not is_servo_connection_loss(session, stop_exc):
+            raise RuntimeError(
+                f"{label} 恢复前无法停止旧 ServoPose 会话：{stop_exc}"
+            ) from stop_exc
+        session.log_event(
+            "servo_recovery_stop_stale_session_deferred", label=label,
+            recovery_index=recovery_index,
+        )
     finally:
         stop_worker.close()
-    wait_for_right_task_stopped(
-        session.arm, session.log_file,
-        confirmed_event="servo_recovery_stale_session_stopped",
-        timeout_event="servo_recovery_stale_session_stop_timeout",
-        cancel_if_still_running_after_s=0.5,
-        event_logger=session.log_event,
-    )
+    if stale_stop_confirmed:
+        wait_for_right_task_stopped(
+            session.arm, session.log_file,
+            confirmed_event="servo_recovery_stale_session_stopped",
+            timeout_event="servo_recovery_stale_session_stop_timeout",
+            cancel_if_still_running_after_s=0.5,
+            event_logger=session.log_event,
+        )
     deadline = time.monotonic() + 10.0
     last_error: Exception | None = None
     try:
@@ -276,6 +289,19 @@ def reconnect_servo_arm(session: PlacementSession, sdk: object, label: str, reco
         try:
             candidate = sdk.Arm(host=session.args.arm_host)
             ensure_ready(candidate, 2)
+            if not stale_stop_confirmed:
+                session.log_event(
+                    "servo_recovery_stop_stale_session_after_reconnect_sent",
+                    label=label, recovery_index=recovery_index,
+                )
+                candidate.stop_servo_pose(2)  # type: ignore[attr-defined]
+                wait_for_right_task_stopped(
+                    candidate, session.log_file,
+                    confirmed_event="servo_recovery_stale_session_stopped_after_reconnect",
+                    timeout_event="servo_recovery_stale_session_stop_after_reconnect_timeout",
+                    cancel_if_still_running_after_s=0.5,
+                    event_logger=session.log_event,
+                )
             # Preserve the proxy object's identity: placement_main still
             # holds that same proxy in its local ``arm`` variable.
             if isinstance(session.arm, ServoArmProxy):

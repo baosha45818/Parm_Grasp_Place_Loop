@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """兼容总控：依次运行 Module 5-2 左侧准备和 Module 8-2 右侧交接。
 
-业务实现已拆分到 ``modules/module_5_left_pick/module_5_2_handoff_prepare``
+业务实现已拆分到 ``modules/module_5_left_pick/reverse_pick_to_handoff/handoff``
 和 ``modules/module_8_right_grasp/module_8_2_left_handoff``。保留本入口是为了
 兼容现有双臂总控和原独立执行命令。
 """
@@ -26,7 +26,7 @@ from modules.module_8_right_grasp.module_8_2_left_handoff.main import (
 )
 
 
-PYTHON = Path("/home/dainanjun/Public/data_collector/.venv/bin/python3")
+PYTHON = ROOT / ".venv/bin/python"
 if not PYTHON.is_file():
     raise RuntimeError(f"handoff runtime environment does not exist: {PYTHON}")
 DEFAULT_ALIGNMENT = Path(
@@ -40,7 +40,7 @@ DEFAULT_AUTO_MASK_CONFIG = (
 )
 MODULE_5_2 = (
     ROOT
-    / "modules/module_5_left_pick/module_5_2_handoff_prepare/main.py"
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
 )
 MODULE_8_2 = (
     ROOT

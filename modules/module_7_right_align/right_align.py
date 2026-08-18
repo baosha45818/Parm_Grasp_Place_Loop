@@ -31,7 +31,7 @@ import sys
 from datetime import datetime, timezone
 import time
 import threading
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 MODULE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_ROOT
@@ -39,11 +39,12 @@ project_root_string = str(PROJECT_ROOT)
 if project_root_string in sys.path:
     sys.path.remove(project_root_string)
 sys.path.insert(0, project_root_string)
-LOOP_ROOT = MODULE_ROOT.parents[2]
+LOOP_ROOT = MODULE_ROOT.parents[1]
 if str(LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(LOOP_ROOT))
 
 from planning_log import append_event, planner_start_pose, planning_event
+from tool.planner_task_retry import retry_task_creation
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 # The SDK reports ``eef_pose`` in the planner's ``right_hand_transfer_base``
@@ -75,9 +76,6 @@ TURN_CANDIDATE_CONFIGS = {
 
 # Motion, geometry and SDK helpers are local to this entry point. Structured
 # planning logs remain in planning_log.py so the pipeline can share its format.
-ResultT = TypeVar("ResultT")
-TASK_CREATION_ATTEMPTS = 5
-TASK_CREATION_RETRY_DELAYS_S = (1.0, 2.0, 3.0, 5.0)
 
 
 def import_sdk() -> Any:
@@ -393,19 +391,6 @@ def set_gripper_state(gripper: object, *, arm_id: int, target_open: bool, timeou
             return
         time.sleep(0.05)
     raise RuntimeError(f"右夹爪{action}等待超时；机械臂不会继续运动。")
-
-
-def retry_task_creation(request: Callable[[], ResultT], *, label: str) -> ResultT:
-    for attempt in range(1, TASK_CREATION_ATTEMPTS + 1):
-        try:
-            return request()
-        except Exception as exc:
-            if "Failed to create planning task" not in str(exc) or attempt == TASK_CREATION_ATTEMPTS:
-                raise
-            delay_s = TASK_CREATION_RETRY_DELAYS_S[attempt - 1]
-            print(f"[planner] {label} 创建规划任务失败；{delay_s:.1f}s 后重试 {attempt + 1}/{TASK_CREATION_ATTEMPTS}", flush=True)
-            time.sleep(delay_s)
-    raise AssertionError("unreachable")
 
 
 def newest_workpiece_pose_file(workpiece: int) -> Path:
@@ -1400,9 +1385,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rrt-turn-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--planner", choices=("lin", "ptp", RRTCONNECT_PLANNER_KIND, RRTSTAR_PLANNER_KIND),
                         default=RRTCONNECT_PLANNER_KIND)
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
-    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
-    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
+    parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
     parser.add_argument("--max-vel", type=float, default=0.08)
     parser.add_argument("--max-acc", type=float, default=0.08)

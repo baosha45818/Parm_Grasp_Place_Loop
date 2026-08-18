@@ -14,7 +14,7 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
-V7_DIR = ROOT / "third_party/graspnet/deploy/version7"
+V7_DIR = ROOT / "tools/graspnet_runtime/deploy/version7"
 SOCKET = os.environ.get("CAMERA_BROKER_SOCKET", "/tmp/graspnet-v7-camera.sock")
 
 
@@ -86,7 +86,7 @@ def _restart_owned_broker() -> None:
 
 def _start_broker(
     timeout_s: float, *, require_femto: bool, require_d405_eef_pose: bool,
-    expected_d405_serial: str | None,
+    expected_d405_serial: str | None, expected_d405_fps: int | None,
 ) -> dict:
     environment = dict(os.environ)
     # Module 1's direct-Planner ICP path owns only D405.  Do not overwrite
@@ -95,6 +95,8 @@ def _start_broker(
     environment["GRASPNET_V7_DIRECT_PLANNER"] = "0" if require_d405_eef_pose else "1"
     if expected_d405_serial is not None:
         environment["GRASPNET_V7_D405_SERIAL"] = str(expected_d405_serial)
+    if expected_d405_fps is not None:
+        environment["GRASPNET_V7_D405_FPS"] = str(int(expected_d405_fps))
     environment["GRASPNET_V7_CAMERA_SOCKET"] = SOCKET
     subprocess.run(["bash", str(V7_DIR / "start_camera_service.sh")], check=True, env=environment)
     deadline = time.monotonic() + timeout_s
@@ -109,7 +111,7 @@ def _start_broker(
 
 def _validate_broker(
     status: dict, *, require_d405_eef_pose: bool = True, expected_d405_serial: str | None = None,
-    require_femto: bool = True,
+    expected_d405_fps: int | None = None, require_femto: bool = True,
 ) -> None:
     """Validate the requested camera set and D405-to-robot dependency."""
     if status.get("schema_version") != 1:
@@ -133,6 +135,12 @@ def _validate_broker(
             raise RuntimeError(
                 f"Camera Broker D405 serial is {actual!r}; expected {expected_d405_serial!r}"
             )
+    if expected_d405_fps is not None:
+        actual_fps = (cameras.get("d405") or {}).get("fps")
+        if actual_fps != int(expected_d405_fps):
+            raise RuntimeError(
+                f"Camera Broker D405 FPS is {actual_fps!r}; expected {int(expected_d405_fps)!r}"
+            )
     profile_ids = ["graspnet_d405_v1"]
     if require_femto:
         profile_ids.extend(("graspnet_femto_v1", "inspect_femto_v1"))
@@ -149,7 +157,8 @@ def _validate_broker(
 
 def ensure_camera_broker(
     timeout_s: float = 75.0, *, require_d405_eef_pose: bool = True,
-    expected_d405_serial: str | None = None, require_femto: bool = True,
+    expected_d405_serial: str | None = None, expected_d405_fps: int | None = None,
+    require_femto: bool = True,
 ) -> dict:
     try:
         status = _status()
@@ -161,12 +170,14 @@ def ensure_camera_broker(
             require_femto=require_femto,
             require_d405_eef_pose=require_d405_eef_pose,
             expected_d405_serial=expected_d405_serial,
+            expected_d405_fps=expected_d405_fps,
         )
         started = True
     try:
         _validate_broker(
             status, require_d405_eef_pose=require_d405_eef_pose,
             expected_d405_serial=expected_d405_serial,
+            expected_d405_fps=expected_d405_fps,
             require_femto=require_femto,
         )
     except RuntimeError:
@@ -180,11 +191,13 @@ def ensure_camera_broker(
             require_femto=require_femto,
             require_d405_eef_pose=require_d405_eef_pose,
             expected_d405_serial=expected_d405_serial,
+            expected_d405_fps=expected_d405_fps,
         )
         started = True
         _validate_broker(
             status, require_d405_eef_pose=require_d405_eef_pose,
             expected_d405_serial=expected_d405_serial,
+            expected_d405_fps=expected_d405_fps,
             require_femto=require_femto,
         )
     print(f"[module-0] Camera Broker {'started' if started else 'reused'}: {SOCKET}", flush=True)

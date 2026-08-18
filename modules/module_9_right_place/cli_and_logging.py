@@ -10,6 +10,7 @@ import time
 import os
 from pathlib import Path
 import time
+from toml_config import load as load_toml
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -80,6 +81,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="规划回起点前调用 cancel_task(2) 清理右臂残留任务；总控串联时使用",
     )
+    parser.add_argument("--pre-search-leg", action="append", help="搜索前运动段：name|axis|direction|distance_mm|speed_mm_s")
     parser.add_argument(
         "--pre-search-press-mm", type=float, default=1.0,
         help="第 1 轮搜索前沿世界 Z− 的 LIN 下压距离，默认 1 mm",
@@ -92,6 +94,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--pre-search-press-speed-mm-s", type=float, default=1.0,
         help="每轮搜索前 LIN 下压速度，默认 1 mm/s",
     )
+    parser.add_argument("--pre-search-press-axis", choices=("x", "y", "z"), default="z")
+    parser.add_argument("--pre-search-press-direction", choices=("negative", "positive"), default="negative")
+    parser.add_argument("--baseline-settle-s", type=float, default=0.5)
+    parser.add_argument("--baseline-interval-s", type=float, default=0.05)
     parser.add_argument(
         "--search-attempt", type=int, default=1,
         help="当前搜索轮次；第 N 轮从初始点累计下压 N×pre-search-press-mm，默认第 1 轮",
@@ -125,6 +131,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     right_scale = float(os.environ.get("PARM_RIGHT_SPEED_SCALE", "1.0"))
     parser.add_argument("--fast-linear-speed-mm-s", type=float, default=7.0 * right_scale, help="快速段线速度，默认 7 mm/s × 右臂速度倍率")
     parser.add_argument("--fast-linear-accel-mm-s2", type=float, default=20.0 * right_scale, help="快速段线加速度，默认 20 mm/s² × 右臂速度倍率")
+    parser.add_argument("--pre-search-leg-accel-mm-s2", type=float, default=20.0, help="搜索前接近段线加速度，单位 mm/s²")
+    parser.add_argument("--pre-search-press-accel-mm-s2", type=float, default=10.0, help="搜索前预压段线加速度，单位 mm/s²")
     parser.add_argument("--slow-after-back-mm", type=float, default=15.0, help="累计后拉达到该距离后降速，默认 15 mm")
     parser.add_argument("--slow-linear-speed-mm-s", type=float, default=7.0 * right_scale, help="降速后短段线速度，默认 7 mm/s × 右臂速度倍率")
     parser.add_argument("--slow-linear-accel-mm-s2", type=float, default=20.0 * right_scale, help="降速后短段线加速度，默认 20 mm/s² × 右臂速度倍率")
@@ -204,6 +212,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--wiggle-entry-ty-drop-nm", type=float, default=3.0, help="摆动进洞所需最小 dTy 下降量")
     parser.add_argument("--min-entry-back-mm", type=float, default=8.0, help="至少后拉该距离后才允许判进洞")
     parser.add_argument(
+        "--post-entry-enabled", action="store_true",
+        help="执行配置的进洞后后退、下压辅助动作",
+    )
+    parser.add_argument(
         "--post-entry-relief-mm", type=float, default=0.0,
         help="确认进洞后沿搜索反方向固定卸力距离；0 表示关闭",
     )
@@ -235,18 +247,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--post-entry-descend-speed-mm-s", type=float, default=1.0,
         help="进洞后 Z− 下降线速度，默认 1 mm/s",
     )
-    parser.add_argument("--second-hole-lift-mm", type=float, default=40.0,
-                        help="第一洞确认后沿世界 Z+ 提起距离，默认 40 mm")
+    parser.add_argument("--post-entry-linear-accel-mm-s2", type=float, default=20.0,
+                        help="进洞后辅助动作的线加速度，单位 mm/s²")
+    parser.add_argument("--first-hole-settle-down-mm", type=float, default=10.0,
+                        help="第一洞确认后沿世界 Z− 下压距离，默认 10 mm")
+    parser.add_argument("--first-hole-lift-mm", type=float, default=40.0,
+                        help="第一洞下压完成后沿世界 Z+ 提起距离，默认 40 mm")
     parser.add_argument("--second-hole-y-offset-mm", type=float, default=30.0,
                         help="第一洞确认后沿世界 Y+ 移至第二洞的距离，默认 30 mm")
     parser.add_argument("--second-hole-descend-mm", type=float, default=48.0,
                         help="第二洞沿世界 Z− 下降距离，默认 48 mm")
+    parser.add_argument("--second-hole-lift-mm", type=float, default=40.0,
+                        help="第二洞下降完成后沿世界 Z+ 提起距离，默认 40 mm")
+    parser.add_argument("--second-hole-final-axis", choices=("x", "y", "z"), default="x",
+                        help="第二洞完成后最终平移所使用的世界坐标轴")
+    parser.add_argument("--second-hole-final-direction", choices=("negative", "positive"), default="negative",
+                        help="第二洞完成后最终平移方向")
+    parser.add_argument("--second-hole-final-distance-mm", type=float, default=110.0,
+                        help="第二洞完成后最终平移距离，默认 110 mm")
     parser.add_argument("--second-hole-lateral-speed-mm-s", type=float, default=10.0,
                         help="第二洞上提与 Y+ 平移速度，默认 10 mm/s")
-    parser.add_argument("--second-hole-x-return-speed-mm-s", type=float, default=25.0,
-                        help="第二洞后沿世界 X−110 mm 的速度，默认 25 mm/s")
+    parser.add_argument("--second-hole-final-speed-mm-s", type=float, default=25.0,
+                        help="第二洞完成后最终平移速度，单位 mm/s")
     parser.add_argument("--second-hole-descend-speed-mm-s", type=float, default=5.0,
                         help="第二洞 Z− 下降速度，默认 5 mm/s")
+    parser.add_argument("--second-hole-linear-accel-mm-s2", type=float, default=20.0,
+                        help="第二洞路径线加速度，单位 mm/s²")
+    parser.add_argument("--second-hole-near-target-mm", type=float, default=2.0,
+                        help="第二洞非下降段的断连恢复近目标阈值，单位 mm")
+    parser.add_argument("--second-hole-descend-near-target-mm", type=float, default=3.0,
+                        help="第二洞下降段的断连恢复近目标阈值，单位 mm")
+    parser.add_argument("--second-hole-descend-recovery-speed-mm-s", type=float, default=3.0,
+                        help="第二洞下降段断连恢复速度，单位 mm/s")
+    parser.add_argument("--second-hole-pause-after-first-down-s", type=float, default=0.5,
+                        help="第一洞下压后停留时间，单位 s")
+    parser.add_argument("--second-hole-pause-after-second-down-s", type=float, default=0.5,
+                        help="第二洞下降后停留时间，单位 s")
+    parser.add_argument("--second-hole-enabled", action="store_true",
+                        help="第一洞确认后执行配置的第二洞路径")
     parser.add_argument("--pre-search-initial-descend-mm", type=float, default=10.0,
                         help="规划到起始关节位后先沿世界 Z− 下降距离，默认 10 mm")
     parser.add_argument("--pre-search-forward-mm", type=float, default=142.0,
@@ -259,10 +297,42 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.live != args.confirm_live:
         parser.error("真实运动必须同时指定 --live --confirm-live")
-    for name in ("pre_search_press_mm", "retry_search_press_increment_mm", "pre_search_press_speed_mm_s", "fast_linear_speed_mm_s", "fast_linear_accel_mm_s2", "max_back_mm", "sample_timeout", "max_force_delta_n", "max_torque_delta_nm", "min_entry_back_mm", "entry_pre_fx_n", "entry_pre_ty_nm", "entry_fx_drop_n", "entry_ty_drop_nm", "entry_ty_abs_nm", "entry_relaxed_pre_fx_n", "entry_relaxed_pre_ty_nm", "entry_relaxed_fx_drop_n", "entry_relaxed_ty_drop_nm", "entry_release_pre_force_n", "entry_release_pre_torque_nm", "entry_release_force_n", "entry_release_torque_nm", "entry_release_force_drop_n", "entry_release_torque_drop_nm", "entry_release_confirm_interval_s"):
+    legs = None
+    if args.pre_search_leg:
+        legs = []
+        for raw_leg in args.pre_search_leg:
+            fields = raw_leg.split("|")
+            if len(fields) != 5:
+                parser.error("--pre-search-leg 格式必须为 name|axis|direction|distance_mm|speed_mm_s")
+            name, axis, direction, distance_text, speed_text = fields
+            try:
+                distance_mm, speed_mm_s = float(distance_text), float(speed_text)
+            except ValueError:
+                parser.error("--pre-search-leg 的距离和速度必须为数值")
+            legs.append({"name": name, "axis": axis, "direction": direction, "distance_mm": distance_mm, "speed_mm_s": speed_mm_s})
+    if legs is not None:
+        for index, leg in enumerate(legs, start=1):
+            if not isinstance(leg, dict):
+                parser.error(f"第 {index} 个搜索前运动段必须是对象")
+            required = {"name", "axis", "direction", "distance_mm", "speed_mm_s"}
+            if required - set(leg):
+                parser.error(f"第 {index} 个搜索前运动段缺少字段：{', '.join(sorted(required - set(leg)))}")
+            if not isinstance(leg["name"], str) or not leg["name"]:
+                parser.error(f"第 {index} 个搜索前运动段 name 必须是非空字符串")
+            if leg["axis"] not in ("x", "y", "z") or leg["direction"] not in ("negative", "positive"):
+                parser.error(f"第 {index} 个搜索前运动段 axis/direction 无效")
+            for key in ("distance_mm", "speed_mm_s"):
+                value = leg[key]
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0.0:
+                    parser.error(f"第 {index} 个搜索前运动段 {key} 必须为正有限数")
+    args.pre_search_legs = legs
+    for name in ("pre_search_press_speed_mm_s", "fast_linear_speed_mm_s", "fast_linear_accel_mm_s2", "max_back_mm", "sample_timeout", "max_force_delta_n", "max_torque_delta_nm", "min_entry_back_mm", "entry_pre_fx_n", "entry_pre_ty_nm", "entry_fx_drop_n", "entry_ty_drop_nm", "entry_ty_abs_nm", "entry_relaxed_pre_fx_n", "entry_relaxed_pre_ty_nm", "entry_relaxed_fx_drop_n", "entry_relaxed_ty_drop_nm", "entry_release_pre_force_n", "entry_release_pre_torque_nm", "entry_release_force_n", "entry_release_torque_nm", "entry_release_force_drop_n", "entry_release_torque_drop_nm", "entry_release_confirm_interval_s"):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             parser.error(f"--{name.replace('_', '-')} 必须为正数")
+    for name in ("pre_search_press_mm", "retry_search_press_increment_mm"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0.0:
+            parser.error(f"--{name.replace('_', '-')} 必须为非负有限数")
     if not all(math.isfinite(value) for value in args.initial_right_joints_deg):
         parser.error("--initial-right-joints-deg 必须全部为有限数")
     if args.continuous_force_monitor_hz <= 0.0:
@@ -281,6 +351,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("--baseline-samples 必须至少为 1")
     if args.search_attempt < 1:
         parser.error("--search-attempt 必须至少为 1")
+    for name in ("baseline_settle_s", "baseline_interval_s"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0.0:
+            parser.error(f"--{name.replace('_', '-')} 必须为非负有限数")
     if args.entry_release_confirm_samples < 1:
         parser.error("--entry-release-confirm-samples 必须至少为 1")
     resultant_values = (
@@ -311,15 +384,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ):
         parser.error("启用进洞后下降时：Fx 阈值必须为非负数，速度必须为正")
     for name in (
+        "fast_linear_accel_mm_s2", "pre_search_leg_accel_mm_s2", "pre_search_press_accel_mm_s2",
+        "first_hole_lift_mm",
         "second_hole_lift_mm", "second_hole_y_offset_mm", "second_hole_descend_mm",
-        "second_hole_lateral_speed_mm_s", "second_hole_x_return_speed_mm_s",
-        "second_hole_descend_speed_mm_s",
+        "second_hole_final_distance_mm",
+        "second_hole_lateral_speed_mm_s", "second_hole_final_speed_mm_s",
+        "second_hole_descend_speed_mm_s", "second_hole_linear_accel_mm_s2",
+        "second_hole_near_target_mm", "second_hole_descend_near_target_mm",
+        "second_hole_descend_recovery_speed_mm_s",
         "pre_search_forward_mm", "pre_search_descend_mm", "pre_search_approach_speed_mm_s",
         "pre_search_initial_descend_mm",
     ):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0.0:
             parser.error(f"--{name.replace('_', '-')} 必须为正数")
+    for name in ("second_hole_pause_after_first_down_s", "second_hole_pause_after_second_down_s"):
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) < 0.0:
+            parser.error(f"--{name.replace('_', '-')} 必须为非负有限数")
+    if not math.isfinite(args.first_hole_settle_down_mm) or args.first_hole_settle_down_mm < 0.0:
+        parser.error("--first-hole-settle-down-mm 必须为非负有限数")
     fx_reversal_enabled = args.entry_fx_reversal_confirm_frames > 0
     if fx_reversal_enabled and not (
         math.isfinite(args.entry_fx_reversal_pre_n)
@@ -371,34 +454,9 @@ def write_control_snapshot(arm: object, output_file: object, event: str) -> None
 # The workpiece-profile entry point is intentionally kept in this file.  It
 # translates the minimal JSON profile directly into this module's arguments;
 # no subprocess and no call to place_hole_a_wiggle.py is involved.
-SINGLE_SEARCH_SPEED_MM_S = 15.0
-MAX_SEARCH_ATTEMPTS = 6
-PRE_SEARCH_PRESS_MM = 1.0
-RETRY_SEARCH_PRESS_INCREMENT_MM = 1.5
-PRE_SEARCH_PRESS_SPEED_MM_S = 1.0
-RETRY_LIFT_MM = 30.0
-RETRY_LIFT_SPEED_MM_S = 10.0
-POST_ENTRY_RELIEF_MM = 0.0
-POST_ENTRY_RELIEF_OPPOSING_FORCE_N = 1.5
-POST_ENTRY_RELIEF_CONFIRM_FRAMES = 2
-POST_ENTRY_RELIEF_OBSERVATION_FRAMES = 3
-POST_ENTRY_RELIEF_SPEED_MM_S = 1.0
-POST_ENTRY_DESCEND_MM = 10.0
-POST_ENTRY_DESCEND_FX_RISE_N = 0.0
-POST_ENTRY_DESCEND_SPEED_MM_S = 1.0
-PRE_SEARCH_INITIAL_DESCEND_MM = 10.0
-PRE_SEARCH_FORWARD_MM = 142.0
-PRE_SEARCH_DESCEND_MM = 20.0
-PRE_SEARCH_APPROACH_SPEED_MM_S = 25.0
-SECOND_HOLE_LIFT_MM = 40.0
-SECOND_HOLE_Y_OFFSET_MM = 30.0
-SECOND_HOLE_DESCEND_MM = 48.0
-SECOND_HOLE_LATERAL_SPEED_MM_S = 10.0
-SECOND_HOLE_X_RETURN_SPEED_MM_S = 25.0
-SECOND_HOLE_DESCEND_SPEED_MM_S = 5.0
 WORKPIECE_CONFIGS = {
-    1: Path(__file__).resolve().parent / "place_hole_a_wiggle_new_workpiece_1.json",
-    2: Path(__file__).resolve().parent / "place_hole_a_wiggle_new_workpiece_2.json",
+    1: Path(__file__).resolve().parent / "config/workpiece_1_gzhu.toml",
+    2: Path(__file__).resolve().parent / "config/workpiece_2.toml",
 }
 
 STOP_KEYS = {
@@ -425,23 +483,70 @@ STOP_KEYS = {
 
 def read_profile(path: Path) -> tuple[int, dict[str, Any]]:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"无法读取 JSON 配置 {path}: {exc}") from exc
-    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise ValueError("配置必须是对象，且 schema_version 必须为 1")
+        raw = load_toml(path)
+    except ValueError as exc:
+        raise ValueError(f"无法读取 TOML 配置 {path}: {exc}") from exc
+    if not isinstance(raw, dict) or raw.get("schema_version") != 2:
+        raise ValueError("配置必须是对象，且 schema_version 必须为 2")
     workpiece = raw.get("workpiece_serial_number")
     if isinstance(workpiece, bool) or not isinstance(workpiece, int) or workpiece < 1:
         raise ValueError("workpiece_serial_number 必须是正整数")
-    missing = {"initial_right_joints_deg", "search_axis", "search_direction"} - set(raw)
+    missing = {"initial_right_joints_deg", "arm_host", "force_sensor_host", "search_axis", "search_direction", "pre_search", "search_motion", "retry", "post_entry", "second_hole"} - set(raw)
     if missing:
         raise ValueError(f"配置缺少必填字段: {', '.join(sorted(missing))}")
+    for key in ("arm_host", "force_sensor_host"):
+        if not isinstance(raw[key], str) or not raw[key]:
+            raise ValueError(f"{key} 必须是非空字符串")
     stop_conditions = raw.get("stop_conditions", {})
     if not isinstance(stop_conditions, dict):
         raise ValueError("stop_conditions 必须是对象")
     unknown = set(stop_conditions) - STOP_KEYS
     if unknown:
         raise ValueError(f"stop_conditions 包含不支持的字段: {', '.join(sorted(unknown))}")
+    pre_search = raw.get("pre_search")
+    search_motion = raw.get("search_motion")
+    retry = raw.get("retry")
+    post_entry = raw.get("post_entry")
+    second_hole = raw.get("second_hole")
+    if not isinstance(pre_search, dict):
+        raise ValueError("配置必须包含 pre_search 对象")
+    for label, table, keys in (
+        ("search_motion", search_motion, {"speed_mm_s", "accel_mm_s2"}),
+        ("retry", retry, {"max_attempts", "lift_mm", "speed_mm_s", "accel_mm_s2"}),
+        ("post_entry", post_entry, {"enabled", "relief_mm", "relief_opposing_force_n", "relief_confirm_frames", "relief_observation_frames", "relief_speed_mm_s", "descend_mm", "descend_fx_rise_n", "descend_speed_mm_s", "linear_accel_mm_s2"}),
+    ):
+        if not isinstance(table, dict) or keys - set(table):
+            raise ValueError(f"{label} 缺少字段: {', '.join(sorted(keys - set(table or {})))}")
+    if not isinstance(post_entry["enabled"], bool):
+        raise ValueError("post_entry.enabled 必须是布尔值")
+    if not isinstance(second_hole, dict) or not isinstance(second_hole.get("enabled"), bool):
+        raise ValueError("second_hole 必须是包含布尔 enabled 的对象")
+    required = {"frame", "legs", "press", "baseline", "leg_accel_mm_s2"}
+    if required - set(pre_search):
+        raise ValueError(f"pre_search 缺少字段: {', '.join(sorted(required - set(pre_search)))}")
+    if pre_search["frame"] != "world":
+        raise ValueError("pre_search.frame 目前只支持 world")
+    if not isinstance(pre_search["legs"], list) or not pre_search["legs"]:
+        raise ValueError("pre_search.legs 必须是非空数组")
+    if not isinstance(pre_search["press"], dict) or not isinstance(pre_search["baseline"], dict):
+        raise ValueError("pre_search.press 和 pre_search.baseline 必须是对象")
+    press_required = {"axis", "direction", "first_attempt_mm", "retry_increment_mm", "speed_mm_s", "accel_mm_s2"}
+    baseline_required = {"settle_s", "samples", "interval_s"}
+    if press_required - set(pre_search["press"]):
+        raise ValueError(f"pre_search.press 缺少字段: {', '.join(sorted(press_required - set(pre_search['press'])))}")
+    if baseline_required - set(pre_search["baseline"]):
+        raise ValueError(f"pre_search.baseline 缺少字段: {', '.join(sorted(baseline_required - set(pre_search['baseline'])))}")
+    if second_hole["enabled"]:
+        second_required = {
+            "first_hole_settle_down_mm", "first_hole_lift_mm",
+            "y_offset_mm", "descend_mm", "lift_after_second_hole_mm",
+            "final_axis", "final_direction", "final_distance_mm", "lateral_speed_mm_s", "final_speed_mm_s",
+            "descend_speed_mm_s", "linear_accel_mm_s2",
+            "near_target_mm", "descend_near_target_mm", "descend_recovery_speed_mm_s",
+            "pause_after_first_down_s", "pause_after_second_down_s",
+        }
+        if second_required - set(second_hole):
+            raise ValueError(f"second_hole 缺少字段: {', '.join(sorted(second_required - set(second_hole)))}")
     return workpiece, raw
 
 def append_scalar(argv: list[str], key: str, value: Any, *, label: str) -> None:
@@ -459,34 +564,73 @@ def profile_argv(
         or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in joints)
     ):
         raise ValueError("initial_right_joints_deg 必须是 7 个数值组成的数组")
+    pre_search = profile["pre_search"]
+    search_motion = profile["search_motion"]
+    post_entry = profile["post_entry"]
+    second_hole = profile["second_hole"]
+    if not isinstance(pre_search, dict) or not isinstance(search_motion, dict) or not isinstance(post_entry, dict):
+        raise ValueError("配置运动参数必须为对象")
+    press = pre_search["press"]
+    baseline = pre_search["baseline"]
+    if not isinstance(press, dict) or not isinstance(baseline, dict):
+        raise ValueError("pre_search.press 和 pre_search.baseline 必须是对象")
+    pre_search_argv = [
+            "--pre-search-press-axis", str(press["axis"]),
+            "--pre-search-press-direction", str(press["direction"]),
+            "--pre-search-press-mm", str(press["first_attempt_mm"]),
+            "--retry-search-press-increment-mm", str(press["retry_increment_mm"]),
+            "--pre-search-press-speed-mm-s", str(press["speed_mm_s"]),
+            "--pre-search-press-accel-mm-s2", str(press["accel_mm_s2"]),
+            "--pre-search-leg-accel-mm-s2", str(pre_search["leg_accel_mm_s2"]),
+            "--baseline-settle-s", str(baseline["settle_s"]),
+            "--baseline-samples", str(baseline["samples"]),
+            "--baseline-interval-s", str(baseline["interval_s"]),
+    ]
+    for leg in pre_search["legs"]:
+        pre_search_argv.extend(["--pre-search-leg", "|".join(str(leg[key]) for key in ("name", "axis", "direction", "distance_mm", "speed_mm_s"))])
     argv = [
         "--initial-joint-planner", "ompl",
-        "--fast-linear-speed-mm-s", str(SINGLE_SEARCH_SPEED_MM_S),
-        "--pre-search-press-mm", str(PRE_SEARCH_PRESS_MM),
-        "--retry-search-press-increment-mm", str(RETRY_SEARCH_PRESS_INCREMENT_MM),
-        "--pre-search-press-speed-mm-s", str(PRE_SEARCH_PRESS_SPEED_MM_S),
+        "--fast-linear-speed-mm-s", str(search_motion["speed_mm_s"]),
+        "--fast-linear-accel-mm-s2", str(search_motion["accel_mm_s2"]),
+        *pre_search_argv,
         "--search-attempt", str(attempt),
         "--return-search-exhausted",
-        "--post-entry-relief-mm", str(POST_ENTRY_RELIEF_MM),
-        "--post-entry-relief-opposing-force-n", str(POST_ENTRY_RELIEF_OPPOSING_FORCE_N),
-        "--post-entry-relief-confirm-frames", str(POST_ENTRY_RELIEF_CONFIRM_FRAMES),
-        "--post-entry-relief-observation-frames", str(POST_ENTRY_RELIEF_OBSERVATION_FRAMES),
-        "--post-entry-relief-speed-mm-s", str(POST_ENTRY_RELIEF_SPEED_MM_S),
-        "--post-entry-descend-mm", str(POST_ENTRY_DESCEND_MM),
-        "--post-entry-descend-fx-rise-n", str(POST_ENTRY_DESCEND_FX_RISE_N),
-        "--post-entry-descend-speed-mm-s", str(POST_ENTRY_DESCEND_SPEED_MM_S),
-        "--pre-search-initial-descend-mm", str(PRE_SEARCH_INITIAL_DESCEND_MM),
-        "--pre-search-forward-mm", str(PRE_SEARCH_FORWARD_MM),
-        "--pre-search-descend-mm", str(PRE_SEARCH_DESCEND_MM),
-        "--pre-search-approach-speed-mm-s", str(PRE_SEARCH_APPROACH_SPEED_MM_S),
-        "--second-hole-lift-mm", str(SECOND_HOLE_LIFT_MM),
-        "--second-hole-y-offset-mm", str(SECOND_HOLE_Y_OFFSET_MM),
-        "--second-hole-descend-mm", str(SECOND_HOLE_DESCEND_MM),
-        "--second-hole-lateral-speed-mm-s", str(SECOND_HOLE_LATERAL_SPEED_MM_S),
-        "--second-hole-x-return-speed-mm-s", str(SECOND_HOLE_X_RETURN_SPEED_MM_S),
-        "--second-hole-descend-speed-mm-s", str(SECOND_HOLE_DESCEND_SPEED_MM_S),
+        "--post-entry-relief-mm", str(post_entry["relief_mm"]),
+        "--post-entry-relief-opposing-force-n", str(post_entry["relief_opposing_force_n"]),
+        "--post-entry-relief-confirm-frames", str(post_entry["relief_confirm_frames"]),
+        "--post-entry-relief-observation-frames", str(post_entry["relief_observation_frames"]),
+        "--post-entry-relief-speed-mm-s", str(post_entry["relief_speed_mm_s"]),
+        "--post-entry-descend-mm", str(post_entry["descend_mm"]),
+        "--post-entry-descend-fx-rise-n", str(post_entry["descend_fx_rise_n"]),
+        "--post-entry-descend-speed-mm-s", str(post_entry["descend_speed_mm_s"]),
+        "--post-entry-linear-accel-mm-s2", str(post_entry["linear_accel_mm_s2"]),
         "--initial-right-joints-deg", *(str(value) for value in joints),
+        "--arm-host", str(profile["arm_host"]),
+        "--force-host", str(profile["force_sensor_host"]),
     ]
+    if post_entry["enabled"]:
+        argv.append("--post-entry-enabled")
+    if second_hole["enabled"]:
+        argv.extend([
+            "--second-hole-enabled",
+            "--first-hole-settle-down-mm", str(second_hole["first_hole_settle_down_mm"]),
+            "--first-hole-lift-mm", str(second_hole["first_hole_lift_mm"]),
+            "--second-hole-y-offset-mm", str(second_hole["y_offset_mm"]),
+            "--second-hole-descend-mm", str(second_hole["descend_mm"]),
+            "--second-hole-lift-mm", str(second_hole["lift_after_second_hole_mm"]),
+            "--second-hole-final-axis", str(second_hole["final_axis"]),
+            "--second-hole-final-direction", str(second_hole["final_direction"]),
+            "--second-hole-final-distance-mm", str(second_hole["final_distance_mm"]),
+            "--second-hole-lateral-speed-mm-s", str(second_hole["lateral_speed_mm_s"]),
+            "--second-hole-final-speed-mm-s", str(second_hole["final_speed_mm_s"]),
+            "--second-hole-descend-speed-mm-s", str(second_hole["descend_speed_mm_s"]),
+            "--second-hole-linear-accel-mm-s2", str(second_hole["linear_accel_mm_s2"]),
+            "--second-hole-pause-after-first-down-s", str(second_hole["pause_after_first_down_s"]),
+            "--second-hole-pause-after-second-down-s", str(second_hole["pause_after_second_down_s"]),
+            "--second-hole-near-target-mm", str(second_hole["near_target_mm"]),
+            "--second-hole-descend-near-target-mm", str(second_hole["descend_near_target_mm"]),
+            "--second-hole-descend-recovery-speed-mm-s", str(second_hole["descend_recovery_speed_mm_s"]),
+        ])
     for key in ("search_axis", "search_direction"):
         append_scalar(argv, key, profile[key], label="配置")
     for key in sorted(profile.get("stop_conditions", {})):

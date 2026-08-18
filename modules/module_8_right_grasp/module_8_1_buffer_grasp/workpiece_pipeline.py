@@ -360,7 +360,7 @@ def release_gripper(args: argparse.Namespace, reason: str) -> None:
     gripper = None
     try:
         gripper = import_sdk().Gripper(
-            host=os.environ.get("PARM_GRIPPER_HOST", "192.168.3.11")
+            host=os.environ.get("PARM_GRIPPER_HOST", "localhost")
         )
         gripper.move(args.arm_id, 100.0, mode="async", preempt=True)
         deadline = time.monotonic() + 5.0
@@ -393,7 +393,7 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
     arm = planner = None
     try:
         sdk = import_sdk()
-        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
+        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         for attempt in range(1, SAVED_POSE_PLAN_RETRIES + 1):

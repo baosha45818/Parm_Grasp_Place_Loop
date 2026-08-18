@@ -47,7 +47,7 @@ from modules.workpiece_2_handoff_profile import (
     load_workpiece_2_handoff_profile,
     workpiece_2_right_prepare_joints_deg,
 )
-from modules.module_5_left_pick.module_5_2_handoff_prepare.main import (
+from modules.module_5_left_pick.reverse_pick_to_handoff.handoff.main import (
     DEFAULT_ALIGNMENT,
     HANDOFF_HEAD_PITCH_DEG,
     HANDOFF_HEAD_YAW_DEG,

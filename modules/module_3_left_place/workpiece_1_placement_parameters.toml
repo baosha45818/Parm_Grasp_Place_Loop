@@ -1,60 +1,8 @@
-# Module 3 工件1正反面放置参数。
-# 所有位置相对 body_base，长度单位为米，角度单位为度。
-# roll、pitch、yaw 均定义在工件局部坐标系，列表顺序即候选优先级。
+# Workpiece 1 fixed Buffer target in body_base, metres.
+# The live graspup_top left_eef orientation is preserved.
 
-[shared]
-# 工件 +Z 接近 left_eef -X 时，先完整提交正面、再反面，均无解后回退 [direct place]；
-# 接近 +X 时只提交反面，反面无解后回退 [direct place]。两边均不接近时直接走 [direct place]。
-# DIRECT 保持 graspup_top 的末端 RPY，仅移动工件中心。
-# 键名为兼容历史配置保留；其数值现在是 left_eef 轴向选择阈值。
-body_base_z_face_selection_max_angle_deg = 40.0
-allowed_handoff_weight_classes = ["SINGLE"]
-use_multiple_holding_min_g = true
-rotation_convention = "local_rpy"
-
-# 目前只尝试各面的中心 XY，不生成圆周候选。
-target_xy_radius_m = 0.0
-xy_radius_factors = [0.0]
-
-[front]
-# 放置中心只读取 XY；实际工件目标高度和松爪高度由各自 Z 候选控制。
-# release_z_candidates_m = [] 表示到 target 位直接松爪，不执行第二段 LIN。
-target_object_xyz_m = [0.537668, 0.0100, -0.300000]
-target_z_candidates_m = [-0.37]
-release_z_candidates_m = [-0.38, -0.37]
-
-# yaw 从 45 度开始，每 45 度一次。
-# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 5 个 roll × 3 个 pitch × 8 个 yaw = 120。
-yaw_candidates_deg = [45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0]
-roll_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
-pitch_candidates_deg = [0.0, -10.0, 10.0]
-# 零候选：工件 +X/+Y/+Z 与 body_base +X/+Y/+Z 对齐。
-base_rpy_deg = [0.0, 0.0, 0.0]
-
-[reversed]
-target_object_xyz_m = [0.457668, 0.258779, -0.300000]
-target_z_candidates_m = [-0.30]
-release_z_candidates_m = []
-
-# 基准姿态先绕工件局部 X 翻转 180 度。
-# 当前候选数 = 1 个目标 Z × 1 个中心 XY × 4 个 roll × 3 个 pitch × 7 个 yaw = 84。
-yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0, -90.0, 90.0]
-roll_candidates_deg = [-25.0, 25.0, -30.0, 30.0]
-pitch_candidates_deg = [0.0, -20.0, 20.0]
-base_rpy_deg = [180.0, 0.0, 0.0]
-
-[direct object place]
-# 仅供保留的 Inspect/ICP DIRECT 回退使用。target_object_xyz_m 的 XY 加每个
-# target_z_candidates_m 组成工件中心目标；代码用 ICP 的 T_tool_object 换算为末端。
-# release_z_candidates_m 也是工件中心 Z：为空即到 target 后直接松爪。
-target_object_xyz_m = [0.457668, 0.258779, -0.300000]
-target_z_candidates_m = [-0.3]
-release_z_candidates_m = []
-
-[direct left eef place]
-# 仅供当前总控跳过 Inspect 的 DIRECT 使用。保持 graspup_top 的 left_eef RPY，
-# target_left_eef_xyz_m 仅读取 X/Y，Z 是名义值；实际目标高度按下方候选遍历。
-# 两个 Z 列表都按 left_eef 解释：release 为空即到 target 后直接松爪。
+[buffer]
 target_left_eef_xyz_m = [0.457668, 0.258779, -0.320000]
-target_z_candidates_m = [-0.32000]
+target_z_candidates_m = [-0.320000]
+# Empty means open the gripper at the target without a second LIN descent.
 release_z_candidates_m = []

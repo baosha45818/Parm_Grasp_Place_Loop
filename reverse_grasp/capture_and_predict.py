@@ -15,7 +15,10 @@ from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-CAPTURE_IMPL = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation"
+CAPTURE_IMPL = (
+    ROOT
+    / "modules/module_4_head_judge/module_4_1_buffer_state_estimation/vision"
+)
 FULL_PIPELINE = HERE / "run_full_visual_prediction.py"
 
 
@@ -37,7 +40,7 @@ def main() -> int:
         raise RuntimeError(f"完整视觉入口不存在: {FULL_PIPELINE}")
     if str(CAPTURE_IMPL) not in sys.path:
         sys.path.insert(0, str(CAPTURE_IMPL))
-    from capture_head_rgbd import capture
+    from capture_rgbd import capture
 
     capture_root = HERE / "captures"
     capture_root.mkdir(parents=True, exist_ok=True)

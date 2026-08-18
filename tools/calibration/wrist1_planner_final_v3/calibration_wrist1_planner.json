@@ -1,0 +1,242 @@
+{
+  "camera_name": "wrist1",
+  "camera_model": "Intel RealSense D405",
+  "camera_profile": {
+    "width": 640,
+    "height": 480,
+    "fps": 30,
+    "depth_aligned_to": "color",
+    "module_1_profile": "Version7 Camera Broker D405"
+  },
+  "calibration_type": "eye_in_hand",
+  "board": {
+    "type": "charuco",
+    "squares_x": 13,
+    "squares_y": 5,
+    "square_length_m": 0.015,
+    "marker_length_m": 0.011,
+    "aruco_dictionary": "DICT_4X4_100",
+    "homography_interpolation": false,
+    "min_markers": 4,
+    "min_charuco_corners": 8
+  },
+  "sample_count": 18,
+  "input_sample_count": 20,
+  "robot_pose_source": "Planner inverse-normalized lookup_transform(left_arm_end_link, left_arm_base) -> T_left_arm_base_left_arm_end_link, verified against reverse TF on every capture",
+  "parent_frame": "left_arm_end_link",
+  "base_frame": "left_arm_base",
+  "corner_assignment": {
+    "method": "aruco_ids"
+  },
+  "outlier_rejection": {
+    "enabled": true,
+    "max_translation_mm": 2.0,
+    "max_rotation_deg": 0.5,
+    "excluded_samples": [
+      {
+        "index": 11,
+        "translation_mm": 2.331809208367235,
+        "rotation_deg": 0.0907441401797488,
+        "reprojection_rms_px": 0.19427260096785434
+      },
+      {
+        "index": 12,
+        "translation_mm": 2.0420609558573934,
+        "rotation_deg": 0.0776262122438039,
+        "reprojection_rms_px": 0.1837135794747398
+      }
+    ],
+    "used_sample_residuals": [
+      {
+        "index": 0,
+        "translation_mm": 1.1389818627576704,
+        "rotation_deg": 0.306769991467415,
+        "reprojection_rms_px": 0.16289833207392723
+      },
+      {
+        "index": 1,
+        "translation_mm": 0.6656019246067865,
+        "rotation_deg": 0.1682360985019425,
+        "reprojection_rms_px": 0.13808011769661163
+      },
+      {
+        "index": 2,
+        "translation_mm": 0.6893723682007631,
+        "rotation_deg": 0.05752755136973953,
+        "reprojection_rms_px": 0.14592850593124954
+      },
+      {
+        "index": 3,
+        "translation_mm": 0.7383105878491718,
+        "rotation_deg": 0.2801114782131244,
+        "reprojection_rms_px": 0.11200445245691067
+      },
+      {
+        "index": 4,
+        "translation_mm": 0.5216607791430635,
+        "rotation_deg": 0.15914624323199794,
+        "reprojection_rms_px": 0.15685365017181196
+      },
+      {
+        "index": 5,
+        "translation_mm": 0.7087071389964541,
+        "rotation_deg": 0.08567836713523143,
+        "reprojection_rms_px": 0.14071804578071118
+      },
+      {
+        "index": 6,
+        "translation_mm": 0.44637453186665943,
+        "rotation_deg": 0.22342058030035516,
+        "reprojection_rms_px": 0.16071766705523266
+      },
+      {
+        "index": 7,
+        "translation_mm": 0.5105742574257437,
+        "rotation_deg": 0.2274207373723361,
+        "reprojection_rms_px": 0.21042477003264212
+      },
+      {
+        "index": 8,
+        "translation_mm": 0.9534393167947857,
+        "rotation_deg": 0.24469874204453582,
+        "reprojection_rms_px": 0.25722258616396626
+      },
+      {
+        "index": 9,
+        "translation_mm": 1.0754836718156362,
+        "rotation_deg": 0.14026615944484527,
+        "reprojection_rms_px": 0.2799012639314524
+      },
+      {
+        "index": 10,
+        "translation_mm": 1.1067281847039696,
+        "rotation_deg": 0.20148994917028212,
+        "reprojection_rms_px": 0.35015745545372345
+      },
+      {
+        "index": 13,
+        "translation_mm": 1.4419867803323532,
+        "rotation_deg": 0.0893034825081327,
+        "reprojection_rms_px": 0.23959120136576653
+      },
+      {
+        "index": 14,
+        "translation_mm": 0.9384432709804872,
+        "rotation_deg": 0.21452237473307043,
+        "reprojection_rms_px": 0.2661093464909013
+      },
+      {
+        "index": 15,
+        "translation_mm": 0.8300235503901622,
+        "rotation_deg": 0.28476690771830393,
+        "reprojection_rms_px": 0.2201417511591993
+      },
+      {
+        "index": 16,
+        "translation_mm": 1.0675355709940828,
+        "rotation_deg": 0.2694908252211166,
+        "reprojection_rms_px": 0.20324529411832248
+      },
+      {
+        "index": 17,
+        "translation_mm": 0.706859255310433,
+        "rotation_deg": 0.14494108573088127,
+        "reprojection_rms_px": 0.20048367581374926
+      },
+      {
+        "index": 18,
+        "translation_mm": 0.9975051627451944,
+        "rotation_deg": 0.04399030930315341,
+        "reprojection_rms_px": 0.14966205437959731
+      },
+      {
+        "index": 19,
+        "translation_mm": 1.142967111077151,
+        "rotation_deg": 0.08776006915797194,
+        "reprojection_rms_px": 0.14843166562422952
+      }
+    ]
+  },
+  "camera_matrix": [
+    [
+      394.33721923828125,
+      0.0,
+      323.16131591796875
+    ],
+    [
+      0.0,
+      393.3470458984375,
+      241.8560791015625
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coeffs": [
+    -0.05308983847498894,
+    0.05641753226518631,
+    0.0004940498620271683,
+    -0.00038572275661863387,
+    -0.018609577789902687
+  ],
+  "image_size": [
+    640,
+    480
+  ],
+  "rms_residual": 0.0014503902892106597,
+  "T_left_arm_end_link_d405_color_optical": [
+    [
+      -0.000616356977,
+      -0.417391053766,
+      0.908726762201,
+      0.103035203491
+    ],
+    [
+      -0.99998892755,
+      -0.003982211553,
+      -0.002507342937,
+      0.011270244047
+    ],
+    [
+      0.004665284722,
+      -0.908718245787,
+      -0.417383977761,
+      0.095130819481
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "T_left_arm_base_board": [
+    [
+      -0.036967505945,
+      0.203976398213,
+      -0.978277584572,
+      -0.603724822285
+    ],
+    [
+      0.992792963396,
+      0.119170663169,
+      -0.012668262389,
+      -0.155344466153
+    ],
+    [
+      0.113997961983,
+      -0.971695416276,
+      -0.206911775044,
+      0.484388838322
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "created_at": "2026-08-12T19:55:02"
+}

@@ -33,11 +33,12 @@ MODULE_2_3 = (
     / "modules/module_2_left_inspect_apart/run_inspect_then_place.py"
 )
 MODULE_4_5 = (
-    ROOT / "modules/module_5_left_pick/run_head_judge_then_pick.py"
+    ROOT
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
 )
 MODULE_5_2 = (
     ROOT
-    / "modules/module_5_left_pick/module_5_2_handoff_prepare/main.py"
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
 )
 MODULE_7_8_1 = (
     ROOT

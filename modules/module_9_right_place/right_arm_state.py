@@ -119,7 +119,7 @@ def wait_for_right_joint_target(
             )
             return
         time.sleep(0.05)
-    raise TargetNotReached(
+    raise RuntimeError(
         f"{label}未在 {timeout_s:.1f}s 内物理到位并稳定："
         f"最大关节误差={last_error_deg:.3f}°，"
         f"最大关节速度={last_velocity_deg_s:.4f}°/s，"

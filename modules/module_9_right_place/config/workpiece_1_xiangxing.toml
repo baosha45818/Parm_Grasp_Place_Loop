@@ -1,0 +1,182 @@
+# 配置格式版本；Module 9 当前只接受版本 2。
+schema_version = 2
+# 工件编号；必须与外层 --workpiece 参数一致。
+workpiece_serial_number = 1
+# 右臂控制器 IP 地址。
+arm_host = "192.168.3.11"
+# 右腕力/扭矩传感器的控制器 IP 地址。
+force_sensor_host = "192.168.3.22"
+
+# 固定示教起点的右臂七轴关节角，单位：deg。
+initial_right_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
+# 单段连续搜索使用的世界坐标轴。
+search_axis = "x"
+# 单段连续搜索在该坐标轴上的运动方向。
+search_direction = "negative"
+
+# 单段连续搜索的运动学参数。
+[search_motion]
+# 搜索线速度，单位：mm/s。
+speed_mm_s = 15.0
+# 搜索线加速度，单位：mm/s²。
+accel_mm_s2 = 20.0
+
+# 搜索距离耗尽后的重试恢复参数。
+[retry]
+# 最多执行的搜索次数。
+max_attempts = 6
+# 每次失败后沿世界 Z+ 抬升的距离，单位：mm。
+lift_mm = 30.0
+# 失败恢复抬升的线速度，单位：mm/s。
+speed_mm_s = 10.0
+# 失败恢复抬升的线加速度，单位：mm/s²。
+accel_mm_s2 = 20.0
+
+# 搜索前接近运动统一使用世界坐标系。
+[pre_search]
+# 所有 pre_search.legs 的参考坐标系；当前仅支持 world。
+frame = "world"
+# 搜索前各接近段的线加速度，单位：mm/s²。
+leg_accel_mm_s2 = 20.0
+
+# 到达力基线点后的预压参数。
+[pre_search.press]
+# 预压所使用的世界坐标轴。
+axis = "z"
+# 预压沿该坐标轴的运动方向。
+direction = "negative"
+# 第一次搜索尝试的预压距离，单位：mm。
+first_attempt_mm = 1.0
+# 每次搜索距离耗尽后，下一次尝试额外增加的预压距离，单位：mm。
+retry_increment_mm = 1.5
+# 预压线速度，单位：mm/s。
+speed_mm_s = 1.0
+# 预压线加速度，单位：mm/s²。
+accel_mm_s2 = 10.0
+
+# 预压完成后采集右腕力/扭矩基线的参数。
+[pre_search.baseline]
+# 预压结束至开始采样的稳定等待时间，单位：s。
+settle_s = 0.5
+# 基线采样帧数量。
+samples = 20
+# 相邻基线采样帧之间的等待时间，单位：s。
+interval_s = 0.05
+
+# 从固定关节起点到力基线点的第 1 段运动。
+[[pre_search.legs]]
+# 用于日志和故障定位的运动段名称。
+name = "initial_descend"
+# 运动使用的世界坐标轴。
+axis = "z"
+# 运动方向。
+direction = "negative"
+# 运动距离，单位：mm。
+distance_mm = 10.0
+# 运动线速度，单位：mm/s。
+speed_mm_s = 25.0
+
+# 从初始下降位到第一洞上方的第 2 段运动。
+[[pre_search.legs]]
+# 用于日志和故障定位的运动段名称。
+name = "forward_to_first_hole"
+# 运动使用的世界坐标轴。
+axis = "x"
+# 运动方向。
+direction = "positive"
+# 运动距离，单位：mm。
+distance_mm = 142.0
+# 运动线速度，单位：mm/s。
+speed_mm_s = 25.0
+
+# 从第一洞上方到力基线采集高度的第 3 段运动。
+[[pre_search.legs]]
+# 用于日志和故障定位的运动段名称。
+name = "descend_to_force_baseline"
+# 运动使用的世界坐标轴。
+axis = "z"
+# 运动方向。
+direction = "negative"
+# 运动距离，单位：mm。
+distance_mm = 20.0
+# 运动线速度，单位：mm/s。
+speed_mm_s = 25.0
+
+# 第一洞确认后的第二洞路径配置。
+[second_hole]
+# 是否执行第二洞路径；只有一个洞的工件设为 false。
+enabled = true
+# 第一洞确认后沿世界 Z− 下压的距离，单位：mm。
+first_hole_settle_down_mm = 10.0
+# 第一洞下压完成后沿世界 Z+ 抬升的距离，单位：mm。
+first_hole_lift_mm = 40.0
+# 从第一洞到第二洞沿世界 Y+ 的偏移距离，单位：mm。
+y_offset_mm = 30.0
+# 进入第二洞沿世界 Z− 的下降距离，单位：mm。
+descend_mm = 48.0
+# 第二洞下降完成后沿世界 Z+ 抬升的距离，单位：mm。
+lift_after_second_hole_mm = 40.0
+# 第二洞完成后最终平移所使用的世界坐标轴。
+final_axis = "x"
+# 第二洞完成后最终平移方向。
+final_direction = "negative"
+# 第二洞完成后沿最终方向平移的距离，单位：mm。
+final_distance_mm = 110.0
+# 第二洞路径中抬升和 Y 平移的线速度，单位：mm/s。
+lateral_speed_mm_s = 10.0
+# 第二洞完成后最终平移的线速度，单位：mm/s。
+final_speed_mm_s = 25.0
+# 进入第二洞时沿世界 Z− 的线速度，单位：mm/s。
+descend_speed_mm_s = 5.0
+# 第二洞路径各段的线加速度，单位：mm/s²。
+linear_accel_mm_s2 = 20.0
+# 第二洞非下降段的断连恢复近目标阈值，单位：mm。
+near_target_mm = 2.0
+# 第二洞下降段的断连恢复近目标阈值，单位：mm。
+descend_near_target_mm = 3.0
+# 第二洞下降段断连恢复速度，单位：mm/s。
+descend_recovery_speed_mm_s = 3.0
+# 第一洞下压完成后的停留时间，单位：s。
+pause_after_first_down_s = 0.5
+# 第二洞下降完成后的停留时间，单位：s。
+pause_after_second_down_s = 0.5
+
+# 进洞后辅助动作参数；当前主流程未调用，仅保留为可配置策略。
+[post_entry]
+# 是否执行本段进洞后辅助动作；当前路径不使用。
+enabled = false
+# 沿搜索反方向的卸力距离，单位：mm；0 表示关闭。
+relief_mm = 0.0
+# 触发卸力所需的反向力阈值，单位：N；0 表示关闭。
+relief_opposing_force_n = 1.5
+# 卸力判定所需的连续力帧数量。
+relief_confirm_frames = 2
+# 卸力判定的观察帧数量。
+relief_observation_frames = 3
+# 卸力运动的线速度，单位：mm/s。
+relief_speed_mm_s = 1.0
+# 进洞后 Z−下降的最大距离，单位：mm；0 表示关闭。
+descend_mm = 10.0
+# 下降期间 raw Fx 上升停止阈值，单位：N；0 表示不启用。
+descend_fx_rise_n = 0.0
+# 进洞后下降的线速度，单位：mm/s。
+descend_speed_mm_s = 1.0
+# 进洞后辅助动作的线加速度，单位：mm/s²。
+linear_accel_mm_s2 = 20.0
+
+# 连续合力/合扭矩卸载进洞判据。
+[stop_conditions]
+# 进入卸载判据前所需的最小相对合力峰值，单位：N。
+entry_resultant_pre_force_n = 3.0
+# 进入卸载判据前所需的最小相对合扭矩峰值，单位：N*m。
+entry_resultant_pre_torque_nm = 0.6
+# 判定卸载后允许的最大相对合力，单位：N。
+entry_resultant_force_n = 2.0
+# 判定卸载后允许的最大相对合扭矩，单位：N*m。
+entry_resultant_torque_nm = 0.4
+# 从峰值到卸载状态所需的最小相对合力降幅，单位：N。
+entry_resultant_force_drop_n = 2.0
+# 从峰值到卸载状态所需的最小相对合扭矩降幅，单位：N*m。
+entry_resultant_torque_drop_nm = 0.3
+# 卸载状态必须连续保持的监测帧数；50 Hz 下 4 帧约为 80 ms。
+entry_resultant_release_frames = 4

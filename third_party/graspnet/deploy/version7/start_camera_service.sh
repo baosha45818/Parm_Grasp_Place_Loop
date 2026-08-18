@@ -8,6 +8,7 @@ JOBS_ROOT="${GRASPNET_V7_JOBS_ROOT:-$V7_DIR/jobs}"
 CAMERA_ARGS=(
   --socket-path "$SOCKET_PATH" --allow-root "$JOBS_ROOT"
   --d405-serial "${GRASPNET_V7_D405_SERIAL:-260322270600}"
+  --d405-fps "${GRASPNET_V7_D405_FPS:-30}"
   --femto-serial "${GRASPNET_V7_FEMTO_SERIAL:-CL8L56301LK}"
   --femto-warmup-frames "${GRASPNET_V7_FEMTO_WARMUP_FRAMES:-3}"
   --femto-request-flush-frames "${CAMERA_BROKER_FEMTO_REQUEST_FLUSH_FRAMES:-30}"

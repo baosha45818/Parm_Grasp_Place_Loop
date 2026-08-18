@@ -146,19 +146,6 @@ def _module_recovery(
                 "action": "清空缓冲区和本轮工件状态，从 Module 1 重新开始",
             },
         )
-    if reason_code == "MODULE_2_RETRY":
-        return (
-            {
-                "type": "recoverable_inspection_error",
-                "reason_code": reason_code,
-                "message": message,
-            },
-            {
-                "level": "PARTIAL_ROLLBACK",
-                "target_module": "module_2",
-                "action": "保持抓持和 graspup 交接状态，等待相机稳定后重新执行 Module 2",
-            },
-        )
     if reason_code == "NO_UNIQUE_REVERSE_GRASP":
         return (
             {

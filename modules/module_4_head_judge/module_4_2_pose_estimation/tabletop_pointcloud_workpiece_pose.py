@@ -37,6 +37,8 @@ from urllib.parse import urlparse
 
 MODULE_ROOT = Path(__file__).resolve().parent
 PARM_PROJECT_ROOT = MODULE_ROOT.parents[2]
+if str(PARM_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PARM_PROJECT_ROOT))
 RUNTIME_PYTHON = Path(os.environ.get(
     "POSE_ESTIMATION_PYTHON",
     str(PARM_PROJECT_ROOT / ".venv/bin/python"),
@@ -52,19 +54,16 @@ if Path(sys.executable).absolute() != RUNTIME_PYTHON.absolute():
 import cv2
 import numpy as np
 import open3d as o3d
+from tools.icp import full_6d_point_to_plane_icp
 
 # These helpers were previously imported from mask_workpiece_pose.py.  Keep a
 # local copy so this file can run as a standalone tabletop pose pipeline.
-# Head eye-to-hand calibration confirmed by the operator at the old teach
-# console display ``pitch=-45.0 deg, yaw=0.0 deg``.  That console uses SDK
-# 20260803, which negates pitch before it reaches the controller.  This pose
-# script uses SDK 20260811, whose direct command convention is +45 deg for
-# the identical physical low-head pose.  This is an SDK/body-base transform,
-# not the older planner-alignment file in this module's calibration directory.
-DEFAULT_CALIBRATION = MODULE_ROOT / "calibration/head_charuco_13x5_calibration_head.json"
-CALIBRATED_HEAD_PITCH_DEG = 45.0
+# Default to the legacy SDK-to-planner alignment calibration.  It is valid
+# only at this head observation pose in the current SDK command convention.
+DEFAULT_CALIBRATION = MODULE_ROOT / "calibration/sdk_base_to_planner_alignment.json"
+CALIBRATED_HEAD_PITCH_DEG = 38.5
 CALIBRATED_HEAD_YAW_DEG = 0.0
-CALIBRATED_TEACH_DISPLAY_PITCH_DEG = -45.0
+CALIBRATED_TEACH_DISPLAY_PITCH_DEG = 38.5
 DEFAULT_PLANE_Z_M = -0.391809
 
 # Report-only pose-confidence policy.  These defaults are deliberately kept
@@ -107,7 +106,7 @@ DEFAULT_WORKPIECE = "2"
 DEFAULT_STL, DEFAULT_SEMANTIC_CALIBRATION = WORKPIECE_ASSETS[DEFAULT_WORKPIECE]
 
 
-DEFAULT_HEAD_SERIAL = "261722072445"
+DEFAULT_HEAD_SERIAL = "261222076212"
 DEFAULT_CAPTURE_ROOT = PARM_PROJECT_ROOT / "output/module_4_2"
 SAM2_SOCKET = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_SOCKET",
@@ -117,11 +116,11 @@ SAM2_BIN = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_BIN",
     str(PARM_PROJECT_ROOT / "tool/sam2-service/.venv/bin/sam2-service"),
 ))
-# Trapezoidal tabletop region selected on workpiece_1 capture 379.  Vertices
-# are clockwise in the 1280x720 head RGB frame, and follow the table edges so
-# floor and surrounding hardware are not treated as possible workpieces.
+# Trapezoidal tabletop region marked by the operator on workpiece_1 capture
+# 584. Vertices are clockwise in the 1280x720 head RGB frame, and follow the
+# table edges so floor and surrounding hardware are not treated as workpieces.
 DEFAULT_TABLETOP_ROI_POLYGON_PX = np.asarray(
-    ((272, 213), (1072, 188), (1256, 685), (141, 697)), dtype=np.float64,
+    ((121, 156), (1252, 167), (1255, 684), (25, 679)), dtype=np.float64,
 )
 
 
@@ -356,10 +355,10 @@ def sample_stl_surface(path: Path, count: int, seed: int = 0) -> np.ndarray:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serial", default=DEFAULT_HEAD_SERIAL, help="head D435i serial number")
-    parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "192.168.3.22"))
+    parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "localhost"))
     parser.add_argument(
         "--head-pitch-deg", type=float, default=CALIBRATED_HEAD_PITCH_DEG,
-        help="capture pitch in this script's SDK convention; must remain +45 for the default calibration",
+        help="capture pitch in this script's SDK convention; must remain 38.5 for the default calibration",
     )
     parser.add_argument(
         "--head-yaw-deg", type=float, default=CALIBRATED_HEAD_YAW_DEG,
@@ -877,46 +876,6 @@ def fpfh_ransac_initial(source: np.ndarray, target: np.ndarray, voxel_m: float, 
     return np.asarray(result.transformation, dtype=np.float64)
 
 
-def full_6d_icp(source: np.ndarray, target: np.ndarray, initial: np.ndarray,
-                iterations: int, max_corr_m: float, workers: int = 16) -> tuple[np.ndarray, float, float]:
-    """Robust full-6DoF point-to-plane ICP against the observed RGB-D cloud.
-
-    Normals belong to ``target`` (the observed mask-local point cloud), which
-    makes each residual the CAD point's signed distance along the measured
-    surface normal.  The global FPFH/RANSAC initializer remains point-to-point;
-    only this local refinement changes to point-to-plane.
-    """
-    del workers  # Open3D owns nearest-neighbour parallelism for this solver.
-    source_cloud = o3d.geometry.PointCloud(
-        o3d.utility.Vector3dVector(np.asarray(source, dtype=np.float64))
-    )
-    target_cloud = o3d.geometry.PointCloud(
-        o3d.utility.Vector3dVector(np.asarray(target, dtype=np.float64))
-    )
-    # The observed cloud is already voxel-downsampled at 3 mm.  A radius at
-    # least twice the correspondence gate gives stable normals while retaining
-    # local workpiece geometry.
-    normal_radius_m = max(2.0 * max_corr_m, 0.008)
-    target_cloud.estimate_normals(
-        o3d.geometry.KDTreeSearchParamHybrid(radius=normal_radius_m, max_nn=40)
-    )
-    result = o3d.pipelines.registration.registration_icp(
-        source_cloud,
-        target_cloud,
-        max_corr_m,
-        np.asarray(initial, dtype=np.float64),
-        o3d.pipelines.registration.TransformationEstimationPointToPlane(
-            o3d.pipelines.registration.TukeyLoss(k=max_corr_m * 0.5)
-        ),
-        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=int(iterations)),
-    )
-    return (
-        np.asarray(result.transformation, dtype=np.float64),
-        float(result.inlier_rmse),
-        float(result.fitness),
-    )
-
-
 def semantic_half_turn_initials(initial: np.ndarray, stl_semantic: np.ndarray) -> list[tuple[str, np.ndarray]]:
     """Return the FPFH seed plus 180° semantic-frame alternatives.
 
@@ -1025,9 +984,10 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
     def refine(item: tuple[str, np.ndarray]) -> tuple[str, np.ndarray, float, float]:
         initialization, candidate = item
         candidate[:3, 3] = observed_center
-        transform, rmse, fitness = full_6d_icp(
-            cad, observed, candidate, args.icp_iters,
-            args.icp_max_corr_mm * 1e-3, args.icp_workers,
+        transform, rmse, fitness = full_6d_point_to_plane_icp(
+            cad, observed, candidate,
+            max_iterations=args.icp_iters,
+            max_corr_m=args.icp_max_corr_mm * 1e-3,
         )
         return initialization, transform, rmse, fitness
 

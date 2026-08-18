@@ -1,0 +1,200 @@
+{
+  "camera_name": "wrist1",
+  "camera_model": "Intel RealSense D405",
+  "calibration_type": "eye_in_hand",
+  "board": {
+    "inner_cols": 11,
+    "inner_rows": 8,
+    "square_size_m": 0.03,
+    "top_left_color": "white",
+    "corner_colors": {
+      "top_left": "white",
+      "bottom_left": "white",
+      "top_right": "black"
+    }
+  },
+  "sample_count": 13,
+  "input_sample_count": 15,
+  "outlier_rejection": {
+    "enabled": true,
+    "max_translation_mm": 2.0,
+    "max_rotation_deg": 0.5,
+    "excluded_samples": [
+      {
+        "index": 9,
+        "translation_mm": 2.9180974576914958,
+        "rotation_deg": 0.7729035239477785,
+        "reprojection_rms_px": 1.650387059889213
+      },
+      {
+        "index": 13,
+        "translation_mm": 2.1845628943992907,
+        "rotation_deg": 0.6512260751509248,
+        "reprojection_rms_px": 0.1539341562021634
+      }
+    ],
+    "used_sample_residuals": [
+      {
+        "index": 0,
+        "translation_mm": 0.7689038300448358,
+        "rotation_deg": 0.1958755598431021,
+        "reprojection_rms_px": 0.10035582033589298
+      },
+      {
+        "index": 1,
+        "translation_mm": 0.798417080019288,
+        "rotation_deg": 0.15949701907949576,
+        "reprojection_rms_px": 0.10632277586716808
+      },
+      {
+        "index": 2,
+        "translation_mm": 0.8645213889902366,
+        "rotation_deg": 0.19029843239300867,
+        "reprojection_rms_px": 0.16312726272420325
+      },
+      {
+        "index": 3,
+        "translation_mm": 0.5940233853098641,
+        "rotation_deg": 0.09871720866219841,
+        "reprojection_rms_px": 0.10490609567396231
+      },
+      {
+        "index": 4,
+        "translation_mm": 0.24092598376710228,
+        "rotation_deg": 0.11051742093544056,
+        "reprojection_rms_px": 0.07640520139832582
+      },
+      {
+        "index": 5,
+        "translation_mm": 0.7574732737584388,
+        "rotation_deg": 0.2698031128197624,
+        "reprojection_rms_px": 0.09138170524446715
+      },
+      {
+        "index": 6,
+        "translation_mm": 0.652543218677148,
+        "rotation_deg": 0.07716004723763206,
+        "reprojection_rms_px": 0.08319040180791146
+      },
+      {
+        "index": 7,
+        "translation_mm": 0.5814111101002697,
+        "rotation_deg": 0.050958556966409656,
+        "reprojection_rms_px": 0.08339935013529493
+      },
+      {
+        "index": 8,
+        "translation_mm": 0.3000956547159871,
+        "rotation_deg": 0.09105478366145665,
+        "reprojection_rms_px": 0.12767966051221266
+      },
+      {
+        "index": 10,
+        "translation_mm": 0.5022516404704414,
+        "rotation_deg": 0.10798756738825752,
+        "reprojection_rms_px": 0.1306324819417545
+      },
+      {
+        "index": 11,
+        "translation_mm": 0.4157327355137024,
+        "rotation_deg": 0.08133154527894544,
+        "reprojection_rms_px": 0.08126016634896302
+      },
+      {
+        "index": 12,
+        "translation_mm": 0.6850645451223161,
+        "rotation_deg": 0.10747185402762324,
+        "reprojection_rms_px": 0.1318439802459422
+      },
+      {
+        "index": 14,
+        "translation_mm": 0.7149007652897428,
+        "rotation_deg": 0.46283851146464183,
+        "reprojection_rms_px": 0.14085650431163707
+      }
+    ]
+  },
+  "camera_matrix": [
+    [
+      392.7774353027344,
+      0.0,
+      317.8187561035156
+    ],
+    [
+      0.0,
+      391.9205322265625,
+      243.99514770507812
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_coeffs": [
+    -0.054567813873291016,
+    0.0582117922604084,
+    0.0005817978526465595,
+    0.000658431847114116,
+    -0.019074805080890656
+  ],
+  "image_size": [
+    640,
+    480
+  ],
+  "robot_pose_source": "parm_sdk state.<arm>.eef_pose",
+  "rms_residual": 0.0013588370715819195,
+  "T_eef_wrist1": [
+    [
+      0.001868098101,
+      -0.33503553368,
+      0.942203641142,
+      0.121438620182
+    ],
+    [
+      -0.999976837962,
+      -0.006792375467,
+      -0.00043263716,
+      0.007636320271
+    ],
+    [
+      0.006544749719,
+      -0.942181009577,
+      -0.335040462398,
+      0.097699547006
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "T_base_board": [
+    [
+      0.996589254101,
+      0.08103775597,
+      -0.015580138587,
+      -0.196696409368
+    ],
+    [
+      0.081213013706,
+      -0.996636451579,
+      0.010964934476,
+      0.754056757958
+    ],
+    [
+      -0.014639160352,
+      -0.012192845879,
+      -0.999818498275,
+      -0.451548587455
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "created_at": "2026-07-10T16:07:54"
+}

@@ -1,23 +1,41 @@
-# 模块 5：Left Pick
+# 模块 5：左手 Buffer 抓取
+
+Module 5 只消费 Module 4-1 已发布的正反状态和 ICP 工件 TF，不采集图像、不运行 ICP。
+
+## 两个业务分支
+
+- `front_pick_to_graspuptop/`：唯一 `FRONT` 工件。左手按 ICP TF 正面抓取并抬到
+  `graspuptop`；总控随后调用 Module 3，将已验证持件放到中间目标位置。
+- `reverse_pick_to_handoff/`：唯一 `BACK` 工件。左手按同一份 ICP TF 反面抓取，
+  再由本分支的 handoff 模块送到双臂交接位置。
+
+`buffer_pick_router.py` 是唯一的 Module 4-1 → Module 5 路由契约：
+`FRONT_TO_INTERMEDIATE`、`BACK_TO_HANDOFF` 或安全拒绝的 `OTHER`。
+`OTHER` 由总控处理重试与人工暂停，Module 5 不得猜测抓取。
 
 ## 职责
 
 根据 Module 4 Head Judge 给出的桌面工件状态，控制左手抓起指定工件。
 
-模块化总控通过 `run_head_judge_then_pick.py` 串联 Module 4 和 Module 5：
+模块化总控通过 Module 4-1 的 JSON 报告和 `buffer_pick_router.py` 串联 Module 4
+与 Module 5。Module 4 独占云台 RGB-D/SAM2/ICP，并一次发布正反与工件 TF；
+Module 5 绝不再次采集或 ICP：
 
-1. Module 4-1 控制云台、采集头部 RGB-D，并预测唯一反抓点。
-2. Module 4 复用同一次采集确认桌面工件为 `BACK`。
-3. Module 5-1 只消费 prediction JSON，进入左臂预备位并执行抓取。
-Module 4 独占云台移动与 RGB-D 采集，并将 `capture_dir` 传给 Module 5-1。
-因此该路径中的 Module 5-1 只复用已有图像做反抓定位，不会再次移动云台或
-重新拍摄。直接运行 5-1 的兼容入口时，仍可自行采集，供旧总控保持原行为。
+1. `FRONT_TO_INTERMEDIATE`：`front_pick_to_graspuptop/main.py` 消费正面 ICP TF，左手
+   正面抓取后由 Module 3 送到中间 Buffer。
+2. `BACK_TO_HANDOFF`：工件 1 由 `reverse_pick_to_handoff/main.py`、工件 2 由凸耳
+   适配器消费同一份 Module 4-1 TF，随后 Module 5-2 送到双臂交接位。
+3. `OTHER`：不允许抓取；总控重新调用 Module 4-1。默认额外重试 2 次，仍无法
+   判断时等待双臂完成当前任务并由人工处理后重新检测。
+
+总控参数：`--buffer-check-mode xiangxin|gzhu` 选择对应相机标定，
+`--module4-uncertain-retries N` 设置完整 Module 4-1 调用的额外重试次数。
+Module 4-1 自己每次调用最多四次采集的策略不变。
 
 ## 子模块
 
-- `module_5_1_reverse_grasp`：已迁入并验证的桌面工件反面抓取流程。
-- `module_5_2_handoff_prepare`：左手持件到观察位、读取 Module 4-3 的
-  D435/SAM2/ICP 结果，并移动到双臂交接位。
+- `buffer_pick_router.py`：Module 4-1 → Module 5 的唯一状态/TF 路由契约。
+- `reverse_pick_to_handoff/handoff/`：左手持件到观察位、复检并移动到双臂交接位。
 
 Module 5-1 完成桌面反抓；Module 5-2 保持左夹爪夹紧，将工件送到右手
 可接取的位置并输出本轮 ICP `result.json`。右臂接取属于 Module 8-2。

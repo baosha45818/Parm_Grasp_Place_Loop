@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--d405-serial", default=DEFAULT_D405_SERIAL)
     p.add_argument("--d405-width", type=int, default=640)
     p.add_argument("--d405-height", type=int, default=480)
+    p.add_argument("--d405-fps", type=int, choices=(5, 15, 30), default=30)
     p.add_argument("--d405-postprocess", action="store_true", default=True)
     p.add_argument("--no-d405-postprocess", dest="d405_postprocess", action="store_false")
     p.add_argument("--d405-hole-filling", action="store_true")
@@ -92,7 +93,8 @@ class CameraEngine:
         self.femto_lock = threading.Lock()
         self.stack = ExitStack()
         self.d405 = self.stack.enter_context(D405Camera(serial=args.d405_serial, width=args.d405_width,
-                                                        height=args.d405_height, enable_postprocess=args.d405_postprocess,
+                                                        height=args.d405_height, fps=args.d405_fps,
+                                                        enable_postprocess=args.d405_postprocess,
                                                         enable_hole_filling=args.d405_hole_filling))
         self.femto = None
         if not args.disable_femto:
@@ -116,7 +118,8 @@ class CameraEngine:
         status = {"arm": {"host": self.args.arm_host, "id": self.args.arm_id,
                           "legacy_eef_pose_enabled": self.arm is not None},
                   "d405": {"serial": self.args.d405_serial, "width": self.args.d405_width,
-                            "height": self.args.d405_height, "postprocess": self.args.d405_postprocess,
+                            "height": self.args.d405_height, "fps": self.args.d405_fps,
+                            "postprocess": self.args.d405_postprocess,
                             "hole_filling": self.args.d405_hole_filling}}
         if self.femto is not None:
             status["femto_bolt"] = {"serial": self.args.femto_serial,

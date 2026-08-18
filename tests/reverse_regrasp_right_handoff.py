@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-RUNTIME_PYTHON = Path("/home/dainanjun/Public/data_collector/.venv/bin/python3")
+RUNTIME_PYTHON = ROOT / ".venv/bin/python"
 REGRASP_DIR = Path("/home/dainanjun/shurenbin/desktop_grasp")
 POSE_OUTPUT_DIR = ROOT / "output/reversed_head_pose_d435"
 ALIGNMENT = Path(

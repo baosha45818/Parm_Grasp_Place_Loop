@@ -1,9 +1,4 @@
-"""模块 3 的共享运动参数。
-
-工件1和工件2的正反面放置参数分别在
-``workpiece_1_placement_parameters.toml`` 与
-``workpiece_2_placement_parameters.toml``。
-"""
+"""Module3 固定 Buffer 放置流程使用的运动常量。"""
 
 # 左臂回程位置。
 GRASPUP_JOINTS_DEG = [-4.081, -52.722, 3.637, 100.478, -10.051, 53.969, 8.843]
@@ -19,5 +14,5 @@ GRASPUP_ABOVE_JOINTS_DEG = [
 GRASPUP_ABOVE_PLANNING_TIMEOUT_S = 6.0
 DISCARD_BELOW_GRASPUP_M = 0.05
 
-# 从 graspup 上方执行离线规划时的上移量、等待上限及无可行解时的丢弃下移量。
+# 上移量和无可行 Buffer 轨迹时的安全丢弃参数。
 GRASPUP_LIFT_M = 0.10

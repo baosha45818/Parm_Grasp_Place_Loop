@@ -25,6 +25,12 @@ if str(LOOP_ROOT) not in sys.path:
 from loop_config import LoopConfig
 from loop_types import ResultStatus
 from modules.module_status import report as report_module_status
+from modules.module_5_left_pick.buffer_pick_router import (
+    BACK_TO_HANDOFF,
+    FRONT_TO_INTERMEDIATE,
+    OTHER as MODULE5_OTHER,
+    route_result_file,
+)
 from tool.workpiece_timer import (
     WORKPIECE_ENV,
     begin as begin_workpiece_timer,
@@ -32,7 +38,7 @@ from tool.workpiece_timer import (
     module_timer,
 )
 from tool.planner_runtime import PlannerRuntime
-PYTHON = Path("/home/dainanjun/Public/data_collector/.venv/bin/python")
+PYTHON = LOOP_ROOT / ".venv/bin/python"
 GRASPNET_FLOW_WORKDIR = Path("/home/dainanjun/qiuguolin/graspnet")
 GRASPNET_FLOW = GRASPNET_FLOW_WORKDIR / "deploy/version7/run_grasp_to_module2.sh"
 APART_INSPECT_PLACE_FLOW = (
@@ -42,19 +48,25 @@ APART_INSPECT_PLACE_FLOW = (
 LEFT_FLOW_SCRIPTS = {
     "apart": APART_INSPECT_PLACE_FLOW,
 }
-LEFT_PICK = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/main.py"
-FRONT_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/front_buffer_regrasp.py"
-REVERSE_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/reverse_buffer_regrasp.py"
+LEFT_PICK = LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
+FRONT_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/front_pick_to_graspuptop/main.py"
+REVERSE_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
+WORKPIECE_2_REVERSE_BUFFER_REGRASP = (
+    LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/"
+    "grasp/workpiece_2/run_full_reverse_grasp.sh"
+)
 LEFT_PLACE = LOOP_ROOT / "modules/module_3_left_place/standalone_left_place.py"
 HEAD_MOTION = LOOP_ROOT / "tool/move_head_gimbal.py"
 # Buffer 落桌后的正反面复检专用观察角；不要复用 Module 5 反抓标定角，
 # 后者仍由各自模块管理。
 BUFFER_FACE_CHECK_HEAD_PITCH_DEG = 45.0
 BUFFER_FACE_CHECK_HEAD_YAW_DEG = 0.0
-BUFFER_FACE_CHECK = Path("/home/dainanjun/qiuguolin/graspnet/buffer_check/check_buffer_face.py")
+BUFFER_FACE_CHECK = (
+    LOOP_ROOT / "modules/module_4_head_judge/module_4_1_buffer_state_estimation/check_buffer_face.py"
+)
 LEFT_HANDOFF_PREP = (
     LOOP_ROOT
-    / "modules/module_5_left_pick/module_5_2_handoff_prepare/main.py"
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
 )
 RIGHT_LEFT_HANDOFF = (
     LOOP_ROOT
@@ -144,9 +156,7 @@ def _apply_modular_entries_for_spawned_worker() -> None:
     if os.environ.get("PARM_MODULAR_LOOP_ENTRIES") != "1":
         return
     module_root = LOOP_ROOT / "modules"
-    right_place_wiggle = (
-        module_root / "module_9_right_place/place_hole_a_wiggle_new_config.py"
-    )
+    right_place_wiggle = module_root / "module_9_right_place/place_hole_wiggle.py"
     globals().update({
         "PYTHON": LOOP_ROOT / ".venv/bin/python",
         "GRASPNET_FLOW_WORKDIR": (
@@ -160,9 +170,12 @@ def _apply_modular_entries_for_spawned_worker() -> None:
         "LEFT_FLOW_SCRIPTS": {
             "apart": module_root / "module_2_left_inspect_apart/run_inspect_then_place.py",
         },
-        "LEFT_PICK": module_root / "module_5_left_pick/run_head_judge_then_pick.py",
+        "LEFT_PICK": (
+            module_root
+            / "module_5_left_pick/reverse_pick_to_handoff/main.py"
+        ),
         "LEFT_HANDOFF_PREP": (
-            module_root / "module_5_left_pick/module_5_2_handoff_prepare/main.py"
+            module_root / "module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
         ),
         "RIGHT_PUSH_TO_Q1": (
             MODULAR_RIGHT_BUFFER_PIPELINE
@@ -213,6 +226,15 @@ def parse_args() -> argparse.Namespace:
         "--front-regrasp-descent-distance-m", type=float, default=0.025,
         help="正面桌面重抓从预抓位 LIN 下移距离，默认0.02m",
     )
+    parser.add_argument(
+        "--buffer-check-mode", choices=("xiangxin", "gzhu"),
+        default=os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin"),
+        help="Module 4-1 的相机序列号/手眼标定部署模式",
+    )
+    parser.add_argument(
+        "--module4-uncertain-retries", type=int, default=2,
+        help="Module 4-1 返回 UNCERTAIN/OTHER 后的整轮额外重试次数，默认2；每轮仍保留 Module 4-1 自己最多4次采集",
+    )
     parser.add_argument("--require-confirmation", action="store_true",
                         help="右臂交接及最终放置也逐步要求输入 y；默认沿用现有自动交接")
     parser.add_argument("--runtime-dir", type=Path,
@@ -223,6 +245,8 @@ def parse_args() -> argparse.Namespace:
             "--front-regrasp-descent-distance-m 必须在 "
             "(0, --front-regrasp-pregrasp-height-m] m 内"
         )
+    if args.module4_uncertain_retries < 0:
+        parser.error("--module4-uncertain-retries 必须非负")
     return args
 
 
@@ -629,7 +653,11 @@ def run_command(
 def check_reversed_workpiece_on_table(
     args: argparse.Namespace, stop_event: mp.Event, cycle_dir: Path,
 ) -> tuple[str, Path]:
-    """在反面放桌后复用 Module 5 的 ICP，返回可靠 FRONT/BACK 判定。"""
+    """调用 Module 4-1，交由 Module 5 路由其正反+ICP TF 结果。
+
+    ``module4_uncertain_retries`` 是完整 Module 4-1 调用的额外次数；不改变
+    Module 4-1 单次调用内部的采集上限（默认最多4次）。
+    """
     run_command(
         [
             str(PYTHON), str(HEAD_MOTION), "--execute", "--host", args.head_host,
@@ -640,33 +668,85 @@ def check_reversed_workpiece_on_table(
         label="Buffer Check 头部观察位",
     )
     result_file = cycle_dir / "buffer_face_check.json"
-    exit_code = run_command(
-        [
-            str(PYTHON), str(BUFFER_FACE_CHECK), "--result-file", str(result_file),
-        ],
-        cwd=BUFFER_FACE_CHECK.parent, stop_event=stop_event, arm_host=args.arm_host,
-        label="Buffer Check 正反面 ICP 复检",
-        recoverable_exit_codes=frozenset({
-            BUFFER_FACE_BACK_EXIT_CODE,
-            BUFFER_FACE_UNCERTAIN_EXIT_CODE,
-        }),
-    )
-    if not result_file.is_file():
-        raise RuntimeError("Buffer Check 结束但未发布本轮结果文件")
-    payload = json.loads(result_file.read_text(encoding="utf-8"))
-    decision = str(payload.get("decision") or "")
-    expected_exit = {
-        "FRONT": 0,
-        "BACK": BUFFER_FACE_BACK_EXIT_CODE,
-        "UNCERTAIN": BUFFER_FACE_UNCERTAIN_EXIT_CODE,
-    }.get(decision)
-    if expected_exit is None or exit_code != expected_exit:
-        raise RuntimeError(
-            "Buffer Check 退出码与结果不一致："
-            f"exit={exit_code}, decision={decision}, payload={payload}"
+    for attempt in range(args.module4_uncertain_retries + 1):
+        exit_code = run_command(
+            [
+                str(PYTHON), str(BUFFER_FACE_CHECK),
+                "--workpiece", os.environ.get("PARM_LOOP_WORKPIECE", "1"),
+                "--mode", args.buffer_check_mode,
+                "--result-file", str(result_file),
+            ],
+            cwd=BUFFER_FACE_CHECK.parent, stop_event=stop_event, arm_host=args.arm_host,
+            label=f"Module 4-1 正反面+ICP 检测（{attempt + 1}/{args.module4_uncertain_retries + 1}）",
+            recoverable_exit_codes=frozenset({
+                BUFFER_FACE_BACK_EXIT_CODE,
+                BUFFER_FACE_UNCERTAIN_EXIT_CODE,
+            }),
         )
-    print(f"[left] Buffer Check 判定={decision}；结果={result_file}", flush=True)
-    return decision, result_file
+        if not result_file.is_file():
+            raise RuntimeError("Module 4-1 结束但未发布本轮结果文件")
+        branch, reason = route_result_file(result_file)
+        expected_exit = {
+            FRONT_TO_INTERMEDIATE: 0,
+            BACK_TO_HANDOFF: BUFFER_FACE_BACK_EXIT_CODE,
+            MODULE5_OTHER: BUFFER_FACE_UNCERTAIN_EXIT_CODE,
+        }[branch]
+        if exit_code != expected_exit:
+            raise RuntimeError(
+                "Module 4-1 退出码与 Module 5 路由不一致："
+                f"exit={exit_code}, branch={branch}, reason={reason}"
+            )
+        if branch == FRONT_TO_INTERMEDIATE:
+            print(f"[left] Module 5 路由=正面抓取→中间区；结果={result_file}", flush=True)
+            return "FRONT", result_file
+        if branch == BACK_TO_HANDOFF:
+            print(f"[left] Module 5 路由=反面抓取→交接位；结果={result_file}", flush=True)
+            return "BACK", result_file
+        if attempt < args.module4_uncertain_retries:
+            report_module_status(
+                "module_4_head_judge", ResultStatus.RETRY,
+                f"Module 4-1 返回 OTHER；重试 {attempt + 1}/{args.module4_uncertain_retries}",
+                reason_code="BUFFER_ORIENTATION_UNCERTAIN",
+            )
+            print(f"[left] Module 4-1 判定不可靠：{reason}；重新采集检测。", flush=True)
+            continue
+        print(f"[left] Module 4-1 重试耗尽：{reason}", flush=True)
+        return "UNCERTAIN", result_file
+    raise AssertionError("unreachable")
+
+
+def resolve_buffer_decision(
+    args: argparse.Namespace, stop_event: mp.Event, cycle_dir: Path,
+    operator_pause_requested: mp.Event, left_pause_ready: mp.Event,
+    operator_resume: mp.Event,
+) -> tuple[str, Path]:
+    """Never guess an OTHER result: wait for the supervisor's operator resume."""
+    while not stop_event.is_set():
+        decision, result_file = check_reversed_workpiece_on_table(
+            args, stop_event, cycle_dir
+        )
+        if decision != "UNCERTAIN":
+            return decision, result_file
+        report_module_status(
+            "module_4_head_judge", ResultStatus.RETRY,
+            "Module 4-1 多轮检测仍无法判定；等待双臂完成当前任务及人工处理",
+            reason_code="BUFFER_ORIENTATION_OPERATOR_REQUIRED",
+        )
+        operator_resume.clear()
+        left_pause_ready.set()
+        operator_pause_requested.set()
+        print(
+            "[left] Module 4-1 无法判断正反；已停止启动新左臂动作，"
+            "等待总控确认双臂安全后人工处理。",
+            flush=True,
+        )
+        while not stop_event.is_set() and not operator_resume.wait(0.2):
+            pass
+        left_pause_ready.clear()
+        operator_pause_requested.clear()
+        if not stop_event.is_set():
+            print("[left] 收到人工处理完成信号；从 Module 4-1 重新检测。", flush=True)
+    raise InterruptedError("等待人工处理期间收到停止请求")
 
 
 def regrasp_front_and_place_to_left_buffer(
@@ -1055,6 +1135,8 @@ def left_worker(
     args: argparse.Namespace, buffer_state: mp.Value, stop_event: mp.Event,
     fault_queue: mp.Queue, runtime_dir: Path, left_done: mp.Event,
     handoff_left_clear: mp.Event, left_needs_graspup: mp.Event,
+    operator_pause_requested: mp.Event, left_pause_ready: mp.Event,
+    operator_resume: mp.Event,
 ) -> None:
     try:
         completed = 0
@@ -1172,8 +1254,9 @@ def left_worker(
             # 反面或 direct 放置都不能预先确认桌面朝向。先在与 Module 5-1
             # 相同的头部观察位复用 SAM2/CAD-ICP 复检：正面则重新抓取并回
             # 既有左侧正面 Buffer 位；反面才进入原反抓/交接链。
-            decision, _ = check_reversed_workpiece_on_table(
-                args, stop_event, cycle_dir
+            decision, _ = resolve_buffer_decision(
+                args, stop_event, cycle_dir, operator_pause_requested,
+                left_pause_ready, operator_resume,
             )
             if decision == "UNCERTAIN":
                 complete_workpiece_timer(
@@ -1228,8 +1311,9 @@ def left_worker(
                         "重新执行 Buffer Check/ICP 后再决定正面重抓或反抓。",
                         flush=True,
                     )
-                    decision, _ = check_reversed_workpiece_on_table(
-                        args, stop_event, cycle_dir
+                    decision, _ = resolve_buffer_decision(
+                        args, stop_event, cycle_dir, operator_pause_requested,
+                        left_pause_ready, operator_resume,
                     )
                 if stop_event.is_set():
                     return
@@ -1284,14 +1368,25 @@ def left_worker(
                 # Buffer Check and its ICP ran at the current 45-degree head
                 # observation pose.  Always use its most recent accepted
                 # reverse registration; Module 5-1 is not a fallback here.
-                reverse_command = [
-                    str(PYTHON), str(REVERSE_BUFFER_REGRASP), "--execute",
-                    "--buffer-check-result", str(cycle_dir / "buffer_face_check.json"),
-                    "--planner-host", args.planner_host,
-                    "--arm-host", args.arm_host,
-                    "--gripper-host", args.gripper_host,
-                    "--speed", str(args.prepare_speed),
-                ]
+                module4_result = cycle_dir / "buffer_face_check.json"
+                if os.environ.get("PARM_LOOP_WORKPIECE", "1") == "2":
+                    # 工件2凸耳反抓适配器直接消费同一份 Module 4-1 TF，绝不再
+                    # 采集或运行第二次 ICP。
+                    reverse_command = [
+                        "bash", str(WORKPIECE_2_REVERSE_BUFFER_REGRASP),
+                        "--module4-result", str(module4_result),
+                        "--run-name", f"buffer_workpiece2_{time.time_ns()}",
+                        "--execute",
+                    ]
+                else:
+                    reverse_command = [
+                        str(PYTHON), str(REVERSE_BUFFER_REGRASP), "--execute",
+                        "--buffer-check-result", str(module4_result),
+                        "--planner-host", args.planner_host,
+                        "--arm-host", args.arm_host,
+                        "--gripper-host", args.gripper_host,
+                        "--speed", str(args.prepare_speed),
+                    ]
                 exit_code = run_command(
                     reverse_command,
                     cwd=LOOP_ROOT, stop_event=stop_event,
@@ -1309,8 +1404,9 @@ def left_worker(
                     )
                     if stop_event.wait(0.2):
                         return
-                    decision, _ = check_reversed_workpiece_on_table(
-                        args, stop_event, cycle_dir
+                    decision, _ = resolve_buffer_decision(
+                        args, stop_event, cycle_dir, operator_pause_requested,
+                        left_pause_ready, operator_resume,
                     )
                     if decision == "BACK":
                         if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
@@ -1384,8 +1480,9 @@ def left_worker(
                 )
                 if stop_event.wait(0.2):
                     return
-                decision, _ = check_reversed_workpiece_on_table(
-                    args, stop_event, cycle_dir
+                decision, _ = resolve_buffer_decision(
+                    args, stop_event, cycle_dir, operator_pause_requested,
+                    left_pause_ready, operator_resume,
                 )
                 if decision == "BACK":
                     if reverse_attempt >= MAX_REVERSE_TABLE_GRASP_ATTEMPTS:
@@ -1990,7 +2087,7 @@ def main() -> None:
     for path in (
                  PYTHON, GRASPNET_FLOW, selected_left_flow, LEFT_PICK,
                  FRONT_BUFFER_REGRASP, REVERSE_BUFFER_REGRASP, LEFT_PLACE, HEAD_MOTION,
-                 BUFFER_FACE_CHECK,
+                 WORKPIECE_2_REVERSE_BUFFER_REGRASP, BUFFER_FACE_CHECK,
                  LEFT_HANDOFF_PREP, RIGHT_LEFT_HANDOFF,
                  RIGHT_FINISH, RIGHT_PUSH_TO_Q1, RIGHT_PLACE_WIGGLE,
                  args.right_idle_pose):
@@ -2038,6 +2135,11 @@ def main() -> None:
     handoff_left_clear = context.Event()
     handoff_left_clear.set()
     left_needs_graspup = context.Event()
+    # Module 4-1 穷尽自动重试后，左 worker 在安全观察位暂停；主进程等待右臂
+    # 结束已经启动的任务，再由控制台人工确认重新从 Module 4-1 检测。
+    operator_pause_requested = context.Event()
+    left_pause_ready = context.Event()
+    operator_resume = context.Event()
     right_servo_active = context.Value("b", False)
     # 准备阶段已经验证右臂位于 Idle；仅在 --left-cycle-limit 收尾时使用，
     # 防止 buffer 已提前释放但右臂仍在放置时主进程提前退出。
@@ -2047,7 +2149,8 @@ def main() -> None:
         target=left_worker, name="left-loop",
         args=(
             args, buffer_state, stop_event, fault_queue, runtime_dir, left_done,
-            handoff_left_clear, left_needs_graspup,
+            handoff_left_clear, left_needs_graspup, operator_pause_requested,
+            left_pause_ready, operator_resume,
         ),
     )
     right = None
@@ -2072,7 +2175,34 @@ def main() -> None:
     if right is not None:
         right.start()
     try:
+        operator_release_sent = False
         while left.is_alive() or (right is not None and right.is_alive()):
+            if operator_pause_requested.is_set():
+                if not operator_release_sent:
+                    # ``right_idle_event`` only becomes set after any already
+                    # running right-arm branch has completed and returned Idle.
+                    # No new right task can start here: the unclassified item
+                    # is deliberately not published to the Buffer state.
+                    if not left_pause_ready.is_set() or (
+                        right is not None and not right_idle_event.is_set()
+                    ):
+                        time.sleep(0.2)
+                        continue
+                    print(
+                        "\n[loop] Module 4-1 连续检测仍无法判断正反。"
+                        "双臂已完成各自当前任务并处于安全等待；请人工处理 Buffer 工件。"
+                        "处理完成后按 Enter，从 Module 4-1 重新检测。",
+                        flush=True,
+                    )
+                    try:
+                        input("[loop] 人工处理完成，按 Enter 重试 Module 4-1: ")
+                    except EOFError as exc:
+                        raise RuntimeError("无法读取人工处理确认；为安全起见不继续运行") from exc
+                    operator_resume.set()
+                    operator_release_sent = True
+                time.sleep(0.1)
+                continue
+            operator_release_sent = False
             if args.left_only and left_done.is_set():
                 print("[loop] 单左臂成功周期完成；右臂未启动。", flush=True)
                 break

@@ -296,7 +296,7 @@ def move_wiggle_quick(
 
 def pre_search_approach_leg(
     session: PlacementSession, sdk: object, move_with_recovery: object,
-    label: str, axis: int, distance_mm: float,
+    label: str, axis: int, distance_mm: float, speed_mm_s: float,
 ) -> None:
     actual = current_pose(session.arm, 2)
     start = actual[:3] + rotvec_to_rpy(actual[3:])
@@ -307,12 +307,12 @@ def pre_search_approach_leg(
     print(
         f"搜索前接近 {label}：沿世界 {axis_name}{direction} "
         f"{abs(distance_mm):.1f}mm，"
-        f"{session.args.pre_search_approach_speed_mm_s:.1f}mm/s。"
+        f"{speed_mm_s:.1f}mm/s。"
     )
     session.log_event(
         "pre_search_approach_leg_start", label=label, axis=axis_name,
         distance_mm=distance_mm,
-        speed_mm_s=session.args.pre_search_approach_speed_mm_s,
+        speed_mm_s=speed_mm_s,
         start_xyz_rpy=start, target_xyz_rpy=target,
         force_monitoring_enabled=False,
     )
@@ -338,8 +338,8 @@ def pre_search_approach_leg(
     move_with_recovery(
         session, sdk, move_continuous_linear_step,
         f"pre_search_{label}", start, target,
-        linear_speed_mps=session.args.pre_search_approach_speed_mm_s / 1000.0,
-        linear_accel_mps2=0.02, initial_speed_mps=0.0,
+        linear_speed_mps=speed_mm_s / 1000.0,
+        linear_accel_mps2=session.args.pre_search_leg_accel_mm_s2 / 1000.0, initial_speed_mps=0.0,
         push_diagnostic=push_diagnostic,
         decelerate_to_stop=True,
         confirm_physical_endpoint=True,

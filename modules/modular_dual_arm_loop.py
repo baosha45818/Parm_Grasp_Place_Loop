@@ -33,11 +33,12 @@ MODULE_2_3 = (
     / "modules/module_2_left_inspect_apart/run_inspect_then_place.py"
 )
 MODULE_4_5 = (
-    ROOT / "modules/module_5_left_pick/run_head_judge_then_pick.py"
+    ROOT
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
 )
 MODULE_5_2 = (
     ROOT
-    / "modules/module_5_left_pick/module_5_2_handoff_prepare/main.py"
+    / "modules/module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
 )
 MODULE_7_8_1 = (
     ROOT
@@ -48,7 +49,7 @@ MODULE_8_2 = (
     ROOT
     / "modules/module_8_right_grasp/module_8_2_left_handoff/main.py"
 )
-MODULE_9 = ROOT / "modules/module_9_right_place/place_hole_a_wiggle_new_config.py"
+MODULE_9 = ROOT / "modules/module_9_right_place/place_hole_wiggle.py"
 MODULE_10 = ROOT / "modules/module_10_right_idle/main.py"
 RIGHT_IDLE_POSE = (
     ROOT / "modules/module_10_right_idle/right_idle_pose.json"
@@ -347,7 +348,7 @@ def configure_module_entries(scheduler) -> None:
     # 旧模块目录和旧小总控保留，但不再由模块化大总控调用。
     scheduler.RIGHT_PUSH_TO_Q1 = MODULE_7_8_1
     scheduler.RIGHT_LEFT_HANDOFF = MODULE_8_2
-    # Module 9 由统一入口按 --workpiece 读取对应 JSON profile。
+    # Module 9 由统一入口按 --workpiece 读取对应 TOML profile。
     scheduler.RIGHT_PLACE_WIGGLE = MODULE_9
     scheduler.RIGHT_FINISH = MODULE_10
 

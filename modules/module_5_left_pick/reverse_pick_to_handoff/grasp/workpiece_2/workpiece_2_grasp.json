@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "owner_module": "module_5_left_pick/reverse_pick_to_handoff",
+  "grasp_point_stl_m": [-0.05263, -0.02611, -0.01442],
+  "grasp_point_object_m": [0.05263, 0.02611, -0.01442],
+  "grasp_point_definition": "Fixed CAD landmark on the workpiece +X raised tab, shifted 10 mm along workpiece2_top_view -Y. The normal path uses this object-coordinate point directly after ICP.",
+  "grasp_width_axis_stl": [0.0, 1.0, 0.0],
+  "grasp_outward_axis_stl": [1.0, 0.0, 0.0],
+  "wide_head_outward_grasp_offset_m": 0.0,
+  "wide_head_inward_grasp_offset_m": 0.0
+}

@@ -22,7 +22,10 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-VISION_ROOT = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation"
+VISION_ROOT = (
+    ROOT
+    / "modules/module_4_head_judge/module_4_1_buffer_state_estimation/vision"
+)
 STL = ROOT / "tool/workpiece_2/workpiece_2.stl"
 FRAME = "workpiece2_top_view"
 R_OBJECT_STL = np.diag([-1.0, -1.0, 1.0])

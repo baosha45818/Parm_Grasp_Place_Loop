@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "workpiece": "2",
+  "adapter": "convex_tab_prediction",
+  "perception": {
+    "capture_snapshots": 5,
+    "depth_fuse_frames": 9
+  },
+  "execution": {
+    "pregrasp_m": 0.06,
+    "grasp_down_offset_m": -0.005,
+    "approach_angles_deg": [90.0, 15.0, -15.0],
+    "planning_inflight": 3,
+    "close_force": 100.0
+  }
+}

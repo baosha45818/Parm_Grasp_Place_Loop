@@ -1,25 +1,25 @@
 # 工件2反面抓取接入说明
 
-本说明记录工件2如何接入左臂的“桌面反面工件预测 -> 反面抓取”流程。新增实现与原有 Module 4-1、Module 5-1 旧工件代码隔离，不覆盖原有 `main.py`、`implementation/` 或旧预测 JSON 格式。
+本说明记录工件2如何接入左臂的“桌面反面物体位姿 -> 反面抓取”流程。
 
 ## 模块边界
 
 | 阶段 | 目录 | 责任 | 输出 |
 | --- | --- | --- | --- |
-| Module 4-1 | `module_4_head_judge/module_4_1_reverse_grasp_prediction/workpiece_2_pipeline/` | 头部 RGB-D、SAM2、固定反面 ICP、凸耳抓取点预测 | `convex_tab_grasp_prediction.json` |
-| Module 5-1 | `module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/` | 读取预测、Planner 预检、左臂抓取与抬升 | `grasp_plan.json` |
+| Module 4 | `module_4_head_judge/module_4_1_buffer_state_estimation/` | 头部 RGB-D、SAM2、正反面与物体位姿 | `buffer_face_check.json` |
+| Module 5 反面分支 | `module_5_left_pick/reverse_pick_to_handoff/grasp/workpiece_2/` | 凸耳抓取位姿、Planner 预检、左臂抓取与抬升 | `convex_tab_grasp_prediction.json`、`grasp_plan.json` |
 
 唯一 STL 来源：`tool/workpiece_2/workpiece_2.stl`。
 
-## Module 4-1：预测逻辑
+## Module 4：方向与物体位姿
 
-入口：`workpiece_2_pipeline/capture_sam_fixed_icp.py`（保留历史文件名；当前实际流程不调用 SAM2，而是 RANSAC 桌面平面去除后直接进行点到面 ICP）。
+入口：`capture_workpiece_2_reverse_pose.py`。
 
 1. 云台移动到头部观察位，采集一帧新的头部 RGB-D；不移动机械臂或夹爪。
 2. 使用该目录专用的 SAM2/深度/工作区配置分割桌面上的工件。
 3. 以“桌面反面”作为已确认假设进行 ICP：工件正式坐标系为 `workpiece2_top_view`，工件 `+Z` 指向桌面、`-Z` 面向相机和外侧。
-4. `estimate_fixed_reverse_pose.py` 对 STL 采样点与分割点云进行动态 yaw ICP，写出 `fixed_reverse_pose.json`、RGB 坐标轴图和 3D 可视化。
-5. `predict_convex_tab_grasp.py` 在已估计的 `workpiece2_top_view` 坐标系中取得凸耳抓取点，并计算相机坐标下的接触点、外法向和接近方向。
+4. `estimate_workpiece_2_reverse_pose.py` 对 STL 采样点与分割点云进行动态 yaw ICP，写出 `fixed_reverse_pose.json`、RGB 坐标轴图和 3D 可视化。
+5. Module 5-1 的 `grasp/predict_convex_tab_grasp.py` 消费该物体位姿，取得凸耳抓取点并计算相机坐标下的接触点、外法向和接近方向。
 6. 自动反抓不叠加 `manual_grasp_offset.json`；抓取点仅使用 CAD 名义点及沿桌面法向的接触下移。
 
 预测输出事件固定为：
@@ -55,7 +55,7 @@
 完整编排脚本：
 
 ```bash
-bash modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/run_full_reverse_grasp.sh
+bash modules/module_5_left_pick/reverse_pick_to_handoff/grasp/workpiece_2/run_full_reverse_grasp.sh
 ```
 
 默认仅执行：头部采集、SAM2、ICP、凸耳预测、抓取可达性预检。只有增加 `--execute` 才会真正移动左臂、闭合夹爪并抬升。
@@ -63,8 +63,8 @@ bash modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/ru
 同一次运行中的路径关系：
 
 ```text
-Module 4-1 runs/<run-name>/capture/table_reverse_fixed_icp/fixed_reverse_pose.json
-    -> Module 4-1 runs/<run-name>/capture/convex_tab_grasp/convex_tab_grasp_prediction.json
+Module 4 output/module_4_1/workpiece_2_reverse/runs/<run-name>/02_icp/fixed_reverse_pose.json
+    -> Module 5-1 grasp/runs/<run-name>_prediction/convex_tab_grasp_prediction.json
     -> Module 5-1 grasp/runs/<run-name>_preflight/grasp_plan.json
     -> Module 5-1 grasp/runs/<run-name>_execute/grasp_plan.json   (仅 --execute)
 ```
@@ -74,7 +74,7 @@ Module 4-1 runs/<run-name>/capture/table_reverse_fixed_icp/fixed_reverse_pose.js
 模块化总控通过可选参数选择工件类型：
 
 ```bash
-# 工件1：不传参数时保持原有命令、原有 Module 4-1/5-1 代码路径。
+# 工件1：不传参数时保持默认工件1配置。
 uv run modules/modular_dual_arm_loop.py ...
 
 # 工件2：仅反面分支进入本说明的固定反面预测与凸耳反抓流水线。

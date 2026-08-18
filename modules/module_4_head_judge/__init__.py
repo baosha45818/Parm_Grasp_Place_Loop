@@ -4,10 +4,12 @@ from .module import (
     ObjectOrientation,
     OrientationResult,
     inspect_tabletop_orientation,
+    inspect_tabletop_state,
 )
 
 __all__ = [
     "ObjectOrientation",
     "OrientationResult",
     "inspect_tabletop_orientation",
+    "inspect_tabletop_state",
 ]

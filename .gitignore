@@ -9,7 +9,6 @@ runtime/
 **/capture/
 **/captures/
 third_party/graspnet/deploy/version7/jobs/
-modules/module_4_head_judge/module_4_1_reverse_grasp_prediction/workpiece_2_pipeline/runs/
 modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/runs/
 modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/visualizations/
 tool/inspection_support/legacy_inspect/output_pc1/
@@ -45,6 +44,10 @@ Thumbs.db
 
 # Local hardware calibration, captures, and operational configuration
 calibration/
+# ``tools/calibration`` contains the deployed, versioned runtime calibrations;
+# only ad-hoc calibration output elsewhere remains ignored.
+!tools/calibration/
+!tools/calibration/**
 config.*.json
 !config.example.json
 *.bag

@@ -1,0 +1,5 @@
+{
+  "reference_color_size_wh": [848, 480],
+  "safe_roi_polygon_px": [[181, 128], [500, 128], [524, 462], [90, 458]],
+  "description": "xiangxin 头部 D435 反抓桌面四角安全工作区。"
+}

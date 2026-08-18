@@ -24,8 +24,15 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-VISION = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation"
-BODY_HEAD = VISION.parent / "config/body_head_calibration.json"
+VISION = (
+    ROOT
+    / "modules/module_4_head_judge/module_4_1_buffer_state_estimation/vision"
+)
+BODY_HEAD = (
+    ROOT
+    / "modules/module_5_left_pick/module_5_1_reverse_grasp/"
+    "config/body_head_calibration.json"
+)
 
 
 def inside_here(path: Path) -> Path:
@@ -120,7 +127,7 @@ def main() -> int:
     try:
         event["head"] = move_head(args.head_host)
         sys.path.insert(0, str(VISION))
-        from capture_head_rgbd import capture
+        from capture_rgbd import capture
         raw = capture(SimpleNamespace(serial=args.serial, output_dir=HERE / "captures", frames=args.capture_snapshots,
                                       width=1280, height=720, fps=30, warmup_frames=30,
                                       timeout_ms=5000, depth_fuse_frames=args.depth_fuse_frames,
@@ -139,9 +146,12 @@ def main() -> int:
         required = [capture_dir / n for n in ("metadata.json", "rgb_000.png", "depth_aligned_000.png")]
         if not all(path.is_file() for path in required):
             raise RuntimeError("新 RGB-D 采集不完整")
-        subprocess.run([str(Path(sys.executable)), str(VISION / "sam2_tabletop_masks.py"),
-                        "--capture-dir", str(capture_dir), "--out", str(capture_dir / "sam2_masks")],
-                       cwd=VISION, check=True)
+        subprocess.run([
+            str(Path(sys.executable)), "-m",
+            "modules.module_4_head_judge.module_4_1_buffer_state_estimation.vision.mask",
+            "--workpiece", "2", "--capture-dir", str(capture_dir),
+            "--out", str(capture_dir / "sam2_masks"),
+        ], cwd=ROOT, check=True)
         # SAM correctly finds the part in this view but may also include the
         # adjacent tablecloth as one connected region.  Keep the raw SAM mask
         # for audit, and feed ICP only the RGB-D table-plane-cleaned derivative.

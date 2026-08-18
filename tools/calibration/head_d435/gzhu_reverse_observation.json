@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "mode": "gzhu",
+  "calibration_type": "sdk_bridge",
+  "transform_convention": "p_body_base = T_body_base_head_camera @ p_head_camera",
+  "camera_serial": "261222076212",
+  "image_size": [1280, 720],
+  "capture": {
+    "fps": 30,
+    "workpiece_1_image_size": [1280, 720],
+    "workpiece_2_image_size": [1280, 720]
+  },
+  "head_pose_deg": {"pitch": 38.5, "yaw": 0.0},
+  "T_body_base_head_camera": [
+    [0.010675851987, -0.762656198977, 0.646715971927, 0.137684061686],
+    [-0.999879986230, -0.015403284552, -0.001658903995, 0.027665754471],
+    [0.011226723556, -0.646620646892, -0.762729112917, 0.144308570263],
+    [0.0, 0.0, 0.0, 1.0]
+  ]
+}

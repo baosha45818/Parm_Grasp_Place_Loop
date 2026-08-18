@@ -11,11 +11,12 @@ Hole entry is declared when a previously high Fx/Ty load abruptly unloads.
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 import shlex
 import sys
 import time
-import datetime
+from datetime import datetime
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -35,10 +36,6 @@ from move_by_joints import (  # noqa: E402
 )
 from tool.left_motion_right_servo_lock import right_servo_guard  # noqa: E402
 from cli_and_logging import (  # noqa: E402
-    MAX_SEARCH_ATTEMPTS,
-    PRE_SEARCH_PRESS_MM,
-    RETRY_LIFT_MM,
-    RETRY_SEARCH_PRESS_INCREMENT_MM,
     WORKPIECE_CONFIGS,
     make_event_logger,
     parse_args,
@@ -67,7 +64,10 @@ from force_monitoring import monitor_continuous_wrench, sample  # noqa: E402
 from insertion_detection import (
     release_event_should_stop,
 )  # noqa: E402
-from post_insertion import move_from_first_hole_to_second_hole  # noqa: E402
+from post_insertion import (  # noqa: E402
+    move_from_first_hole_to_second_hole,
+    post_entry_relief_if_needed,
+)
 
 class PlacementContactReached(RuntimeError):
     """A validated insertion-release signature stopped the search successfully."""
@@ -100,6 +100,10 @@ def placement_main(argv: list[str] | None = None) -> int:
     output_path = output_path.expanduser().resolve().with_suffix(".log")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"运行日志将实时写入：{output_path}", flush=True)
+    # planner_runtime opens its own SDK Arm client for planned trajectories
+    # and obtains the host only from PARM_ARM_HOST.  Keep it aligned with the
+    # per-workpiece --arm-host used by the rest of this placement attempt.
+    os.environ["PARM_ARM_HOST"] = args.arm_host
     sdk = import_sdk()
     arm = sensor = None
     servo_started = False
@@ -109,6 +113,7 @@ def placement_main(argv: list[str] | None = None) -> int:
     log_file = output_path.open("w", encoding="utf-8")
 
     log_event = make_event_logger(log_file, started_at=run_started)
+    log_event("arm_host_synced_for_planner", arm_host=args.arm_host)
     session = PlacementSession(args=args, arm=arm, sensor=sensor, log_file=log_file, log_event=log_event)
 
     log_event(
@@ -158,11 +163,18 @@ def placement_main(argv: list[str] | None = None) -> int:
                 input_frequency_hz=50.0,
             )
             log_event("pre_search_servo_session_started")
-            pre_search_approach_leg(
-                session, sdk, move_continuous_with_recovery, "initial_descend", 2, -args.pre_search_initial_descend_mm
-            )
-            pre_search_approach_leg(session, sdk, move_continuous_with_recovery, "forward", 0, args.pre_search_forward_mm)
-            pre_search_approach_leg(session, sdk, move_continuous_with_recovery, "descend", 2, -args.pre_search_descend_mm)
+            approach_legs = args.pre_search_legs or [
+                {"name": "initial_descend", "axis": "z", "direction": "negative", "distance_mm": args.pre_search_initial_descend_mm, "speed_mm_s": args.pre_search_approach_speed_mm_s},
+                {"name": "forward", "axis": "x", "direction": "positive", "distance_mm": args.pre_search_forward_mm, "speed_mm_s": args.pre_search_approach_speed_mm_s},
+                {"name": "descend", "axis": "z", "direction": "negative", "distance_mm": args.pre_search_descend_mm, "speed_mm_s": args.pre_search_approach_speed_mm_s},
+            ]
+            for leg in approach_legs:
+                direction_sign = 1.0 if leg["direction"] == "positive" else -1.0
+                pre_search_approach_leg(
+                    session, sdk, move_continuous_with_recovery,
+                    leg["name"], "xyz".index(leg["axis"]),
+                    direction_sign * float(leg["distance_mm"]), float(leg["speed_mm_s"]),
+                )
         except Exception as exc:
             log_event(
                 "pre_search_servo_session_error",
@@ -212,49 +224,56 @@ def placement_main(argv: list[str] | None = None) -> int:
             if args.search_attempt == 1 else args.retry_search_press_increment_mm
         )
         press_target = list(press_start)
-        press_target[2] -= press_depth_mm / 1000.0
-        print(
-            "已到放置初始位姿；沿世界 Z− LIN 下压 "
-            f"{press_depth_mm:.3f}mm（第 {args.search_attempt} 轮累计深度）后再采集力基线。"
-        )
+        press_axis_index = "xyz".index(args.pre_search_press_axis)
+        press_direction_sign = 1.0 if args.pre_search_press_direction == "positive" else -1.0
+        press_target[press_axis_index] += press_direction_sign * press_depth_mm / 1000.0
+        if press_depth_mm > 0.0:
+            print(
+                f"已到放置初始位姿；沿世界 {args.pre_search_press_axis.upper()}"
+                f"{'+' if press_direction_sign > 0.0 else '−'} LIN 移动 "
+                f"{press_depth_mm:.3f}mm（第 {args.search_attempt} 轮累计深度）后再采集力基线。"
+            )
+        else:
+            print("已到搜索位；配置为不预压，直接采集力基线。")
         log_event(
             "pre_search_press_start",
             attempt=args.search_attempt,
             distance_mm=press_depth_mm,
             incremental_depth_mm=press_increment_mm,
-            axis="z",
-            direction="negative",
+            axis=args.pre_search_press_axis,
+            direction=args.pre_search_press_direction,
             start_xyz_rpy=press_start,
             target_xyz_rpy=press_target,
         )
-        servo_guard = right_servo_guard()
-        servo_guard.__enter__()
-        try:
-            arm.start_servo_pose(  # type: ignore[attr-defined]
-                2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
-                input_frequency_hz=50.0,
-            )
-            servo_started = True
-            continuous_servo_stopped = False
-            move_in_active_session(
-                arm,
-                press_target,
-                linear_speed_mps=args.pre_search_press_speed_mm_s / 1000.0,
-                linear_accel_mps2=0.01,
-            )
-        finally:
-            if servo_started and not continuous_servo_stopped:
-                arm.stop_servo_pose(2)  # type: ignore[attr-defined]
-                wait_for_right_task_stopped(
-                    arm, log_file,
-                    confirmed_event="right_pre_search_press_stop_confirmed",
-                    timeout_event="right_pre_search_press_stop_wait_timeout",
-                    cancel_if_still_running_after_s=0.5,
+        if press_depth_mm > 0.0:
+            servo_guard = right_servo_guard()
+            servo_guard.__enter__()
+            try:
+                arm.start_servo_pose(  # type: ignore[attr-defined]
+                    2, pose_type="absolute", frame="world", tcp=[0.0] * 6,
+                    input_frequency_hz=50.0,
                 )
-                continuous_servo_stopped = True
-            servo_started = False
-            servo_guard.__exit__(None, None, None)
-            servo_guard = None
+                servo_started = True
+                continuous_servo_stopped = False
+                move_in_active_session(
+                    arm,
+                    press_target,
+                    linear_speed_mps=args.pre_search_press_speed_mm_s / 1000.0,
+                    linear_accel_mps2=args.pre_search_press_accel_mm_s2 / 1000.0,
+                )
+            finally:
+                if servo_started and not continuous_servo_stopped:
+                    arm.stop_servo_pose(2)  # type: ignore[attr-defined]
+                    wait_for_right_task_stopped(
+                        arm, log_file,
+                        confirmed_event="right_pre_search_press_stop_confirmed",
+                        timeout_event="right_pre_search_press_stop_wait_timeout",
+                        cancel_if_still_running_after_s=0.5,
+                    )
+                    continuous_servo_stopped = True
+                servo_started = False
+                servo_guard.__exit__(None, None, None)
+                servo_guard = None
         log_event(
             "pre_search_press_completed",
             attempt=args.search_attempt,
@@ -263,19 +282,24 @@ def placement_main(argv: list[str] | None = None) -> int:
         )
         # Contact limits must be relative to the actual red-dot start state,
         # not the state before this script moved the arm to that point.
-        print("下压完成；请勿接触工件，正在稳定并采集右腕力基线……")
-        time.sleep(0.5)
+        print("已到力采集位置；请勿接触工件，正在稳定并采集右腕力基线……")
+        time.sleep(args.baseline_settle_s)
         baseline_samples = []
-        for _ in range(args.baseline_samples):
+        for index in range(args.baseline_samples):
             baseline_samples.append(read_wrench(sensor, args.sample_timeout))
-            time.sleep(0.05)
+            if index + 1 < args.baseline_samples:
+                time.sleep(args.baseline_interval_s)
         force_base = mean([force for force, _ in baseline_samples])
         torque_base = mean([torque for _, torque in baseline_samples])
         session.sensor = sensor
         session.force_base = force_base
         session.torque_base = torque_base
         print(f"起始位姿力基线 F={force_base} N，T={torque_base} N*m")
-        log_event("force_baseline", force_n=force_base, torque_nm=torque_base)
+        log_event(
+            "force_baseline", force_n=force_base, torque_nm=torque_base,
+            settle_s=args.baseline_settle_s, samples=args.baseline_samples,
+            interval_s=args.baseline_interval_s,
+        )
 
         # Read the servo centre only after the loaded arm has settled during
         # baseline collection.  Reading it before this delay leaves a stale
@@ -387,7 +411,11 @@ def placement_main(argv: list[str] | None = None) -> int:
             linear_accel_mps2=args.fast_linear_accel_mm_s2 / 1000.0,
             initial_speed_mps=0.0,
             force_monitor=lambda alpha: monitor_continuous_wrench(
-                session, PlacementContactReached, release_event_should_stop,
+                session,
+                PlacementContactReached,
+                lambda signature, **details: release_event_should_stop(
+                    session, signature, **details,
+                ),
                 alpha * args.max_back_mm,
             ),
         )
@@ -406,7 +434,13 @@ def placement_main(argv: list[str] | None = None) -> int:
         log_event("insertion_decision", result="entered_by_validated_release")
         session.servo_started = servo_started
         session.continuous_servo_stopped = continuous_servo_stopped
-        move_from_first_hole_to_second_hole(session, sdk)
+        if args.post_entry_enabled:
+            post_entry_relief_if_needed(session, sdk)
+        if args.second_hole_enabled:
+            move_from_first_hole_to_second_hole(session, sdk)
+        else:
+            log_event("second_hole_skipped", reason="disabled_by_workpiece_profile")
+            print("第一洞确认成功；该工件未启用第二洞路径。")
         continuous_servo_stopped = session.continuous_servo_stopped
         return 0
     except Exception as exc:
@@ -504,14 +538,15 @@ def main() -> int:
         session_log_event(
             "retry_session_started",
             workpiece=workpiece,
-            max_attempts=MAX_SEARCH_ATTEMPTS,
-            first_search_press_mm=PRE_SEARCH_PRESS_MM,
-            retry_search_press_increment_mm=RETRY_SEARCH_PRESS_INCREMENT_MM,
-            retry_lift_mm=RETRY_LIFT_MM,
+            max_attempts=profile["retry"]["max_attempts"],
+            first_search_press_mm=profile["pre_search"]["press"]["first_attempt_mm"],
+            retry_search_press_increment_mm=profile["pre_search"]["press"]["retry_increment_mm"],
+            retry_lift_mm=profile["retry"]["lift_mm"],
         )
         print(f"重试会话日志将实时写入：{session_log_path}")
         try:
-            for attempt in range(1, MAX_SEARCH_ATTEMPTS + 1):
+            max_attempts = profile["retry"]["max_attempts"]
+            for attempt in range(1, max_attempts + 1):
                 argv = profile_argv(
                     profile, workpiece, live=wrapper_args.live,
                     arm_host=wrapper_args.arm_host,
@@ -521,12 +556,12 @@ def main() -> int:
                 session_log_event(
                     "attempt_started", attempt=attempt,
                     press_depth_mm=(
-                        PRE_SEARCH_PRESS_MM
-                        + (attempt - 1) * RETRY_SEARCH_PRESS_INCREMENT_MM
+                        profile["pre_search"]["press"]["first_attempt_mm"]
+                        + (attempt - 1) * profile["pre_search"]["press"]["retry_increment_mm"]
                     ),
                     command=argv,
                 )
-                print(f"执行工件 {workpiece} 配置：{config_path}（第 {attempt}/{MAX_SEARCH_ATTEMPTS} 轮）")
+                print(f"执行工件 {workpiece} 配置：{config_path}（第 {attempt}/{max_attempts} 轮）")
                 print("内置执行参数：", shlex.join(argv))
                 result = placement_main(argv)
                 session_log_event("attempt_finished", attempt=attempt, exit_code=result)
@@ -535,14 +570,17 @@ def main() -> int:
                     return 0
                 if result != SEARCH_DISTANCE_EXHAUSTED_EXIT_CODE:
                     return result
-                if attempt == MAX_SEARCH_ATTEMPTS:
+                if attempt == max_attempts:
                     raise RuntimeError(
-                        f"已完成 {MAX_SEARCH_ATTEMPTS} 轮搜索，每轮最大距离 40mm，仍未检测到进洞特征。"
+                        f"已完成 {max_attempts} 轮搜索，仍未检测到进洞特征。"
                     )
                 session_log_event("retry_lift_recovery_requested", attempt=attempt)
                 lift_after_exhausted_search(
                     arm_host=wrapper_args.arm_host,
                     session_log_event=session_log_event,
+                    lift_mm=profile["retry"]["lift_mm"],
+                    speed_mm_s=profile["retry"]["speed_mm_s"],
+                    accel_mm_s2=profile["retry"]["accel_mm_s2"],
                 )
         except Exception as exc:
             session_log_event(

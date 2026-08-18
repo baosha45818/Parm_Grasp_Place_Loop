@@ -141,10 +141,11 @@ turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
 
 # 旋转和下放共用的固定桌面参考点，body_base XY（m）。
-# 与工件 1 使用同一原点：来自 workpiece_1/391 原图红点的桌面平面投影。
+# 与工件 1 使用同一原点：来自 workpiece_1/586 原图红点像素约 [750, 440]
+# 的桌面平面投影。
 # 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
 # place_x/place_y_offset_candidates_m 均相对此点解释。
-fixed_reference_body_base_xy_m = [0.502166, 0.015160]
+fixed_reference_body_base_xy_m = [0.522376, -0.041636]
 
 # 工件正面在 body_base 下的基准局部 RPY。
 front_base_rpy_deg = [0.0, 0.0, 0.0]

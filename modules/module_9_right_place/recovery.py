@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-from cli_and_logging import RETRY_LIFT_MM, RETRY_LIFT_SPEED_MM_S
 from move_by_joints import current_pose, ensure_ready, import_sdk, rotvec_to_rpy
 from motion_primitives import move_in_active_session
 from right_arm_state import wait_for_right_task_stopped
@@ -12,14 +11,13 @@ from tool.left_motion_right_servo_lock import right_servo_guard
 
 
 def lift_after_exhausted_search(
-    *, arm_host: str | None, session_log_event: object | None = None,
+    *, arm_host: str | None, lift_mm: float, speed_mm_s: float, accel_mm_s2: float, session_log_event: object | None = None,
 ) -> None:
     """Safely clear the fixture before the next attempt re-plans to the taught pose."""
     if session_log_event is not None:
         session_log_event(  # type: ignore[operator]
             "retry_lift_recovery_connecting",
-            distance_mm=RETRY_LIFT_MM,
-            speed_mm_s=RETRY_LIFT_SPEED_MM_S,
+            distance_mm=lift_mm, speed_mm_s=speed_mm_s,
             axis="z",
             direction="positive",
         )
@@ -33,18 +31,17 @@ def lift_after_exhausted_search(
         start = current_pose(arm, 2)
         start_rpy = start[:3] + rotvec_to_rpy(start[3:])
         target_rpy = list(start_rpy)
-        target_rpy[2] += RETRY_LIFT_MM / 1000.0
+        target_rpy[2] += lift_mm / 1000.0
         if session_log_event is not None:
             session_log_event(  # type: ignore[operator]
                 "retry_lift_motion_start",
-                distance_mm=RETRY_LIFT_MM,
-                speed_mm_s=RETRY_LIFT_SPEED_MM_S,
+                distance_mm=lift_mm, speed_mm_s=speed_mm_s,
                 start_xyz_rpy=start_rpy,
                 target_xyz_rpy=target_rpy,
             )
         print(
             "本轮未进洞：沿世界 Z+ LIN 抬升 "
-            f"{RETRY_LIFT_MM:.1f}mm，随后重新规划回放置初始点。"
+            f"{lift_mm:.1f}mm，随后重新规划回放置初始点。"
         )
         servo_guard = right_servo_guard()
         servo_guard.__enter__()
@@ -56,13 +53,13 @@ def lift_after_exhausted_search(
         move_in_active_session(
             arm,
             target_rpy,
-            linear_speed_mps=RETRY_LIFT_SPEED_MM_S / 1000.0,
-            linear_accel_mps2=0.02,
+            linear_speed_mps=speed_mm_s / 1000.0,
+            linear_accel_mps2=accel_mm_s2 / 1000.0,
         )
-        print("30mm 抬升完成。")
+        print(f"{lift_mm:.1f}mm 抬升完成。")
         if session_log_event is not None:
             session_log_event(  # type: ignore[operator]
-                "retry_lift_motion_completed", distance_mm=RETRY_LIFT_MM,
+                "retry_lift_motion_completed", distance_mm=lift_mm,
             )
     finally:
         try:

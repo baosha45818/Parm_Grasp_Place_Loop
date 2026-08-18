@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "workpiece": "1",
+  "adapter": "unique_back_prediction",
+  "perception": {
+    "orientation_config": "../../../../module_4_head_judge/module_4_1_buffer_state_estimation/configs/workpiece_1.json"
+  },
+  "execution": {
+    "approach_angles_deg": [90.0, 15.0, -15.0]
+  }
+}

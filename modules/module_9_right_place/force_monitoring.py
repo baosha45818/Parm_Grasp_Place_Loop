@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Callable
 
 from move_by_joints import current_pose, rotvec_to_rpy
 from placement_session import PlacementSession
@@ -74,7 +75,7 @@ def sample(session: PlacementSession, contact_reached: type[Exception], event: s
 def monitor_continuous_wrench(
     session: PlacementSession,
     contact_reached: type[Exception],
-    release_should_stop: object,
+    release_should_stop: Callable[..., bool],
     back_mm: float,
 ) -> None:
     if session.continuous_monitor_stride == 0:

@@ -6,8 +6,8 @@
 
 1. 采集桌面 RGB-D，或者读取已有采集目录。
 2. 使用 SAM2 分割桌面工件。
-3. 对 CAD 正面和反面执行受桌面约束的 ICP。
-4. 输出 `FRONT`、`BACK` 或 `OTHER`。
+3. 工件1执行正反多yaw受约束ICP；工件2执行FPFH/RANSAC粗配准和全6DoF ICP。
+4. 从同一个最佳ICP变换同时输出正反和工件位姿。
 
 `FRONT` 表示 CAD `+Z` 正面朝上，`BACK` 表示 CAD `-Z` 反面朝上。
 `OTHER` 表示结果不明确、几何质量不合格或目标不在安全工作区，不能直接
@@ -19,9 +19,9 @@
 反抓后双臂交接使用的固定观察角 `pitch=15°、yaw=35°` 不具备通用性，已归回
 Module 5-2 反手交接流程，不属于 Module 4。
 
-Module 4-1 `module_4_1_reverse_grasp_prediction/` 负责左臂从 Buffer 反抓前的
-云台观察、RGB-D、SAM2/ICP 和唯一抓取点预测。Module 5-1 只消费 4-1 的预测并
-执行左臂动作，绝不再控制云台。
+`module_4_1_buffer_state_estimation/` 采用一个 `run_orientation.py` 入口和一套
+`vision/` 公共实现；工件差异保存在 `configs/workpiece_1.json`、
+`configs/workpiece_2.json` 及各自 ICP 策略中。抓取点/TCP 预测归 Module 5-1。
 
 ## 运行
 
@@ -32,6 +32,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 /home/dainanjun/Public/data_collector/.venv/bin/python \
   modules/module_4_head_judge/run.py \
+  --mode xiangxin \
   --capture-dir /path/to/head_rgbd_capture
 ```
 
@@ -40,18 +41,17 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 ```text
 <capture-dir>/sam2_masks/tabletop_orientation_result.json
 
-桌面候选区域由 `module_4_1_reverse_grasp_prediction/workpiece_2_pipeline/config/tabletop_workspace.json`
-中的 `safe_roi_polygon_px` 定义为随分辨率缩放的桌面多边形。它同时约束深度种子、
-SAM2 输出和负提示，以排除桌外地面；只有离线调试时才使用
-`sam2_tabletop_masks.py --roi X Y W H` 的矩形覆盖。
+桌面候选区域由 `module_4_1_buffer_state_estimation/configs/workpiece_<编号>.json`
+中 `mask.safe_roi_polygon_px` 定义。它按采集分辨率缩放并约束深度种子和
+SAM2输出。
 ```
 
 ## Python 接口
 
 ```python
-from modules.module_4_head_judge import inspect_tabletop_orientation
+from modules.module_4_head_judge import inspect_tabletop_state
 
-result = inspect_tabletop_orientation(capture_dir)
+result = inspect_tabletop_state(capture_dir, workpiece_id="2", mode="xiangxin")
 print(result.orientation)
 ```
 
@@ -61,14 +61,23 @@ print(result.orientation)
 
 ## 当前视觉依赖
 
-为了保持与已验证反抓视觉链路一致，本模块调用 Loop 内以下只读视觉脚本：
+工件1、2视觉实现直属 Module 4，位于：
 
 ```text
-modules/module_5_left_pick/module_5_1_reverse_grasp/implementation/
-  capture_head_rgbd.py
-  sam2_tabletop_masks.py
-  sam2_icp_grasp.py
+modules/module_4_head_judge/module_4_1_buffer_state_estimation/
+  run_orientation.py
+  vision/capture_rgbd.py
+  vision/sam2_client.py
+  vision/mask.py
+  vision/workpiece_1_icp.py
+  vision/workpiece_2_icp.py
 ```
 
-它只复用采集、SAM2、CAD、标定和 ICP，不调用 Module 5 的机械臂抓取代码。
+本目录保存分割、正反判断和工件位姿；抓取框架、TCP 计算和抓取可视化位于 Module 5-1。
 本模块不再依赖 `/home/dainanjun/zhangfei/tools/tabletop_orientation`。
+
+## Buffer 正反面检查
+
+`module_4_1_buffer_state_estimation/check_buffer_face.py` 在 Module 4 的公开正反判断结果之上增加
+Buffer 专用的严格质量门，输出 `FRONT`、`BACK` 或 `UNCERTAIN`。它可以现场采集
+头部 D435i，也可以复用其 `captures/` 下的历史采集；不控制云台、机械臂或夹爪。

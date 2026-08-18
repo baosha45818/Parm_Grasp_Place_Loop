@@ -27,7 +27,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 `latest_prediction.json` 仅是规划/人工复核输入，绝不能直接作为实机执行授权。
 
-## 完整视觉链路（等价于 Module 4-1 的视觉部分）
+## 完整视觉链路（等价于 Module 4 的视觉部分）
 
 对由上游在反抓观察位采集的 RGB-D 运行：
 

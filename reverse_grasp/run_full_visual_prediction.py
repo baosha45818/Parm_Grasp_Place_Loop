@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""以 Module 4-1 的视觉链路为 workpiece_2 生成唯一反抓候选。
+"""以 Module 4 的视觉链路为 workpiece_2 生成唯一反抓候选。
 
 输入 RGB-D 采集目录只读。脚本先把所需帧复制到本目录的运行沙盒，再使用与
-Module 4-1 相同的 SAM2 分割、受桌面约束的双面 CAD/ICP、唯一候选判定与 3D
+Module 4 相同的 SAM2 分割、受桌面约束的双面 CAD/ICP、唯一候选判定与 3D
 可视化；所有新文件均位于 ``reverse_grasp/``。本程序不控制任何硬件。
 """
 from __future__ import annotations
@@ -19,7 +19,10 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
-VISION_ROOT = ROOT / "modules/module_5_left_pick/module_5_1_reverse_grasp/implementation"
+VISION_ROOT = (
+    ROOT
+    / "modules/module_4_head_judge/module_4_1_buffer_state_estimation/vision"
+)
 STL = ROOT / "tool/workpiece_2/workpiece_2.stl"
 ORIENTATION = HERE / "workpiece_2_orientation_config.json"
 LOG = HERE / "reverse_grasp_prediction.log.jsonl"
@@ -37,7 +40,7 @@ def inside_here(path: Path) -> Path:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture-dir", type=Path, required=True,
-                        help="Module 4-1 格式的 RGB-D 采集目录；只读")
+                        help="Module 4 格式的 RGB-D 采集目录；只读")
     parser.add_argument("--run-dir", type=Path, default=None,
                         help="本目录内的运行目录；默认按时间创建")
     parser.add_argument("--prediction-file", type=Path, default=None,

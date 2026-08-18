@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "mode": "xiangxin",
+  "calibration_type": "planner_direct",
+  "transform_convention": "p_body_base = T_body_base_head_camera @ p_head_camera",
+  "camera_serial": "261722072445",
+  "image_size": [1280, 720],
+  "capture": {
+    "fps": 30,
+    "workpiece_1_image_size": [848, 480],
+    "workpiece_2_image_size": [1280, 720]
+  },
+  "head_pose_deg": {"pitch": 45.0, "yaw": 0.0},
+  "T_body_base_head_camera": [
+    [-0.013286066461, -0.830543056302, 0.556795933952, 0.156974875701],
+    [-0.999790391577, 0.019709212835, 0.005542548154, 0.031984328314],
+    [-0.015577334451, -0.556605586172, -0.830630825394, 0.240714485668],
+    [0.0, 0.0, 0.0, 1.0]
+  ]
+}

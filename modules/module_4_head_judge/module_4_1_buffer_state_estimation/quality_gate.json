@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "owner_module": "module_4_head_judge/module_4_1_buffer_state_estimation",
+  "purpose": "Only a positive CAD/ICP result meeting every threshold may release the Buffer safety gate.",
+  "reference": "Module 4 Head Judge uses the same ICP fitness/depth-match checks to qualify a reverse-face result; this gate applies them symmetrically to positive-face release.",
+  "minimum_positive_icp_fitness": 0.75,
+  "minimum_positive_depth_match_fraction": 0.7
+}

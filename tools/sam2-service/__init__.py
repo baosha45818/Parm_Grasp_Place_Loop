@@ -1,0 +1,53 @@
+"""Standalone resident first-frame segmentation package."""
+
+from .src.sam2_first_frame_selector import (
+    SUPPORTED_BACKENDS,
+    close,
+    segment_full_image_top_n,
+    select_first_frame_candidate_components,
+    select_first_frame_candicates_max,
+    select_first_frame_candidates,
+    select_first_frame_mask,
+    start,
+    status,
+    validate_explicit_sam2_runtime,
+)
+from .src.efficient_sam2_tracking import (
+    EfficientSam2Tracker,
+    TrackingBatchResult,
+    TrackingFrameResult,
+    append_frame as append_tracking_frame,
+    append_frames as append_tracking_frames,
+    close_tracking,
+    get_tracker as get_tracking_tracker,
+    initialize_tracking_from_box,
+    initialize_tracking_from_mask,
+    initialize_tracking_from_points,
+    propagate as propagate_tracking,
+    start_tracking,
+)
+
+__all__ = [
+    "SUPPORTED_BACKENDS",
+    "start",
+    "close",
+    "status",
+    "select_first_frame_mask",
+    "select_first_frame_candidates",
+    "segment_full_image_top_n",
+    "select_first_frame_candidate_components",
+    "select_first_frame_candicates_max",
+    "validate_explicit_sam2_runtime",
+    "EfficientSam2Tracker",
+    "TrackingBatchResult",
+    "TrackingFrameResult",
+    "start_tracking",
+    "append_tracking_frame",
+    "append_tracking_frames",
+    "get_tracking_tracker",
+    "initialize_tracking_from_mask",
+    "initialize_tracking_from_points",
+    "initialize_tracking_from_box",
+    "propagate_tracking",
+    "close_tracking",
+]

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "source": "Module 5 reverse branch gate for workpiece_2 single-view raised-structure geometry",
+  "minimum_icp_fitness": 0.6,
+  "minimum_depth_match_fraction": 0.7,
+  "maximum_icp_rmse_m": 0.006,
+  "maximum_depth_score_mm": 6.25,
+  "description": "Legacy fixed-pose input uses depth match >= 0.70. Current Module 4-1 full-6DoF input uses rendered depth score <= 6.25 mm. Both require fitness >= 0.60 and ICP RMSE <= 6 mm."
+}

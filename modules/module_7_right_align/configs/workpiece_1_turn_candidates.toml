@@ -152,11 +152,11 @@ turn_rrtstar_goal_tolerance = true
 planner = "rrtstar"
 
 # 旋转和下放共用的固定桌面参考点，body_base XY（m）。
-# 由 module_4_2/workpiece_1/391/rgb.png 中标记红点的原图像素约 [673, 460]
+# 由 module_4_2/workpiece_1/586/rgb.png 中标记红点的原图像素约 [750, 440]
 # 结合该帧桌面平面和 T_body_base_head_camera 投影得到。
 # 阶段 5 的 x/y_offset_candidates_m 与阶段 6 的
 # place_x/place_y_offset_candidates_m 均相对此点解释。
-fixed_reference_body_base_xy_m = [0.502166, 0.015160]
+fixed_reference_body_base_xy_m = [0.522376, -0.041636]
 
 # 工件正面在 body_base 下的基准局部 RPY。
 front_base_rpy_deg = [0.0, 0.0, 0.0]

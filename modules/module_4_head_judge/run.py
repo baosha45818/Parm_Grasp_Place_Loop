@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from module import inspect_tabletop_orientation
+from module import inspect_tabletop_state
 
 
 def main() -> None:
@@ -18,15 +18,20 @@ def main() -> None:
         type=Path,
         help="读取已有 RGB-D；省略时仅重新采集，不控制云台",
     )
+    parser.add_argument("--workpiece", choices=("1", "2"), default="1")
+    parser.add_argument("--mode", choices=("xiangxin", "gzhu"), required=True)
     args = parser.parse_args()
 
-    result = inspect_tabletop_orientation(
-        args.capture_dir,
+    result = inspect_tabletop_state(
+        args.capture_dir, workpiece_id=args.workpiece, mode=args.mode
     )
     print(
         json.dumps(
             {
                 "orientation": result.orientation.value,
+                "workpiece_id": result.workpiece_id,
+                "mode": result.mode,
+                "camera_serial": result.camera_serial,
                 "capture_dir": str(result.capture_dir),
                 "report": str(result.report_path),
                 "objects": [

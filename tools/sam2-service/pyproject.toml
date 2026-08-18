@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sam2-service"
+version = "0.1.0"
+description = "Resident SAM2/EfficientViT segmentation service with HTTP-over-UDS transport"
+readme = "README.md"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "aiohttp>=3.9",
+    "einops",
+    "hydra-core",
+    "iopath",
+    "numpy",
+    "onnx",
+    "onnxruntime",
+    "onnxsim",
+    "opencv-python",
+    "pillow",
+    "segment-anything",
+    "timm",
+    "torch",
+    "torchvision",
+    "wandb",
+]
+
+[project.scripts]
+sam2-service = "sam2_service.uds_http_service:main"
+
+[tool.setuptools]
+packages = ["sam2_service", "sam2_service.src"]
+package-dir = {sam2_service = "."}
+
+[tool.setuptools.package-data]
+sam2_service = ["checkpoints/*", "checksums.sha256"]

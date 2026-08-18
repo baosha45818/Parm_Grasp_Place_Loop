@@ -101,9 +101,9 @@ class ModuleStatusMetricsTest(unittest.TestCase):
                 "开始任务",
             )
             report(
-                "module_2_left_inspect",
+                "module_3_left_place",
                 ResultStatus.WAIT,
-                "开始检测",
+                "开始固定 Buffer 放置",
             )
             report_exception(
                 "modular_loop",
@@ -120,7 +120,7 @@ class ModuleStatusMetricsTest(unittest.TestCase):
         self.assertEqual(summary["task_execution"]["in_progress"], 0)
         self.assertEqual(summary["task_execution"]["failures"], 1)
         self.assertEqual(
-            summary["modules"]["module_2_left_inspect"]["aborted"],
+            summary["modules"]["module_3_left_place"]["aborted"],
             1,
         )
         self.assertEqual(
@@ -128,7 +128,7 @@ class ModuleStatusMetricsTest(unittest.TestCase):
             "initial_state",
         )
         self.assertIn(
-            "module_2_left_inspect",
+            "module_3_left_place",
             {
                 item["module"]
                 for item in last["closed_active_modules"]
