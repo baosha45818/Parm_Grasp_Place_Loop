@@ -1,11 +1,11 @@
-# Module 3：左臂 Buffer 放置
+# Module 3：左臂固定位置放置
 
-Module 3 是独立的固定 Buffer 放置模块。它不判断工件正反面，也不读取
-Module 2；唯一业务输入是 Module 1 写出的已验证 `SINGLE` handoff。
+Module 3 是独立的固定位置放置模块。它不判断工件正反面，也不读取 Module 2。
+`buffer` 分支只消费 Module 1 写出的已验证 `SINGLE` handoff；`middle` 分支只消费
+Module 5.1 在 `graspuptop` 写出的正面重抓 handoff。
 
 ```text
 Module 1 verified SINGLE handoff
-→ 检查左夹爪仍在持件
 → 到达 graspup
 → 到达 graspup_top
 → 保持 graspup_top 的 left_eef 姿态
@@ -17,12 +17,12 @@ Module 1 verified SINGLE handoff
 → 写出放置结果
 ```
 
-## Buffer 配置
+## 固定位置配置
 
-每种工件只保留一个 `[buffer]` 配置：
+每种工件配置有两个固定 `left_eef` 位置：
 
-- `workpiece_1_placement_parameters.toml`
-- `workpiece_2_placement_parameters.toml`
+- `[buffer]`：Module 1 → Buffer；
+- `[middle]`：Module 5.1 → 桌中位置。
 
 当前固定目标均位于 `body_base`：
 
@@ -31,20 +31,24 @@ Module 1 verified SINGLE handoff
 | `1` | `[0.457668, 0.258779, -0.320000]` | 无，到目标直接松爪 |
 | `2` | `[0.487668, 0.338779, -0.335000]` | 无，到目标直接松爪 |
 
-Module 3 不估计工件相对夹爪的姿态。真实执行会先到达 `graspup_top`，读取
-此时的 `left_eef` 旋转，只把平移改成配置中的 Buffer XYZ。
+Module 3 不估计工件相对夹爪的姿态，也不在运输过程中按夹爪状态中断。上游 handoff
+已在 `graspuptop`；它保持此时的 `left_eef` 旋转，只把平移改成所选配置段的 XYZ。
+Buffer 上是否实际有有效工件，由后续 Module 4 的视觉/ICP 统一判定。
 
 ## 输入要求
 
-必须提供 `--weight-handoff-file`。程序要求：
+必须提供 `--handoff-file`（旧参数 `--weight-handoff-file` 仍兼容）和
+`--placement-kind buffer|middle`。`buffer` 要求 Module 1 的重量 `SINGLE`；
+`middle` 要求 Module 5.1 的 `FRONT`/`graspuptop` handoff。
 
 ```text
 weight_check_enabled = true
 weight_check.classification = SINGLE
 ```
 
-Module 3 在实际持件运动前还会重复检查左夹爪是否稳定报告 `gripping`。如果
-检测到掉件，会禁止后续持件轨迹，执行回 `graspup` 和松爪恢复并记录结果。
+Module 3 完成固定轨迹、松爪并回 `graspup`；不再把夹爪 `gripping` 状态作为掉件
+判据。若工件未留在 Buffer，Module 4 的重复观察耗尽后会清空本次 Buffer 状态并回
+Module 1 抓下一件。
 
 ## 运行
 
@@ -137,8 +141,8 @@ output/module_3_left_place/buffer_place_<timestamp>.json
 `object_retained_in_left_gripper=true`。
 
 - `run.sh`：独立启动入口。
-- `standalone_left_place.py`：handoff、规划、执行、持件检查和失败恢复。
-- `placement_config.py`：读取并校验 `[buffer]` 配置。
+- `standalone_left_place.py`：handoff、规划、执行和失败恢复。
+- `placement_config.py`：读取并校验 `[buffer]` 或 `[middle]` 配置。
 - `placement_parameters.py`：`graspup`、`graspup_top` 与恢复运动常量。
 - `workpiece_*_placement_parameters.toml`：各工件固定 Buffer TCP。
 
@@ -153,7 +157,7 @@ Module 3 已删除旧正反面分支和无关外壳。业务步骤均通过命�
 | --- | --- |
 | `parse_args()` | 声明独立运行参数 |
 | `validate_runtime_args()` | 集中校验执行授权、门禁文件和规划参数 |
-| `load_verified_handoff()` | 读取并验证 Module 1 的 `SINGLE` handoff |
+| `load_handoff()` | 按放置类型读取并验证 Module 1 或 Module 5.1 handoff |
 | `build_planner_config()` | 构造本模块唯一的 PlannerRuntime 配置 |
 | `planner_matrix()` / `matrix_pose()` | 在 Planner 响应、齐次矩阵与目标位姿间转换 |
 | `read_left_joints_deg()` | 真实执行时读取左臂当前关节角 |
@@ -167,17 +171,17 @@ Module 3 已删除旧正反面分支和无关外壳。业务步骤均通过命�
 
 1. 参数和 handoff 校验。
 2. 建立 PlannerRuntime，检查固定 Buffer 目标。
-3. 真实模式复检持件，依次到达 `graspup` 与 `graspup_top`。
+3. 真实模式依次到达 `graspup` 与 `graspup_top`。
 4. 保持 `graspup_top` 旋转，并发规划各 Z 候选。
-5. 动作前复检持件和离线轨迹起点；不一致时在线重规划。
+5. 校验离线轨迹起点；不一致时在线重规划。
 6. 执行 Buffer 轨迹、松爪并返回 `graspup_top`、`graspup`。
-7. 写入成功、纯规划、掉件或恢复结果。
+7. 写入成功、纯规划或恢复结果。
 
 ## 安全边界
 
 - `--execute` 与 `--confirm-real-place` 必须同时出现或同时不出现。
 - plan-only 只连接 Planner 做可达性计算，不创建 Arm/Gripper 执行动作。
-- 真实模式在每个关键持件运动前复检左夹爪 `motion_state=gripping`。
+- 工件是否实际留在 Buffer 不由 Module 3 推断，统一交给 Module 4 视觉观察。
 - 离线轨迹起点与当前关节超过容差时，轨迹会被丢弃并重新规划。
 - 外部门禁只有在 ready/permit 文件同时配置时才启用；默认全自动执行。
 - 运行过程中没有回车、`y/n` 或其他终端交互确认。

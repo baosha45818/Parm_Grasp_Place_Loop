@@ -104,6 +104,24 @@ def _start_broker(
         try:
             return _status()
         except OSError:
+            # start_camera_service.sh 用 nohup 后台启动，shell 本身会成功退出；
+            # 因此必须主动检查子进程是否已在启动阶段崩溃，不能只傻等 socket。
+            pid_path = V7_DIR / "logs" / "camera_service.pid"
+            log_path = V7_DIR / "logs" / "camera_service.log"
+            try:
+                pid = int(pid_path.read_text(encoding="utf-8").strip())
+            except (OSError, ValueError):
+                pid = None
+            if pid is not None and not Path(f"/proc/{pid}").exists():
+                try:
+                    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    tail = "\n".join(lines[-30:])
+                except OSError:
+                    tail = "(camera_service.log 不可读)"
+                raise RuntimeError(
+                    f"Camera Broker 启动后立即退出（pid={pid}）。"
+                    f"日志末尾：\n{tail}"
+                )
             if time.monotonic() >= deadline:
                 raise RuntimeError(f"Camera Broker did not become ready at {SOCKET} within {timeout_s}s")
             time.sleep(0.25)

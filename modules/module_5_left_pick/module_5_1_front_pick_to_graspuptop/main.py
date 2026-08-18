@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""正面分支：用 Module 4-1 的 ICP 位姿重抓并放到桌面中间。
+"""正面分支：用 Module 4.1 的 ICP 位姿重抓并交接到 ``graspuptop``。
 
 只接受已经通过 Buffer Check 质量门的唯一 FRONT 结果。以 ICP 原点作为
 抓取参考；预抓高度和 LIN 下移距离独立配置，默认闭爪点为 ICP 上方 3 cm。
 对 ICP 工件轴尝试两个夹爪姿态候选：``(+Z,+Y,+X)=(+X,+Y,-Z)`` 及
 ``(-X,-Y,-Z)``；均可达时选择左臂关节位移较小者。闭爪后 LIN 上提 3 cm。
-持件确认后继续执行旧 Module 3-1 FRONT 放置：经中间位和 graspup_top，
-把工件放到对应工件型号的桌中目标，松爪并返回 graspup。
+持件确认后只移动到标准交接位 ``graspuptop`` 并写出 handoff。桌中放置由
+Module 3 以 ``--placement-kind middle`` 独立完成。
 """
 
 from __future__ import annotations
@@ -32,8 +32,7 @@ from loop_types import ObjectPose
 from planner_runtime import PlannerRuntime
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
 from modules.stage_result import write_stage_result
-from front_table_place import place_front_workpiece_at_table_center
-from placement_config import load_workpiece_parameters
+from placement_parameters import GRASPUP_ABOVE_JOINTS_DEG
 
 
 DEFAULT_PREGRASP_HEIGHT_M = 0.05
@@ -193,6 +192,31 @@ def _joint_displacement_norm_deg(start: np.ndarray, end: list[float]) -> float:
     return float(np.linalg.norm(delta))
 
 
+def _wait_for_left_joints(
+    arm_host: str,
+    target_deg: list[float],
+    *,
+    label: str,
+    tolerance_deg: float = 0.5,
+    timeout_s: float = 90.0,
+) -> None:
+    """确认左臂实际到达 ``graspuptop``，再把 handoff 交给下游。"""
+    target = np.asarray(target_deg, dtype=float)
+    deadline = time.monotonic() + timeout_s
+    last_error = float("inf")
+    while time.monotonic() < deadline:
+        actual = _current_left_joints_deg(arm_host)
+        delta = (actual - target + 180.0) % 360.0 - 180.0
+        last_error = float(np.max(np.abs(delta)))
+        if last_error <= tolerance_deg:
+            print(f"[{label}] 到位，最大关节误差={last_error:.3f}deg", flush=True)
+            return
+        time.sleep(0.05)
+    raise RuntimeError(
+        f"左臂未在 {timeout_s:.1f}s 内到达{label}；最大关节误差={last_error:.3f}deg"
+    )
+
+
 def _vertical_regrasp_targets(
     T_body_icp: np.ndarray, *, pregrasp_height_m: float, descent_distance_m: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -327,15 +351,13 @@ def main() -> int:
         raise ValueError(
             "--descent-distance-m 必须在 (0, --pregrasp-height-m] m 内"
         )
-    # 所有决定后续运动路径的业务输入和配置必须在连接机械臂之前完成校验。
-    # 否则缺失工件型号或损坏的 TOML 会让程序在已经持件后才失败。
+    # 所有决定后续运动路径的业务输入必须在连接机械臂之前完成校验。
     buffer_result = json.loads(args.buffer_check_result.read_text(encoding="utf-8"))
     workpiece = str(buffer_result.get("workpiece_id") or "")
     if workpiece not in {"1", "2"}:
         raise RuntimeError(
-            f"Buffer Check 缺少有效 workpiece_id，无法选择桌中放置参数: {workpiece!r}"
+            f"Buffer Check 缺少有效 workpiece_id，无法选择正面重抓参数: {workpiece!r}"
         )
-    workpiece_parameters = load_workpiece_parameters(workpiece)
     T_camera_object, icp_rotation_projection_error, T_body_object_direct = _front_icp_pose(
         args.buffer_check_result
     )
@@ -481,75 +503,30 @@ def main() -> int:
             )
             return NO_GRASP_EXIT_CODE
 
-        T_body_eef_after_lift = _matrix_from_tf(
-            planner.lookup_transform("body_base", "left_eef"), "left_eef"
+        # Module 5.1 的边界止于 graspuptop。不得在这里松爪或进入桌中目标，
+        # 这样总控才能把中间放置统一交给 Module 3。
+        planner.set_next_plan_context("front_regrasp_lift", "left_graspuptop")
+        planner.move_left_joints(GRASPUP_ABOVE_JOINTS_DEG, planner="rrtstar")
+        _wait_for_left_joints(
+            args.arm_host, GRASPUP_ABOVE_JOINTS_DEG, label="graspuptop"
         )
-        T_body_transfer_after_lift = _matrix_from_tf(
-            planner.lookup_transform("body_base", "left_hand_transfer_end"),
-            "left_hand_transfer_end",
+        held_at_handoff, handoff_position, handoff_motion_state = _wait_for_hold(
+            args.gripper_host
         )
-        T_eef_object = np.linalg.inv(T_body_eef) @ T_body_object_at_table
-        T_body_object_held = T_body_eef_after_lift @ T_eef_object
-        T_transfer_object = np.linalg.inv(T_body_transfer_after_lift) @ T_body_object_held
-        def require_holding(context: str) -> None:
-            still_held, hold_position, hold_state = _wait_for_hold(args.gripper_host)
-            if not still_held:
-                raise RuntimeError(
-                    f"{context}前左夹爪未确认持件: "
-                    f"motion_state={hold_state!r}, position={hold_position}"
-                )
-
-        placement = place_front_workpiece_at_table_center(
-            workpiece=workpiece,
-            T_transfer_object=T_transfer_object,
-            planner_host=args.planner_host,
-            arm_host=args.arm_host,
-            speed=args.speed,
-            require_holding=require_holding,
-            open_gripper=lambda context: _open_left_gripper_or_raise(
-                args.gripper_host, context=context
-            ),
-            parameters=workpiece_parameters,
-        )
-        if placement.get("outcome") == "planning_timeout_recovered_at_graspup":
-            _write_result(args.result_file, {
-                "stage": "front_table_place",
-                "source_stage": "front_buffer_regrasp",
-                "outcome": "planning_timeout_recovered_at_graspup",
-                "classification": "FRONT",
-                "placement_branch": "BRANCH_1_FRONT",
-                "workpiece_id": workpiece,
-                "placement": placement,
-                "T_tool_object": T_transfer_object.tolist(),
-                "T_body_base_object": T_body_object_held.tolist(),
-                "released": True,
-                "released_at_verified_target": False,
-                "returned_to_graspup": True,
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            })
-            shutil.copy2(
-                args.result_file,
-                visualization_archive / "front_table_place_result.json",
+        if not held_at_handoff:
+            raise RuntimeError(
+                "到达 graspuptop 后左夹爪未确认持件："
+                f"motion_state={handoff_motion_state!r}, position={handoff_position}"
             )
-            print(
-                "[front-regrasp] 桌中规划超时；已完成旧Module3丢弃恢复并回graspup；"
-                f"结果={args.result_file}",
-                flush=True,
-            )
-            return 0
         _write_result(args.result_file, {
-            "stage": "front_table_place",
+            "schema_version": 1,
+            "stage": "front_regrasp",
             "source_stage": "front_buffer_regrasp",
-            "outcome": "success",
+            "module": "module_5_1_front_pick_to_graspuptop",
+            "outcome": "front_regrasp_handoff",
             "classification": "FRONT",
-            "placement_branch": "BRANCH_1_FRONT",
             "workpiece_id": workpiece,
-            "placement": placement,
-            # 保留重抓成功并上提后的刚性关系，便于复核旧 Module 3 的目标换算。
-            "T_tool_object": T_transfer_object.tolist(),
-            "T_body_base_object": T_body_object_held.tolist(),
-            "T_body_left_eef_at_inspect": T_body_eef_after_lift.tolist(),
-            "T_left_eef_object": T_eef_object.tolist(),
+            "handoff_pose": "graspuptop",
             "icp_object_pose_body_base": T_body_object_at_table.tolist(),
             "icp_rotation_projection_error": icp_rotation_projection_error,
             "pregrasp_height_m": args.pregrasp_height_m,
@@ -562,17 +539,16 @@ def main() -> int:
             "pregrasp_target_body_base": T_body_pregrasp.tolist(),
             "buffer_check_visualization_archive": str(visualization_archive),
             "post_grasp_lift_m": POST_GRASP_LIFT_M,
-            "gripper_after_regrasp_lift": {
-                "motion_state": motion_state,
-                "position_percent": position,
+            "gripper_at_graspuptop": {
+                "motion_state": handoff_motion_state,
+                "position_percent": handoff_position,
             },
-            "released": True,
-            "returned_to_graspup": True,
+            "released": False,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
-        shutil.copy2(args.result_file, visualization_archive / "front_table_place_result.json")
+        shutil.copy2(args.result_file, visualization_archive / "front_regrasp_handoff.json")
         print(
-            f"[front-regrasp] 重抓及旧Module3 FRONT桌中放置完成；结果={args.result_file}",
+            f"[front-regrasp] 重抓完成，已在 graspuptop 交接；结果={args.result_file}",
             flush=True,
         )
         return 0

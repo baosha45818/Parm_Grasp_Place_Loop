@@ -12,7 +12,7 @@ D405 RGB-D
 → Planner 预抓取 + 10 cm LIN 下探
 → 左夹爪抓取
 → 重量和夹持状态验证
-→ 持件返回安全抬升位
+→ 持件返回 `graspuptop` 标准交接位
 → verified_handoff.json
 ```
 

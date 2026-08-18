@@ -32,6 +32,7 @@ MODULE_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_ROOT.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+from modules.stage_result import write_stage_result
 from tool.planner_task_retry import retry_task_creation
 RUNTIME_PYTHON = PROJECT_ROOT / ".venv/bin/python"
 if not RUNTIME_PYTHON.is_file():
@@ -180,6 +181,10 @@ class NoWorkpieceDetectedError(RuntimeError):
     """The observation completed but did not contain the selected item."""
 
 
+class OperatorInterventionRequired(RuntimeError):
+    """右手小总控已处于安全观察位，必须由外层总控请求人工处理。"""
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workpiece", type=int, choices=(1, 2), required=True,
@@ -201,6 +206,11 @@ def parse_args() -> argparse.Namespace:
                         help="轨迹规划器地址")
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR,
                         help=f"运行日志目录（默认 {DEFAULT_LOG_DIR}）")
+    parser.add_argument(
+        "--result-file",
+        type=Path,
+        help="供外层总控消费的最终结果 JSON；未提供时写入 --log-dir",
+    )
     parser.add_argument("--execute", action="store_true",
                         help="实际拍照并执行机械臂和夹爪动作；省略时仅检查并打印流程")
     return parser.parse_args()
@@ -579,20 +589,12 @@ def directly_graspable(quadrant: int, yaw_deg: float) -> bool:
     return quadrant == 1 and Q1_MIN_DEG <= yaw_deg <= Q1_MAX_DEG
 
 
-def wait_for_manual_nonfront_intervention(orientation: str, pose_file: Path) -> None:
-    """Keep the worker alive until an operator has corrected a back-side part."""
-    print(
-        "[manual] 右手抓取之前发现反面工件，需要人工介入："
-        f"orientation={orientation}，pose={pose_file}。"
+def require_manual_nonfront_intervention(orientation: str, pose_file: Path) -> None:
+    """把人工处理请求交给新总控，禁止模块内部阻塞读取终端。"""
+    raise OperatorInterventionRequired(
+        "右手抓取观察到非正面工件，当前停在安全观察位 4.json；"
+        f"orientation={orientation}，pose={pose_file}。请人工处理后由总控重新启动本模块。"
     )
-    while True:
-        try:
-            answer = input("请人工处理工件后输入 y 并回车，重新识别：").strip().lower()
-        except EOFError as exc:
-            raise RuntimeError("等待人工处理反面工件时终端输入已关闭。") from exc
-        if answer in {"y", "yes"}:
-            return
-        print("未确认；请人工处理工件后输入 y 并回车，流程保持暂停。")
 
 
 def grasp(pose_file: Path, args: argparse.Namespace) -> int:
@@ -654,9 +656,13 @@ def print_dry_run(args: argparse.Namespace) -> None:
     print("[dry-run] 在 4.json 拍照并计算位姿。")
 
 
-def main() -> int:
+def main(args: argparse.Namespace | None = None) -> int:
     global ACTIVE_LOG
-    args = parse_args()
+    args = args or parse_args()
+    if args.result_file is None:
+        args.result_file = args.log_dir / (
+            f"right_front_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+        )
     with PipelineRunLog(args) as run_log:
         ACTIVE_LOG = run_log
         append_event({
@@ -704,8 +710,7 @@ def main() -> int:
                         "pose_file": str(pose_file),
                         "orientation": orientation,
                     })
-                    wait_for_manual_nonfront_intervention(orientation, pose_file)
-                    print("[manual] 已确认人工处理；保持 4.json 观察位，重新识别。")
+                    require_manual_nonfront_intervention(orientation, pose_file)
 
                 # A fresh Q1 observation in the direct-grasp yaw window always
                 # wins over any previous adjustment state.  ``force_reorient``
@@ -776,19 +781,75 @@ def main() -> int:
                 # its calculation overlaps the remaining return to pose 4.
                 observation_at_pose_10 = True
 
-            raise RuntimeError(
+            # 循环上限后先回到统一观察安全位，再把人工处理请求交给外层总控。
+            move_to_saved_pose(4, args)
+            raise OperatorInterventionRequired(
                 f"达到 --max-cycles={args.max_cycles}，仍未成功抓取工件 {args.workpiece}。"
             )
         finally:
             ACTIVE_LOG = None
 
 
+def write_controller_result(
+    args: argparse.Namespace,
+    *,
+    status: str,
+    outcome: str,
+    error: Exception | None = None,
+) -> None:
+    """为外层总控发布右手复合模块的统一终态。"""
+    assert args.result_file is not None
+    write_stage_result(
+        args.result_file,
+        {
+            "schema_version": 1,
+            "module": "module_8_1_right_front_adjust_and_grasp",
+            "status": status,
+            "outcome": outcome,
+            "workpiece": args.workpiece,
+            "safe_state": (
+                "RIGHT_HOLDS_WORKPIECE"
+                if status == "SUCCESS"
+                else "RIGHT_AT_OBSERVATION_POSE_4"
+                if status == "OPERATOR_REQUIRED"
+                else "UNKNOWN"
+            ),
+            "error": None if error is None else {
+                "code": type(error).__name__,
+                "message": str(error),
+                "recoverable": status == "OPERATOR_REQUIRED",
+            },
+        },
+    )
+
+
 if __name__ == "__main__":
+    parsed_args = parse_args()
+    if parsed_args.result_file is None:
+        parsed_args.result_file = parsed_args.log_dir / (
+            f"right_front_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+        )
     try:
-        raise SystemExit(main())
+        exit_code = main(parsed_args)
+        write_controller_result(
+            parsed_args,
+            status="SUCCESS",
+            outcome="RIGHT_HOLDS_WORKPIECE" if parsed_args.execute else "PLANNED",
+        )
+        raise SystemExit(exit_code)
     except KeyboardInterrupt:
         print("\n用户中断；不会继续下发后续动作。", file=sys.stderr)
+        write_controller_result(
+            parsed_args, status="CANCELLED", outcome="CANCELLED", error=KeyboardInterrupt()
+        )
         raise SystemExit(130)
+    except OperatorInterventionRequired as exc:
+        print(f"\n需要人工处理：{exc}", file=sys.stderr)
+        write_controller_result(
+            parsed_args, status="OPERATOR_REQUIRED", outcome="RIGHT_GRASP_UNRESOLVED", error=exc
+        )
+        raise SystemExit(21)
     except Exception as exc:
         print(f"\n错误：{exc}", file=sys.stderr)
+        write_controller_result(parsed_args, status="FAULT", outcome="FAILED", error=exc)
         raise SystemExit(1)

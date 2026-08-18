@@ -1,4 +1,4 @@
-"""读取 Module3 唯一业务配置：固定 Buffer TCP 放置目标。"""
+"""读取 Module 3 的固定 ``left_eef`` 放置目标。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ CONFIG_PATHS = {
 
 
 @dataclass(frozen=True)
-class BufferPlacementParameters:
-    """某类工件的 Buffer 水平目标与下探 Z 候选。"""
+class FixedPlacementParameters:
+    """某类工件在一个固定放置区的水平目标与下探 Z 候选。"""
     target_left_eef_xyz_m: tuple[float, float, float]
     target_z_candidates_m: tuple[float, ...]
     release_z_candidates_m: tuple[float, ...]
@@ -33,8 +33,11 @@ def _parse_value(path: Path, line_number: int, raw_value: str):
         ) from exc
 
 
-def _load_buffer_section(path: Path) -> dict:
-    """读取受限的 ``[buffer]`` 配置段，拒绝未知段和重复键。"""
+def _load_section(path: Path, placement_kind: str) -> dict:
+    """读取指定放置区，并拒绝未知段、重复键和错误格式。"""
+    allowed_sections = {"buffer", "middle"}
+    if placement_kind not in allowed_sections:
+        raise ValueError(f"未知 Module 3 放置类型: {placement_kind!r}")
     section: str | None = None
     values: dict = {}
     for line_number, raw_line in enumerate(
@@ -45,19 +48,22 @@ def _load_buffer_section(path: Path) -> dict:
             continue
         if line.startswith("[") and line.endswith("]"):
             section = line[1:-1].strip()
-            if section != "buffer":
+            if section not in allowed_sections:
                 raise ValueError(
-                    f"Module 3配置只允许 [buffer]: {path}:{line_number}: {line!r}"
+                    f"Module 3配置只允许 [buffer] 或 [middle]: "
+                    f"{path}:{line_number}: {line!r}"
                 )
             continue
-        if section != "buffer" or "=" not in line:
+        if section not in allowed_sections or "=" not in line:
             raise ValueError(
-                f"Buffer配置只支持 [buffer] 下的 key = value: {path}:{line_number}"
+                f"Module 3配置只支持已知段下的 key = value: {path}:{line_number}"
             )
+        if section != placement_kind:
+            continue
         key, raw_value = (part.strip() for part in line.split("=", 1))
         if not key or key in values:
             raise ValueError(
-                f"Buffer配置键无效或重复: {path}:{line_number}: {key!r}"
+            f"Module 3配置键无效或重复: {path}:{line_number}: {key!r}"
             )
         values[key] = _parse_value(path, line_number, raw_value)
     return values
@@ -74,22 +80,24 @@ def _numbers(
     raw = values.get(key)
     if not isinstance(raw, list) or (not raw and not allow_empty):
         qualifier = "数值列表" if allow_empty else "非空数值列表"
-        raise ValueError(f"Buffer配置 {key} 必须是{qualifier}")
+        raise ValueError(f"Module 3配置 {key} 必须是{qualifier}")
     parsed = tuple(float(value) for value in raw)
     if not all(math.isfinite(value) for value in parsed):
-        raise ValueError(f"Buffer配置 {key} 包含非有限数值")
+        raise ValueError(f"Module 3配置 {key} 包含非有限数值")
     if count is not None and len(parsed) != count:
-        raise ValueError(f"Buffer配置 {key} 必须恰好有 {count} 个数值")
+        raise ValueError(f"Module 3配置 {key} 必须恰好有 {count} 个数值")
     return parsed
 
 
-def load_workpiece_parameters(workpiece: str) -> BufferPlacementParameters:
-    """加载并完整校验指定工件的 Buffer 放置参数。"""
+def load_workpiece_parameters(
+    workpiece: str, placement_kind: str = "buffer"
+) -> FixedPlacementParameters:
+    """加载并完整校验指定工件的 ``buffer`` 或 ``middle`` 放置参数。"""
     try:
         path = CONFIG_PATHS[str(workpiece)]
     except KeyError as exc:
         raise ValueError(f"未知工件类型: {workpiece!r}") from exc
-    values = _load_buffer_section(path)
+    values = _load_section(path, placement_kind)
     required = {
         "target_left_eef_xyz_m",
         "target_z_candidates_m",
@@ -99,11 +107,11 @@ def load_workpiece_parameters(workpiece: str) -> BufferPlacementParameters:
     missing = required - set(values)
     if unexpected or missing:
         raise ValueError(
-            f"Buffer配置键不匹配: missing={sorted(missing)}, "
+            f"Module 3 [{placement_kind}] 配置键不匹配: missing={sorted(missing)}, "
             f"unexpected={sorted(unexpected)}"
         )
     xyz = _numbers(values, "target_left_eef_xyz_m", count=3)
-    return BufferPlacementParameters(
+    return FixedPlacementParameters(
         target_left_eef_xyz_m=(xyz[0], xyz[1], xyz[2]),
         target_z_candidates_m=_numbers(values, "target_z_candidates_m"),
         release_z_candidates_m=_numbers(

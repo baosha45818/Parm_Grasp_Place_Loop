@@ -1,9 +1,4 @@
-"""桌中 FRONT 放置的共享运动参数。
-
-参数保持 Git ``27254cb`` 旧 Module 3 的组织方式；工件参数分别位于
-``workpiece_1_placement_parameters.toml`` 和
-``workpiece_2_placement_parameters.toml``。
-"""
+"""Module 5.1 正面重抓完成后的标准 ``graspuptop`` 交接位。"""
 
 GRASPUP_JOINTS_DEG = [-4.081, -52.722, 3.637, 100.478, -10.051, 53.969, 8.843]
 GRASPUP_ABOVE_JOINTS_DEG = [
@@ -18,4 +13,3 @@ GRASPUP_ABOVE_JOINTS_DEG = [
 GRASPUP_ABOVE_PLANNING_TIMEOUT_S = 6.0
 DISCARD_BELOW_GRASPUP_M = 0.05
 GRASPUP_LIFT_M = 0.10
-

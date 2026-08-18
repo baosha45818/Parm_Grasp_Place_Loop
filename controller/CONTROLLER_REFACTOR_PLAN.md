@@ -1,6 +1,8 @@
 # 新总控重构方案（讨论确认稿）
 
-> 状态：方案已开始确认，尚未据此修改业务代码。
+> 状态：控制器框架已实现并完成 dry-run 演练：启动预置、统一结果、资源锁、
+> 左右并行、观察位复位、停止链与人工恢复均位于 `controller/`。尚未进行真实机械臂
+> 运动验收。
 >
 > 范围：新的总控及其调度、锁、模块结果协议均放在 `controller/`；旧的
 > `modules/modular_dual_arm_loop.py -> tests/loop/simple_dual_arm_loop.py` 双层总控
@@ -22,14 +24,14 @@
 | Module 2 | 已删除；新总控不得依赖或等待 Module 2 的任何文件、许可或结果。 |
 | Module 5 Buffer 重抓 | 正面（5.1）和反面（5.2）均保留 `5` 次上限，统一含义为最多 **5 次完整“Module 4.1 重新观察并生成新 TF + Module 5 单次抓取”闭环**。 |
 | Module 5 达到重试上限 | 不再自动尝试；输出需要人工干预的结果，由总控暂停并等待 `y`；恢复后固定从 Module 4.1 重新观察开始。 |
-| Buffer 正反不确定 | Module 4.1 内部保持一次调用最多采集 4 次；外层总控允许重启 Module 4.1 两次（参数可配置），仍不确定则人工干预。 |
+| Buffer 观察不可靠 | 每次 Module 4.1 调用只采集一次；每个 Buffer 工件的完整观察次数由 `--max-buffer-observation-attempts`（默认 4）统一限制。0/多个工件、ICP 或正反不可靠共用该计数；耗尽后按本次 Buffer 工件已掉/无效处理，清空 Buffer 并回 Module 1。 |
 | Module 5 重抓 | 保留 `5` 次上限；耗尽后人工干预。 |
 | Module 9 插孔失败 | 允许左臂继续运行；右臂退回 `right place` 起始位置。达到模块内部上限后人工干预，`y` 重启 Module 9。 |
 | Buffer 抓取人工恢复 | Module 5 重试耗尽后，人工处理并输入 `y`；不论工件是否被移动，均固定从 Module 4.1 重新观察、生成新 TF 后再进入 Module 5 单次抓取。 |
 | Module 1 内部重试 | 视觉稳定、Planner 不可达、重量校验等现有内部重试次数原样保留；本轮重构只补统一结果输出，不改变其策略。 |
 | 旧总控 | `modules/modular_dual_arm_loop.py` 与 `tests/loop/simple_dual_arm_loop.py` 保留在原位置作为旧实现参考，但新流程不再调用它们。 |
 | 左臂标准交接位 | Module 1 抓取成功和 Module 5.1 正面重抓成功后，均以 `graspuptop` 作为结束位并写出 handoff；不在模块内继续放置。 |
-| Module 3 放置类型 | Module 3 统一负责左臂已持件后的放置：Module 1 handoff 使用 `buffer` 目标；Module 5.1 handoff 使用 `middle` 目标。两类目标配置放在 Module 3 的工件 TOML 内。 |
+| Module 3 放置类型 | Module 3 统一负责左臂已持件后的放置：Module 1 handoff 使用 `buffer` 目标；Module 5.1 handoff 使用 `middle` 目标。两类目标配置放在 Module 3 的工件 TOML 内，均为固定 `left_eef` 位置并保持进入 `graspuptop` 时的末端旋转。 |
 
 ## 3. 新控制器目录
 
@@ -39,6 +41,9 @@ controller/
 ├── scheduler_rules.py      # 纯调度规则：状态 + 结果 -> 下一模块/动作
 ├── module_registry.py      # 模块命令、输入映射、结果文件、资源声明
 ├── module_runner.py        # 启动模块、超时、读取或补齐结果
+├── robot_actions.py         # 启动预置、Buffer 观察位（非业务动作）
+├── safety.py                # Ctrl+C/停止事件的双臂取消链
+├── deployment.py            # xiangxin/gzhu 现场地址和环境统一注入
 ├── contracts.py            # 统一结果协议及校验
 ├── runtime_state.py        # Buffer 和双臂的唯一状态源
 ├── locks.py                # 跨进程资源锁
@@ -86,7 +91,9 @@ controller/
 - `CANCELLED`：由总控安全取消。
 
 若子进程崩溃、超时或未写结果，`module_runner.py` 必须合成一个 `FAULT` 结果，保留
-退出码、stdout/stderr 摘要和调用参数。这样总控永远只处理同一种结果协议。
+退出码、stdout/stderr 摘要和调用参数。M8.2、M9、M10 当前未提供原生结果文件，
+由控制器写出标记为 `controller_synthesized` 的相同协议；这样总控永远只处理同一种
+结果协议。
 
 ## 5. 模块边界和预期接口改造
 
@@ -94,8 +101,8 @@ controller/
 | --- | --- | --- | --- | --- | --- |
 | Module 0 准备 | 服务、相机和环境检查 | 部署模式 | `READY` | `FAULT` + 缺失服务 | 补统一结果文件。 |
 | Module 1 左抓 | D405/SAM2/ICP、抓取、重量验证 | mode、任务号 | `LEFT_HOLDS_SINGLE_WORKPIECE` + 在 `graspuptop` 的 verified handoff | `RETRY` 或 `OPERATOR_REQUIRED` | 成功重量验证后移至 `graspuptop` 再写 handoff；保留现有内部重试策略。 |
-| Module 3 左放 | 将左臂持件放至 Buffer 或桌中 | Module 1/5.1 handoff、放置类型 | `BUFFER_OCCUPIED` 或 `MIDDLE_PLACED` | `FAULT` + 实际持件/Buffer 状态 | 增加 `--placement-kind buffer|middle`；按 handoff 来源校验允许的放置类型。 |
-| Module 4.1 Buffer 状态估计 | Buffer 工件检测、正反判断、ICP TF | mode、Buffer 工件上下文 | `FRONT`/`BACK` + ICP TF | `UNCERTAIN`、`FAULT`，不得臆测掉件 | 保持内部最多 4 次采集；补标准结果中的 safe state 和诊断路径。 |
+| Module 3 左放 | 将左臂持件放至 Buffer 或桌中 | Module 1/5.1 handoff、放置类型 | `BUFFER_OCCUPIED` 或 `MIDDLE_PLACED` | `FAULT` + 实际运动结果 | 增加 `--placement-kind buffer|middle`；按 handoff 来源校验允许的放置类型。运输中不以夹爪状态判掉件，Buffer 有效性由 Module 4 统一确认。 |
+| Module 4.1 Buffer 状态估计 | Buffer 工件检测、正反判断、ICP TF | mode、Buffer 工件上下文 | `FRONT`/`BACK` + ICP TF | `UNCERTAIN` | 每次只采集一次；控制器对所有 `UNCERTAIN` 共用观察预算。预算耗尽即清空本次 Buffer 并回 Module 1。 |
 | Module 5.1 正面抓取 | 左手按 Module 4.1 TF 正抓到 `graspuptop` | Module 4.1 result/TF | `LEFT_HOLDS_FRONT_WORKPIECE` + 在 `graspuptop` 的 handoff | `RETRY` 或 5 次完整闭环耗尽的 `OPERATOR_REQUIRED` | 删除其内部桌中放置；每次闭环均先调用 Module 4.1 重新观察并获取新 TF，再单次重抓。 |
 | Module 5.2 反面抓取交接 | 左手按 Module 4.1 TF 反抓并送交接位 | Module 4.1 result/TF | `LEFT_AT_HANDOFF_READY` | `RETRY` 或 5 次完整闭环耗尽的 `OPERATOR_REQUIRED` | 将抓取、交接准备结果统一；每次闭环同样从新的 Module 4.1 观察开始。 |
 | 右手正面调整与抓取（复合模块） | Module 4.2 → Module 7 → Module 8.1 的内部串联 | 工件任务和部署模式 | `RIGHT_HOLDS_WORKPIECE` | `OPERATOR_REQUIRED`/`FAULT` + 安全位 | 保留现有小总控实现，但增加稳定 CLI 与统一输入/输出；新总控不拆开其内部细节。 |
@@ -134,7 +141,9 @@ EMPTY
 → EMPTY
 ```
 
-建议由 `locks.py` 使用文件锁，并只允许控制器持有资源锁：
+`runtime_state.py` 现同时记录 `buffer` 与 `middle`；`locks.py` 使用文件锁，且只允许
+控制器持有资源锁。正面工件进入 middle 后，右臂后台消费，左臂可从 Module 1 开始
+下一件；下一件到达 `M3(middle)` 前会等待上一件右臂完成。
 
 | 锁 | 使用者 | 作用 |
 | --- | --- | --- |
@@ -156,7 +165,7 @@ Module 9 期间进入交接区，因此交接相关模块仍受 `HANDOFF_ZONE` �
 ## 8. 失败、重试与人工干预
 
 1. 模块返回 `RETRY`：规则文件检查该模块的重试计数和安全状态；满足上限前重启该模块。
-2. 模块返回 `OPERATOR_REQUIRED`、`FAULT`，或重试耗尽：停止发起新的冲突任务；让正在执行的另一臂安全完成当前原子动作。
+2. Module 4 观察预算耗尽：自动清空本次 Buffer 状态并回 Module 1；其他模块返回 `OPERATOR_REQUIRED`、`FAULT`，或 Module 5 重试耗尽时，停止发起新的冲突任务，让正在执行的另一臂安全完成当前原子动作。
 3. 总控打印：故障模块、错误码、当前 Buffer/双臂状态、建议人工处理动作。
 4. 操作员处理完成，输入 `y` 并回车。
 5. Module 5 的自动重试和人工恢复均固定从 Module 4.1 开始，重新生成本轮有效观察和 ICP TF；随后只执行一次对应的 Module 5 抓取。
@@ -165,7 +174,7 @@ Module 9 期间进入交接区，因此交接相关模块仍受 `HANDOFF_ZONE` �
 ## 9. 后续实施顺序
 
 1. 创建控制器框架、结果协议、状态文件和锁文件；不接真实机器人。
-2. 先完成左臂边界整理：Module 1 与 5.1 均输出 `graspuptop` handoff；把目前位于 5.1 的旧桌中放置实现迁回 Module 3，并在 Module 3 工件 TOML 增加 `[middle]` 目标配置。
+2. 先完成左臂边界整理：Module 1 与 5.1 均输出 `graspuptop` handoff；删除 5.1 内部的旧桌中放置调用；Module 3 的配置解析器按 `--placement-kind` 读取现有 `[buffer]` 或 `[middle]` 段，并以进入 `graspuptop` 时的末端旋转移动至固定目标位置。
 3. 给 Module 0/1/3/4.1/5/6/8/9/10 加统一 result wrapper，先做 plan-only/模拟结果测试。
 4. 将右手 `4.2 → 7 → 8.1` 小总控封装为一个稳定的复合模块接口。
 5. 将 Module 10 从 `tests/loop` 迁回模块目录，并删除新总控对 `tests/loop` 的依赖。

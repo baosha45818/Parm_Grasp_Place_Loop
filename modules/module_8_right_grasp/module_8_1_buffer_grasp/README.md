@@ -108,7 +108,8 @@ workpiece_pipeline.py
 决策逻辑如下：
 
 1. 初始移动到 `4.json`，在观察位运行 Module 4.2。
-2. 若视觉判定 `orientation` 不是 `FRONT`，即工件非正面摆放，总控暂停等待人工处理；处理好后输入 `y` 后重新观察。
+2. 若视觉判定 `orientation` 不是 `FRONT`，即工件非正面摆放，本模块写出
+   `OPERATOR_REQUIRED` 结果并退出；外层总控暂停，人工处理后由外层总控重启本模块。
 3. 若工件在 Q1 且 yaw 在 `15°--75°`，调用 `buffer_grasp.py`，直接抓取。
 4. 若 `buffer_grasp.py` 返回 `20`（后方直接抓取路径不可达），则直接转 Module 7 调整。
 5. 其他抓取失败会释放夹爪并回到观察位，连续失败达到阈值（ 3 次）后强制进入 Module 7 调整。
@@ -158,7 +159,9 @@ python3 workpiece_pipeline.py \
 /home/dainanjun/Public/Parm_Grasp_Place_Loop/output/module_8_1/workpiece_<工件编号>/
 ```
 
-每次运行生成一份终端文本日志 `.log` 和一份结构化事件日志 `.jsonl`。总控会通过项目 `.venv` 重新启动自身，并把同一个事件日志路径传递给 `buffer_grasp.py` 等子进程。
+每次运行生成终端文本日志 `.log`、结构化事件日志 `.jsonl` 和结果 JSON。可用
+`--result-file` 指定结果路径；非正面工件或达到 `--max-cycles` 时结果状态为
+`OPERATOR_REQUIRED`，供外层总控统一处理人工交互。
 
 ## 运行前检查
 

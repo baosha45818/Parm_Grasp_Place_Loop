@@ -81,6 +81,18 @@ PHYSICAL_RIGHT_TO_LEFT_JAW_AXIS_EEF = np.array((0.0, -1.0, 0.0))
 # 平移 1.5 mm。
 BACK_OBJECT_NEGATIVE_X_OFFSET_M = 0.0015
 
+# 左臂模块之间的统一持件交接位。Module 1 只有在重量验证完成、仍确认持件并
+# 到达此位后，才允许把 handoff 发布给 Module 3。
+GRASPUP_TOP_JOINTS_DEG = [
+    -1.311500,
+    -60.092500,
+    4.404100,
+    88.846400,
+    -15.384900,
+    73.190800,
+    12.937800,
+]
+
 
 class TraditionalPlannerUnreachable(RuntimeError):
     """一次新观测产生的所有传统视觉候选都没有安全 Planner 路径。"""
@@ -799,8 +811,8 @@ def execute_paired_plan(
             raise WeightQualityRejected(
                 "UNKNOWN", f"ICP same-pose weight check failed: {exc}"
             ) from exc
-        # Keep the verified single workpiece clamped and return to graspup
-        # before validating the physical hold state.
+        # 保持已验证的单工件夹紧，先回 graspup 完成重量复核，再转到统一的
+        # graspuptop handoff 位。原有重量判定位置和重试策略不改变。
         with pe.connect_planner(pa, "post-grasp return to graspup") as planner:
             graspup = pe.plan_joint(
                 planner, pa, pa.postgrasp_lift_joints_deg, "post-grasp graspup"
@@ -812,7 +824,24 @@ def execute_paired_plan(
         except WeightQualityRejected:
             pe.move_gripper(pa, 100.0, "release after ICP graspup force-signature failure")
             raise
-    print("-> ICP verified gripper hold and force signature at graspup; verified handoff is available")
+        with pe.connect_planner(pa, "post-grasp move to graspuptop") as planner:
+            graspup_top = pe.plan_joint(
+                planner,
+                pa,
+                GRASPUP_TOP_JOINTS_DEG,
+                "post-grasp graspuptop handoff",
+            )
+        pe.execute_trajectory(pa, graspup_top, "post-grasp graspuptop handoff")
+        try:
+            pe.require_left_gripper_holding(pa, phase="graspuptop")
+        except Exception:
+            pe.move_gripper(pa, 100.0, "release after graspuptop handoff hold failure")
+            raise
+    handoff["module"] = "module_1_left_grasp"
+    handoff["outcome"] = "verified_handoff"
+    handoff["handoff_pose"] = "graspuptop"
+    handoff["handoff_joint_deg"] = list(GRASPUP_TOP_JOINTS_DEG)
+    print("-> ICP verified gripper hold; reached graspuptop and handoff is available")
     return handoff
 
 
@@ -1045,7 +1074,7 @@ def run_traditional_cycles(
         handoff_path = args.weight_handoff_file or run / "weight_handoff.json"
         handoff_path.parent.mkdir(parents=True, exist_ok=True)
         handoff_path.write_text(json.dumps(handoff, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"-> verified ICP graspup handoff: {handoff_path}")
+        print(f"-> verified ICP graspuptop handoff: {handoff_path}")
         return
 
 

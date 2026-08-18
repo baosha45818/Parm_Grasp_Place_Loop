@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Module 3：把 Module 1 已验证的单个工件放到固定左臂 Buffer。"""
+"""Module 3：把左臂在 ``graspuptop`` 已持有的工件放至固定位置。"""
 
 from __future__ import annotations
 
@@ -42,20 +42,30 @@ MODULE_ID = "3-buffer-place"
 CLASSIFICATION = "BUFFER"
 PLACEMENT_BRANCH = "BUFFER_DIRECT"
 LEFT_GRIPPER_HAND = 1
-GRIPPER_HOLD_STABLE_S = 0.5
-GRIPPER_HOLD_POLL_S = 0.1
-GRIPPER_HOLD_TIMEOUT_S = 2.0
 
 
 def parse_args() -> argparse.Namespace:
     """解析独立运行参数，并落实真实运动的双参数授权门禁。"""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workpiece", choices=("1", "2"), default="1")
-    parser.add_argument(
-        "--weight-handoff-file",
+    handoff_group = parser.add_mutually_exclusive_group(required=True)
+    handoff_group.add_argument(
+        "--handoff-file",
         type=Path,
-        required=True,
-        help="Module 1 verified SINGLE handoff JSON",
+        help="上游模块在 graspuptop 写出的 handoff JSON",
+    )
+    # 保留旧调用方式，避免 Module 1 -> Buffer 的既有命令立即失效。
+    handoff_group.add_argument(
+        "--weight-handoff-file",
+        dest="handoff_file",
+        type=Path,
+        help="兼容旧参数；等价于 --handoff-file",
+    )
+    parser.add_argument(
+        "--placement-kind",
+        choices=("buffer", "middle"),
+        default="buffer",
+        help="buffer 仅接 Module 1；middle 仅接 Module 5.1",
     )
     parser.add_argument(
         "--result-file",
@@ -291,22 +301,36 @@ def validate_runtime_args(args: argparse.Namespace) -> None:
         raise ValueError("--placement-permit-poll-s 必须是大于0的有限数值")
 
 
-def load_verified_handoff(path: Path) -> dict:
-    """读取 Module 1 handoff，并只接受经过重量验证的单个工件。"""
+def load_handoff(path: Path, placement_kind: str) -> dict:
+    """按放置类型校验上游 handoff，禁止将两类持件状态混用。"""
     if not path.is_file():
-        raise FileNotFoundError(f"Module 1 handoff 不存在: {path}")
+        raise FileNotFoundError(f"Module 3 上游 handoff 不存在: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if payload.get("weight_check_enabled") is not True:
-        raise RuntimeError("Module 1 handoff 未启用重量检查")
-    weight_check = payload.get("weight_check")
-    if not isinstance(weight_check, dict):
-        raise RuntimeError("Module 1 handoff 缺少 weight_check")
-    if weight_check.get("classification") != "SINGLE":
-        raise RuntimeError(
-            "Module 3 只接受 Module 1 验证过的 SINGLE 工件，实际为 "
-            f"{weight_check.get('classification')!r}"
-        )
-    return payload
+    if placement_kind == "buffer":
+        if payload.get("weight_check_enabled") is not True:
+            raise RuntimeError("Module 3(buffer) 只接受启用重量检查的 Module 1 handoff")
+        weight_check = payload.get("weight_check")
+        if not isinstance(weight_check, dict):
+            raise RuntimeError("Module 1 handoff 缺少 weight_check")
+        if weight_check.get("classification") != "SINGLE":
+            raise RuntimeError(
+                "Module 3(buffer) 只接受 Module 1 验证过的 SINGLE 工件，实际为 "
+                f"{weight_check.get('classification')!r}"
+            )
+        if payload.get("handoff_pose") != "graspuptop":
+            raise RuntimeError("Module 1 handoff 不在 graspuptop，拒绝 Buffer 放置")
+        return payload
+    if placement_kind == "middle":
+        if payload.get("module") != "module_5_1_front_pick_to_graspuptop":
+            raise RuntimeError("Module 3(middle) 只接受 Module 5.1 handoff")
+        if payload.get("outcome") != "front_regrasp_handoff":
+            raise RuntimeError("Module 5.1 handoff outcome 不正确，拒绝桌中放置")
+        if payload.get("handoff_pose") != "graspuptop":
+            raise RuntimeError("Module 5.1 handoff 不在 graspuptop，拒绝桌中放置")
+        if payload.get("classification") != "FRONT":
+            raise RuntimeError("Module 3(middle) 只接受 FRONT 工件")
+        return payload
+    raise AssertionError(f"未处理的 placement_kind: {placement_kind!r}")
 
 
 def build_planner_config(args: argparse.Namespace) -> LoopConfig:
@@ -342,18 +366,19 @@ def main() -> int:
     args.result_file.parent.mkdir(parents=True, exist_ok=True)
     validate_runtime_args(args)
 
-    # 阶段 2：验证 Module 1 交接文件，读取唯一的固定 Buffer 目标。
-    load_verified_handoff(args.weight_handoff_file)
+    # 阶段 2：验证上游 handoff，读取当前放置类型的固定目标。
+    upstream_handoff = load_handoff(args.handoff_file, args.placement_kind)
 
-    parameters = load_workpiece_parameters(args.workpiece)
+    parameters = load_workpiece_parameters(args.workpiece, args.placement_kind)
     target_xyz = np.asarray(parameters.target_left_eef_xyz_m, dtype=float)
     if target_xyz.shape != (3,) or not np.all(np.isfinite(target_xyz)):
-        raise ValueError("Buffer target_left_eef_xyz_m 必须包含三个有限数值")
+        raise ValueError("放置 target_left_eef_xyz_m 必须包含三个有限数值")
     target_z_candidates = validate_z_candidates(
-        "[buffer].target_z_candidates_m", parameters.target_z_candidates_m
+        f"[{args.placement_kind}].target_z_candidates_m",
+        parameters.target_z_candidates_m,
     )
     release_z_candidates = validate_z_candidates(
-        "[buffer].release_z_candidates_m",
+        f"[{args.placement_kind}].release_z_candidates_m",
         parameters.release_z_candidates_m,
         allow_empty=True,
     )
@@ -366,12 +391,10 @@ def main() -> int:
         "max_inflight": int(args.placement_planning_inflight),
         "planner": post_graspup_planner,
         "offline_start_joints_deg": GRASPUP_ABOVE_JOINTS_DEG,
-        "policy": "fixed_left_eef_buffer_target",
+        "policy": f"fixed_left_eef_{args.placement_kind}_target",
         "left_placement_frame": "left_eef",
     }
     planning_attempts: list[dict] = []
-    holding_checks: list[dict] = []
-    drop_details: list[dict] = []
     placement_trace_path = args.result_file.parent / "placement_planning_attempts.jsonl"
     os.environ["PARM_PLANNING_RECORD_DIR"] = str(
         ROOT / "output/left_place_trajectories" / time.strftime("%Y%m%d_%H%M%S")
@@ -389,83 +412,6 @@ def main() -> int:
 
     planner_cfg = build_planner_config(args)
     planner = PlannerRuntime(planner_cfg)
-    object_dropped = threading.Event()
-
-    def gripper_holds_object(label: str) -> bool:
-        """确认左夹爪连续稳定报告 ``gripping``，失败时锁死后续持件运动。"""
-        if args.skip_motion:
-            return True
-        if object_dropped.is_set():
-            return False
-        state = None
-        stable_samples = 0
-        record = None
-        try:
-            from parm_sdk import Gripper
-
-            with Gripper(host=args.gripper_host, status_port=7702) as gripper:
-                deadline = time.monotonic() + GRIPPER_HOLD_TIMEOUT_S
-                stable_since = None
-                while time.monotonic() < deadline:
-                    candidate = gripper.get_state().get(LEFT_GRIPPER_HAND)
-                    if isinstance(candidate, dict):
-                        state = candidate
-                        if str(candidate.get("motion_state", "")).lower() == "gripping":
-                            stable_since = stable_since or time.monotonic()
-                            stable_samples += 1
-                            if time.monotonic() - stable_since >= GRIPPER_HOLD_STABLE_S:
-                                record = {
-                                    "before_motion": label,
-                                    "source": "gripper_state",
-                                    "motion_state": "gripping",
-                                    "position_percent": candidate.get("position"),
-                                    "initialized": candidate.get("initialized"),
-                                    "stable_duration_s": GRIPPER_HOLD_STABLE_S,
-                                    "stable_samples": stable_samples,
-                                    "passed": True,
-                                }
-                                break
-                        else:
-                            stable_since = None
-                            stable_samples = 0
-                    else:
-                        stable_since = None
-                        stable_samples = 0
-                    time.sleep(GRIPPER_HOLD_POLL_S)
-            if record is None:
-                if not isinstance(state, dict):
-                    raise RuntimeError("未收到 hand=1 夹爪状态")
-                record = {
-                    "before_motion": label,
-                    "source": "gripper_state",
-                    "motion_state": state.get("motion_state"),
-                    "position_percent": state.get("position"),
-                    "initialized": state.get("initialized"),
-                    "stable_duration_s": 0.0,
-                    "stable_samples": stable_samples,
-                    "passed": False,
-                }
-        except Exception as exc:
-            record = {
-                "before_motion": label,
-                "source": "gripper_state",
-                "motion_state": None,
-                "reason": f"{type(exc).__name__}: {exc}",
-                "passed": False,
-            }
-        holding_checks.append(record)
-        print(
-            f"[运动前持件复检] {label}: motion_state="
-            f"{record.get('motion_state')} passed={record['passed']}",
-            flush=True,
-        )
-        if not record["passed"]:
-            drop_details.append(record)
-            object_dropped.set()
-            print("[工件掉落] 左夹爪未报告 gripping，禁止后续持件运动", flush=True)
-            return False
-        return True
-
     def write_terminal_outcome(outcome: str, **extra) -> None:
         """统一写出提前结束或恢复结束的终态结果。"""
         write_stage_result(
@@ -477,7 +423,6 @@ def main() -> int:
                 "place_module": MODULE_ID,
                 "classification": CLASSIFICATION,
                 "placement_branch": PLACEMENT_BRANCH,
-                "holding_checks": holding_checks,
                 "planning_scheduler": scheduler,
                 **extra,
             },
@@ -490,28 +435,6 @@ def main() -> int:
                 "result_path": str(args.result_file),
             },
         )
-
-    def finish_dropped_cycle() -> None:
-        """掉件后回到安全位、打开夹爪并把本轮记录为已恢复。"""
-        print("[工件掉落恢复] 正在回 graspup 并打开左夹爪", flush=True)
-        planner.config = replace(
-            planner.config,
-            max_velocity=float(args.preset_speed),
-            max_acceleration=float(args.preset_speed),
-        )
-        planner.move_left_joints(GRASPUP_JOINTS_DEG, planner="rrtstar")
-        wait_for_left_graspup(args.arm_host)
-        final_position = open_left_gripper(args)
-        write_terminal_outcome(
-            "held_object_dropped",
-            completed_without_error=True,
-            drop_detected_before_motion=(
-                drop_details[-1]["before_motion"] if drop_details else None
-            ),
-            returned_to_graspup=True,
-            gripper_final_position_percent=final_position,
-        )
-        print("[工件掉落恢复完成] 本轮正常结束", flush=True)
 
     def return_to_graspup_after_buffer() -> None:
         """从 Buffer 区域依次返回 ``graspup_top`` 和 ``graspup``。"""
@@ -540,13 +463,10 @@ def main() -> int:
     timeout_thread = None
 
     try:
-        # 阶段 3：真实模式先复检持件状态，并把机械臂送到 graspup_top。
-        # 纯规划模式只连接 Planner，不创建 Arm/Gripper 执行动作。
+        # 阶段 3：把左臂送到 graspup_top。是否有有效 Buffer 工件统一由
+        # Module 4 在放置后的实际视觉结果判定，Module 3 不做运输中持件判断。
         planner.open(required_frames={"body_base", "left_eef"})
         if not args.skip_motion:
-            if not gripper_holds_object("Module 3开始（graspup）"):
-                finish_dropped_cycle()
-                return 0
             def move_to_graspup_top() -> None:
                 """真实模式下把持件左臂送到离线规划起点 ``graspup_top``。"""
                 motion = PlannerRuntime(planner_cfg)
@@ -559,13 +479,9 @@ def main() -> int:
                     )
                     if args.pre_place_middle_joints_deg is not None:
                         middle = [float(value) for value in args.pre_place_middle_joints_deg]
-                        if not gripper_holds_object("移动到放置前中间位"):
-                            return
                         motion.set_next_plan_context("module1_handoff", "pre_place_middle")
                         motion.move_left_joints(middle, planner="rrtstar")
                         wait_for_left_joint_target(args.arm_host, middle, label="放置前中间位")
-                        if not gripper_holds_object("从中间位移动到graspup_top"):
-                            return
                         motion.set_next_plan_context("pre_place_middle", "left_graspup_top")
                         motion.move_left_joints(GRASPUP_ABOVE_JOINTS_DEG, planner="rrtstar")
                         wait_for_left_joint_target(
@@ -574,30 +490,13 @@ def main() -> int:
                             label="graspup_top",
                         )
                     else:
-                        if not gripper_holds_object("从当前位置回graspup"):
-                            return
-                        motion.set_next_plan_context("module1_handoff", "left_graspup")
-                        motion.move_left_joints(GRASPUP_JOINTS_DEG, planner="rrtstar")
-                        wait_for_left_graspup(args.arm_host)
-                        response = motion.lookup_transform("body_base", "left_eef")
-                        if response is None:
-                            raise RuntimeError("规划器没有返回 graspup 末端位姿")
-                        above = planner_matrix(response)
-                        above[2, 3] += float(args.graspup_lift_m)
-                        motion.config = replace(
-                            motion.config,
-                            max_velocity=float(args.motion_speed),
-                            max_acceleration=float(args.motion_speed),
+                        motion.set_next_plan_context("upstream_handoff", "left_graspup_top")
+                        motion.move_left_joints(
+                            GRASPUP_ABOVE_JOINTS_DEG, planner=post_graspup_planner
                         )
-                        if not gripper_holds_object("从graspup移动到graspup_top"):
-                            return
-                        motion.set_next_plan_context("left_graspup", "left_graspup_top")
-                        above_plan = motion.plan_cartesian_pose(
-                            "left", matrix_pose(above), planner="lin"
+                        wait_for_left_joint_target(
+                            args.arm_host, GRASPUP_ABOVE_JOINTS_DEG, label="graspuptop"
                         )
-                        if above_plan is None:
-                            raise RuntimeError("graspup_top LIN 规划返回空结果")
-                        motion.execute_planned_result(above_plan)
                     approach_reached.set()
                     print("[运动线程] 已到达 graspup_top", flush=True)
                 except BaseException as exc:
@@ -680,9 +579,6 @@ def main() -> int:
                         raise RuntimeError(
                             f"到达 graspup_top 失败: {approach_errors[0]}"
                         ) from approach_errors[0]
-                    if object_dropped.is_set():
-                        finish_dropped_cycle()
-                        return 0
                     raise RuntimeError("到达 graspup_top 前运动线程已结束")
 
         # 阶段 4：读取 graspup_top 末端旋转。Buffer 只改变 TCP 平移，
@@ -743,7 +639,6 @@ def main() -> int:
                         and len(in_flight) < int(args.placement_planning_inflight)
                         and next_index < len(target_z_candidates)
                         and not planning_timed_out.is_set()
-                        and not object_dropped.is_set()
                     ):
                         z_index = next_index
                         target_z = float(target_z_candidates[z_index])
@@ -864,9 +759,6 @@ def main() -> int:
             raise RuntimeError(f"到达 graspup_top 失败: {approach_errors[0]}") from approach_errors[0]
         if timeout_errors:
             raise RuntimeError(f"规划失败恢复异常: {timeout_errors[0]}") from timeout_errors[0]
-        if object_dropped.is_set():
-            finish_dropped_cycle()
-            return 0
         if planning_timed_out.is_set():
             write_terminal_outcome(
                 "planning_failed_recovered_at_graspup",
@@ -928,9 +820,6 @@ def main() -> int:
         )
         wait_permit(args)
         if not args.skip_motion:
-            if not gripper_holds_object("从graspup_top移动到Buffer"):
-                finish_dropped_cycle()
-                return 0
             planner.execute_planned_result(selected_plan)
 
         # 阶段 8：到达 Buffer 后处理可选松爪下降，并打开左夹爪。
@@ -991,9 +880,6 @@ def main() -> int:
         # 高度松爪；先安全返回 graspup，再用非零状态结束本轮。
         if release_required and not release_succeeded:
             if not args.skip_motion:
-                if not gripper_holds_object("松爪下降失败后返回graspup"):
-                    finish_dropped_cycle()
-                    return 1
                 return_to_graspup_after_buffer()
             write_terminal_outcome(
                 "release_motion_failed_object_retained",
@@ -1023,11 +909,13 @@ def main() -> int:
             args.result_file,
             {
                 "schema_version": 1,
-                "stage": "buffer_place",
+                "stage": f"{args.placement_kind}_place",
                 "outcome": "success" if args.execute else "planned",
                 "module": "module_3_left_place",
-                "source_module1_handoff": str(args.weight_handoff_file.resolve()),
+                "source_handoff": str(args.handoff_file.resolve()),
+                "source_module": upstream_handoff.get("module", "module_1_left_grasp"),
                 "workpiece": args.workpiece,
+                "placement_kind": args.placement_kind,
                 "place_module": MODULE_ID,
                 "classification": CLASSIFICATION,
                 "placement_branch": PLACEMENT_BRANCH,
@@ -1049,7 +937,6 @@ def main() -> int:
                     else None
                 ),
                 "gripper_final_position_percent": final_position,
-                "holding_checks": holding_checks,
                 "released": not args.skip_motion,
                 "returned_to_graspup": not args.skip_motion,
             },
