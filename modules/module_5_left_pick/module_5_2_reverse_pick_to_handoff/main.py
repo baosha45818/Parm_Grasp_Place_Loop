@@ -18,14 +18,14 @@ import sys
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[3]
-REVERSE_IMPL = ROOT / 'modules/module_5_left_pick/reverse_pick_to_handoff/grasp/workpiece_1'
+REVERSE_IMPL = ROOT / 'modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/grasp/workpiece_1'
 sys.path.insert(0, str(ROOT))
 
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import reverse_grasp_record_from_icp
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import reverse_grasp_record_from_icp
 from tool.inspection_support.stl_model import load_stl_triangles_m
 
 
-GRASP_CONFIG = ROOT / 'modules/module_5_left_pick/reverse_pick_to_handoff/grasp/config/workpiece_1_grasp.json'
+GRASP_CONFIG = ROOT / 'modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/grasp/config/workpiece_1_grasp.json'
 DEFAULT_STL = ROOT / 'tool/welding_up_side_1118_only_2_small_screws_removed.stl'
 EXECUTOR = REVERSE_IMPL / 'execute_confirmed_grasp.py'
 OUTPUT_ROOT = ROOT / 'output/module_5_left_pick/reverse_buffer_regrasp'

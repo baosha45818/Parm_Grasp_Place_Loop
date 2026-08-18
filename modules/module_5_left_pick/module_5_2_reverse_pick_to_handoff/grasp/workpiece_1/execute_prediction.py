@@ -22,7 +22,7 @@ if str(LOOP_ROOT) not in sys.path:
 import numpy as np
 
 from tools.execution_timing import ExecutionTiming
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import predict as predict_grasp
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import predict as predict_grasp
 
 
 IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
@@ -81,7 +81,7 @@ def move_left_to_ready(capture_dir: Path, planner_host: str, arm_host: str, spee
     from parm_sdk import Arm
     from tools.planner_runtime import PlannerRuntime
 
-    from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.profiles import load_reverse_ready_profile
+    from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.profiles import load_reverse_ready_profile
 
     ready = load_reverse_ready_profile("1")
     target = list(ready["ready_joints_deg"])

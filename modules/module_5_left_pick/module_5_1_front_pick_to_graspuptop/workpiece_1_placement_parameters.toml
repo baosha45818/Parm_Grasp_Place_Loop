@@ -1,0 +1,39 @@
+# Git 27254cb 旧 Module 3 工件1正反面放置参数。
+# 所有位置相对 body_base，长度单位为米，角度单位为度。
+
+[shared]
+body_base_z_face_selection_max_angle_deg = 40.0
+allowed_handoff_weight_classes = ["SINGLE"]
+use_multiple_holding_min_g = true
+rotation_convention = "local_rpy"
+target_xy_radius_m = 0.0
+xy_radius_factors = [0.0]
+
+[front]
+target_object_xyz_m = [0.537668, 0.0100, -0.300000]
+target_z_candidates_m = [-0.37]
+release_z_candidates_m = [-0.38, -0.37]
+yaw_candidates_deg = [45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 360.0]
+roll_candidates_deg = [0.0, -10.0, 10.0, -20.0, 20.0]
+pitch_candidates_deg = [0.0, -10.0, 10.0]
+base_rpy_deg = [0.0, 0.0, 0.0]
+
+[reversed]
+target_object_xyz_m = [0.457668, 0.258779, -0.300000]
+target_z_candidates_m = [-0.30]
+release_z_candidates_m = []
+yaw_candidates_deg = [0.0, -30.0, 30.0, -60.0, 60.0, -90.0, 90.0]
+roll_candidates_deg = [-25.0, 25.0, -30.0, 30.0]
+pitch_candidates_deg = [0.0, -20.0, 20.0]
+base_rpy_deg = [180.0, 0.0, 0.0]
+
+[direct object place]
+target_object_xyz_m = [0.457668, 0.258779, -0.300000]
+target_z_candidates_m = [-0.3]
+release_z_candidates_m = []
+
+[direct left eef place]
+target_left_eef_xyz_m = [0.457668, 0.258779, -0.320000]
+target_z_candidates_m = [-0.32000]
+release_z_candidates_m = []
+

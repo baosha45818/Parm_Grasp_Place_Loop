@@ -27,7 +27,7 @@ sys.path[:0] = [str(MODULE_ROOT), str(ROOT)]
 from loop_config import LoopConfig
 from loop_types import ObjectPose
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.profiles import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.profiles import (
     load_reverse_ready_profile,
 )
 from parm_sdk.api.exceptions import ParmAPIError

@@ -7,9 +7,9 @@ import numpy as np
 
 MODULE_PATH = (
     Path(__file__).parents[1]
-    / "modules/module_5_left_pick/front_pick_to_graspuptop/main.py"
+    / "modules/module_5_left_pick/module_5_1_front_pick_to_graspuptop/main.py"
 )
-SPEC = importlib.util.spec_from_file_location("front_pick_to_graspuptop", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location("module_5_1_front_pick", MODULE_PATH)
 front_regrasp = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(front_regrasp)

@@ -48,11 +48,11 @@ APART_INSPECT_PLACE_FLOW = (
 LEFT_FLOW_SCRIPTS = {
     "apart": APART_INSPECT_PLACE_FLOW,
 }
-LEFT_PICK = LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
-FRONT_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/front_pick_to_graspuptop/main.py"
-REVERSE_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/main.py"
+LEFT_PICK = LOOP_ROOT / "modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/main.py"
+FRONT_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/module_5_1_front_pick_to_graspuptop/main.py"
+REVERSE_BUFFER_REGRASP = LOOP_ROOT / "modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/main.py"
 WORKPIECE_2_REVERSE_BUFFER_REGRASP = (
-    LOOP_ROOT / "modules/module_5_left_pick/reverse_pick_to_handoff/"
+    LOOP_ROOT / "modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/"
     "grasp/workpiece_2/run_full_reverse_grasp.sh"
 )
 LEFT_PLACE = LOOP_ROOT / "modules/module_3_left_place/standalone_left_place.py"
@@ -66,7 +66,7 @@ BUFFER_FACE_CHECK = (
 )
 LEFT_HANDOFF_PREP = (
     LOOP_ROOT
-    / "modules/module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
+    / "modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/handoff/main.py"
 )
 RIGHT_LEFT_HANDOFF = (
     LOOP_ROOT
@@ -172,10 +172,10 @@ def _apply_modular_entries_for_spawned_worker() -> None:
         },
         "LEFT_PICK": (
             module_root
-            / "module_5_left_pick/reverse_pick_to_handoff/main.py"
+            / "module_5_left_pick/module_5_2_reverse_pick_to_handoff/main.py"
         ),
         "LEFT_HANDOFF_PREP": (
-            module_root / "module_5_left_pick/reverse_pick_to_handoff/handoff/main.py"
+            module_root / "module_5_left_pick/module_5_2_reverse_pick_to_handoff/handoff/main.py"
         ),
         "RIGHT_PUSH_TO_Q1": (
             MODULAR_RIGHT_BUFFER_PIPELINE

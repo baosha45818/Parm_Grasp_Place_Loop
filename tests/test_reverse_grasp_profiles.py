@@ -7,18 +7,18 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.deployment_modes import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.deployment_modes import (
     apply_mode_environment,
     load_mode,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.profiles import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.profiles import (
     load_reverse_grasp_profile,
     load_reverse_ready_profile,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_1.execute_confirmed_grasp import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.execute_confirmed_grasp import (
     build_candidates as build_workpiece_1_candidates,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_2.execute_convex_tab_grasp import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_2.execute_convex_tab_grasp import (
     build_targets as build_workpiece_2_targets,
 )
 

@@ -25,12 +25,12 @@ QUALITY_GATE = HERE / "execution_quality_gate.json"
 sys.path.insert(0, str(PROJECT))
 
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.weight_verification import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.weight_verification import (
     POST_CLOSE_CHECK_LIFT_M,
     capture_open_gripper_baseline,
     verify_object_after_lift,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.profiles import load_reverse_ready_profile
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.profiles import load_reverse_ready_profile
 from tools.execution_timing import ExecutionTiming
 
 

@@ -7,13 +7,13 @@ import unittest
 
 import numpy as np
 
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_1.execute_prediction import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.execute_prediction import (
     load_prediction,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_2.execute_convex_tab_grasp import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_2.execute_convex_tab_grasp import (
     validate_pose_quality,
 )
-from modules.module_5_left_pick.reverse_pick_to_handoff.grasp.workpiece_2.predict_convex_tab_grasp import (
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_2.predict_convex_tab_grasp import (
     pose_from_module4_result,
 )
 

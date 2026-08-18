@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""正面分支：用 Module 4-1 的 ICP 位姿重新抓取桌面工件。
+"""正面分支：用 Module 4-1 的 ICP 位姿重抓并放到桌面中间。
 
 只接受已经通过 Buffer Check 质量门的唯一 FRONT 结果。以 ICP 原点作为
 抓取参考；预抓高度和 LIN 下移距离独立配置，默认闭爪点为 ICP 上方 3 cm。
 对 ICP 工件轴尝试两个夹爪姿态候选：``(+Z,+Y,+X)=(+X,+Y,-Z)`` 及
 ``(-X,-Y,-Z)``；均可达时选择左臂关节位移较小者。闭爪后 LIN 上提 3 cm。
-成功后输出
-Module 3 可直接消费的 ``T_tool_object`` / ``T_body_base_object``。
+持件确认后继续执行旧 Module 3-1 FRONT 放置：经中间位和 graspup_top，
+把工件放到对应工件型号的桌中目标，松爪并返回 graspup。
 """
 
 from __future__ import annotations
@@ -24,13 +24,16 @@ from scipy.spatial.transform import Rotation
 
 
 ROOT = Path(__file__).resolve().parents[3]
-sys.path[:0] = [str(ROOT), str(ROOT / "tool")]
+HERE = Path(__file__).resolve().parent
+sys.path[:0] = [str(HERE), str(ROOT), str(ROOT / "tool")]
 
 from loop_config import LoopConfig
 from loop_types import ObjectPose
 from planner_runtime import PlannerRuntime
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
 from modules.stage_result import write_stage_result
+from front_table_place import place_front_workpiece_at_table_center
+from placement_config import load_workpiece_parameters
 
 
 DEFAULT_PREGRASP_HEIGHT_M = 0.05
@@ -324,6 +327,15 @@ def main() -> int:
         raise ValueError(
             "--descent-distance-m 必须在 (0, --pregrasp-height-m] m 内"
         )
+    # 所有决定后续运动路径的业务输入和配置必须在连接机械臂之前完成校验。
+    # 否则缺失工件型号或损坏的 TOML 会让程序在已经持件后才失败。
+    buffer_result = json.loads(args.buffer_check_result.read_text(encoding="utf-8"))
+    workpiece = str(buffer_result.get("workpiece_id") or "")
+    if workpiece not in {"1", "2"}:
+        raise RuntimeError(
+            f"Buffer Check 缺少有效 workpiece_id，无法选择桌中放置参数: {workpiece!r}"
+        )
+    workpiece_parameters = load_workpiece_parameters(workpiece)
     T_camera_object, icp_rotation_projection_error, T_body_object_direct = _front_icp_pose(
         args.buffer_check_result
     )
@@ -332,7 +344,6 @@ def main() -> int:
         f"[front-regrasp] Buffer Check ICP 可视化已归档到 {visualization_archive}",
         flush=True,
     )
-    buffer_result = json.loads(args.buffer_check_result.read_text(encoding="utf-8"))
     T_body_camera = None
     if T_body_object_direct is None:
         calibration_path = Path(buffer_result.get("body_head_calibration") or "")
@@ -418,7 +429,9 @@ def main() -> int:
             lift_plan = preclose_plan(
                 f"{label} / Z+3cm LIN 上提", candidate_lift, "lin", descent_trajectory[-1]
             )
-            if lift_plan is None:
+            lift_trajectory = (lift_plan or {}).get("data", {}).get("trajectory") or []
+            if not lift_trajectory or len(lift_trajectory[-1]) != 7:
+                print(f"NO_GRASP: {label} 上提规划无有效末端关节路点。", flush=True)
                 continue
             displacement = _joint_displacement_norm_deg(current_joints, trajectory[-1])
             feasible_candidates.append((
@@ -478,18 +491,63 @@ def main() -> int:
         T_eef_object = np.linalg.inv(T_body_eef) @ T_body_object_at_table
         T_body_object_held = T_body_eef_after_lift @ T_eef_object
         T_transfer_object = np.linalg.inv(T_body_transfer_after_lift) @ T_body_object_held
+        def require_holding(context: str) -> None:
+            still_held, hold_position, hold_state = _wait_for_hold(args.gripper_host)
+            if not still_held:
+                raise RuntimeError(
+                    f"{context}前左夹爪未确认持件: "
+                    f"motion_state={hold_state!r}, position={hold_position}"
+                )
+
+        placement = place_front_workpiece_at_table_center(
+            workpiece=workpiece,
+            T_transfer_object=T_transfer_object,
+            planner_host=args.planner_host,
+            arm_host=args.arm_host,
+            speed=args.speed,
+            require_holding=require_holding,
+            open_gripper=lambda context: _open_left_gripper_or_raise(
+                args.gripper_host, context=context
+            ),
+            parameters=workpiece_parameters,
+        )
+        if placement.get("outcome") == "planning_timeout_recovered_at_graspup":
+            _write_result(args.result_file, {
+                "stage": "front_table_place",
+                "source_stage": "front_buffer_regrasp",
+                "outcome": "planning_timeout_recovered_at_graspup",
+                "classification": "FRONT",
+                "placement_branch": "BRANCH_1_FRONT",
+                "workpiece_id": workpiece,
+                "placement": placement,
+                "T_tool_object": T_transfer_object.tolist(),
+                "T_body_base_object": T_body_object_held.tolist(),
+                "released": True,
+                "released_at_verified_target": False,
+                "returned_to_graspup": True,
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            })
+            shutil.copy2(
+                args.result_file,
+                visualization_archive / "front_table_place_result.json",
+            )
+            print(
+                "[front-regrasp] 桌中规划超时；已完成旧Module3丢弃恢复并回graspup；"
+                f"结果={args.result_file}",
+                flush=True,
+            )
+            return 0
         _write_result(args.result_file, {
-            # Module 3 consumes the stable ``left_inspect`` result contract.
-            # This recovery has produced the same two required transforms after
-            # a fresh ICP-guided grasp; retain its real provenance separately.
-            "stage": "left_inspect",
+            "stage": "front_table_place",
             "source_stage": "front_buffer_regrasp",
             "outcome": "success",
             "classification": "FRONT",
+            "placement_branch": "BRANCH_1_FRONT",
+            "workpiece_id": workpiece,
+            "placement": placement,
+            # 保留重抓成功并上提后的刚性关系，便于复核旧 Module 3 的目标换算。
             "T_tool_object": T_transfer_object.tolist(),
             "T_body_base_object": T_body_object_held.tolist(),
-            # 保留历史下游仍读取的持件变换字段；这些值采集于成功重抓并抬升后，
-            # 此时工件与真实 left_eef 刚性连接。
             "T_body_left_eef_at_inspect": T_body_eef_after_lift.tolist(),
             "T_left_eef_object": T_eef_object.tolist(),
             "icp_object_pose_body_base": T_body_object_at_table.tolist(),
@@ -504,11 +562,19 @@ def main() -> int:
             "pregrasp_target_body_base": T_body_pregrasp.tolist(),
             "buffer_check_visualization_archive": str(visualization_archive),
             "post_grasp_lift_m": POST_GRASP_LIFT_M,
-            "gripper": {"motion_state": motion_state, "position_percent": position},
+            "gripper_after_regrasp_lift": {
+                "motion_state": motion_state,
+                "position_percent": position,
+            },
+            "released": True,
+            "returned_to_graspup": True,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
-        shutil.copy2(args.result_file, visualization_archive / "front_buffer_regrasp_result.json")
-        print(f"[front-regrasp] 成功；Module 3 输入已写入 {args.result_file}", flush=True)
+        shutil.copy2(args.result_file, visualization_archive / "front_table_place_result.json")
+        print(
+            f"[front-regrasp] 重抓及旧Module3 FRONT桌中放置完成；结果={args.result_file}",
+            flush=True,
+        )
         return 0
     finally:
         planner.close()
