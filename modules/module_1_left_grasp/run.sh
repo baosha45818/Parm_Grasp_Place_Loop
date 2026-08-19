@@ -6,18 +6,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOOP_ROOT="${PARM_LOOP_ROOT:-$(cd -- "${HERE}/../.." && pwd)}"
 SAM_DIR="${LOOP_ROOT}/tools/sam2-service"
 DEFAULT_SAM_SOCKET="${SAM_DIR}/runtime/sam2-service.sock"
-LEGACY_SAM_SOCKET="${LOOP_ROOT}/tool/sam2-service/runtime/sam2-service.sock"
-if [[ -n "${PARM_SAM2_SOCKET:-}" ]]; then
-  SAM_SOCKET="${PARM_SAM2_SOCKET}"
-elif [[ -S "${LEGACY_SAM_SOCKET}" ]] \
-  && curl --silent --fail --max-time 2 --unix-socket "${LEGACY_SAM_SOCKET}" \
-    http://localhost/healthz >/dev/null; then
-  # Reuse a resident pre-migration process without copying runtime state.
-  # The next cold start uses tools/sam2-service and DEFAULT_SAM_SOCKET.
-  SAM_SOCKET="${LEGACY_SAM_SOCKET}"
-else
-  SAM_SOCKET="${DEFAULT_SAM_SOCKET}"
-fi
+SAM_SOCKET="${PARM_SAM2_SOCKET:-${DEFAULT_SAM_SOCKET}}"
 SAM_LOCK_FILE="${SAM_SOCKET}.lock"
 SAM_PID_FILE="${SAM2_SERVICE_PID_FILE:-$(dirname "${SAM_SOCKET}")/sam2-service.pid}"
 PYTHON_BIN="${LOOP_ROOT}/.venv/bin/python"

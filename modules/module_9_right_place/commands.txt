@@ -32,7 +32,7 @@ cd /home/dainanjun/shurenbin/desktop_grasp
 
 9.
 PY=/home/dainanjun/Public/data_collector/.venv/bin/python
-SCRIPT=/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/inspection_support/legacy_inspect/capture_selected_rgbd.py
+SCRIPT=/home/dainanjun/Public/Parm_Grasp_Place_Loop/tools/inspection_support/legacy_inspect/capture_selected_rgbd.py
 
 $PY $SCRIPT --list
 $PY $SCRIPT --camera 3

@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "frame_id": "workpiece2_top_view",
-  "offset_object_m": [0.015, 0.01, 0.0],
-  "offset_object_mm": [15.0, 10.0, 0.0],
-  "meaning": "Apply after the nominal convex-tab contact point and grasp-down offset. Components are expressed in the freshly estimated workpiece2_top_view frame, so they rotate with each new ICP pose.",
-  "source_manual_report": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/reverse_grasp/grasp/runs/manual_reverse_20260802_133651_manual/manual_adjust_grasp_plan.json",
-  "source_status": "manual_adjust_grasp_and_lift_complete"
-}

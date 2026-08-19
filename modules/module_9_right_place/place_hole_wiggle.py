@@ -34,7 +34,7 @@ from move_by_joints import (  # noqa: E402
     import_sdk,
     rotvec_to_rpy,
 )
-from tool.left_motion_right_servo_lock import right_servo_guard  # noqa: E402
+from tools.left_motion_right_servo_lock import right_servo_guard  # noqa: E402
 from cli_and_logging import (  # noqa: E402
     WORKPIECE_CONFIGS,
     make_event_logger,

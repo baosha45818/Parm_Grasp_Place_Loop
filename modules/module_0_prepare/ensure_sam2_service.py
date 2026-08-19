@@ -16,9 +16,9 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 SOCKET = Path(os.environ.get(
     "SAM2_SERVICE_SOCKET",
-    "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/sam2-service/runtime/sam2-service.sock",
+    "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tools/sam2-service/runtime/sam2-service.sock",
 ))
-START_SCRIPT = ROOT / "tool/sam2-service/start_uds_server.sh"
+START_SCRIPT = ROOT / "tools/sam2-service/start_uds_server.sh"
 LOG = ROOT / "output/services/sam2-service.log"
 RECOVERY_LOCK = SOCKET.with_name(f"{SOCKET.name}.recovery.lock")
 

@@ -25,7 +25,8 @@ from scipy.spatial.transform import Rotation
 
 ROOT = Path(__file__).resolve().parents[3]
 HERE = Path(__file__).resolve().parent
-sys.path[:0] = [str(HERE), str(ROOT), str(ROOT / "tool")]
+# 公共 Planner 工具已经统一收拢到 tools/；保留模块目录以加载本地参数文件。
+sys.path[:0] = [str(HERE), str(ROOT), str(ROOT / "tools")]
 
 from loop_config import LoopConfig
 from loop_types import ObjectPose

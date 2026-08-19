@@ -2,7 +2,7 @@
   "schema_version": 1,
   "owner_module": "module_5_left_pick/reverse_pick_to_handoff",
   "mode": "gzhu",
-  "stl": "tool/welding_up_side_1118_only_2_small_screws_removed.stl",
+  "stl": "tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl",
   "wide_head_outward_grasp_offset_m": 0.005,
   "wide_head_inward_grasp_offset_m": 0.010,
   "wide_head_image_left_grasp_lateral_offset_m": 0.0,

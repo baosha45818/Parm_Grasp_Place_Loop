@@ -3,7 +3,7 @@
 from time import time
 
 from loop_types import ResultStatus, RightArmState, make_result
-from tool.planner_runtime import PlannerRuntime
+from tools.planner_runtime import PlannerRuntime
 
 
 def module_10_right_idle(right: RightArmState, planner: PlannerRuntime):

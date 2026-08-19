@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "description": "Gzhu 固定观察位的自动 SAM2 标点：头部命令 pitch=2 deg、yaw=26.5 deg。坐标相对 RGB 图像归一化；源自历史已使用的该观察角配置，切勿与 xiangxin 的 25/35 配置混用。",
+  "roi_xyxy_normalized": [0.40094, 0.05208, 0.68396, 0.58333],
+  "positive_points_normalized": [
+    [0.47052, 0.15833],
+    [0.56132, 0.20833],
+    [0.62618, 0.24583]
+  ],
+  "negative_points_normalized": [
+    [0.64505, 0.14167],
+    [0.64858, 0.14375]
+  ],
+  "mask_color_bgr": [0, 255, 0],
+  "mask_alpha": 0.45
+}

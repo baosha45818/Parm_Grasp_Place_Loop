@@ -4,9 +4,8 @@
 > 左右并行、观察位复位、停止链与人工恢复均位于 `controller/`。尚未进行真实机械臂
 > 运动验收。
 >
-> 范围：新的总控及其调度、锁、模块结果协议均放在 `controller/`；旧的
-> `modules/modular_dual_arm_loop.py -> tests/loop/simple_dual_arm_loop.py` 双层总控
-> 在新总控验收前保留，只作为旧实现参考。
+> 范围：新的总控及其调度、锁、模块结果协议均放在 `controller/`；旧双层总控与
+> 根目录 `tests/` 已在迁移完成后移除。
 
 ## 1. 目标
 
@@ -29,7 +28,7 @@
 | Module 9 插孔失败 | 允许左臂继续运行；右臂退回 `right place` 起始位置。达到模块内部上限后人工干预，`y` 重启 Module 9。 |
 | Buffer 抓取人工恢复 | Module 5 重试耗尽后，人工处理并输入 `y`；不论工件是否被移动，均固定从 Module 4.1 重新观察、生成新 TF 后再进入 Module 5 单次抓取。 |
 | Module 1 内部重试 | 视觉稳定、Planner 不可达、重量校验等现有内部重试次数原样保留；本轮重构只补统一结果输出，不改变其策略。 |
-| 旧总控 | `modules/modular_dual_arm_loop.py` 与 `tests/loop/simple_dual_arm_loop.py` 保留在原位置作为旧实现参考，但新流程不再调用它们。 |
+| 旧总控 | 已删除；新流程只能从 `controller/main.py` 启动。 |
 | 左臂标准交接位 | Module 1 抓取成功和 Module 5.1 正面重抓成功后，均以 `graspuptop` 作为结束位并写出 handoff；不在模块内继续放置。 |
 | Module 3 放置类型 | Module 3 统一负责左臂已持件后的放置：Module 1 handoff 使用 `buffer` 目标；Module 5.1 handoff 使用 `middle` 目标。两类目标配置放在 Module 3 的工件 TOML 内，均为固定 `left_eef` 位置并保持进入 `graspuptop` 时的末端旋转。 |
 
@@ -108,7 +107,7 @@ controller/
 | 右手正面调整与抓取（复合模块） | Module 4.2 → Module 7 → Module 8.1 的内部串联 | 工件任务和部署模式 | `RIGHT_HOLDS_WORKPIECE` | `OPERATOR_REQUIRED`/`FAULT` + 安全位 | 保留现有小总控实现，但增加稳定 CLI 与统一输入/输出；新总控不拆开其内部细节。 |
 | Module 8.2 交接 | 左右手交接和右手放置准备 | 左手 handoff | `RIGHT_HOLDS_WORKPIECE` | `FAULT` + 左右手实际状态 | 标准结果必须声明两臂和交接区的最终状态。 |
 | Module 9 右放 | 右手对孔、wiggle、恢复 | 右手持件和目标信息 | `RIGHT_PLACED` | `OPERATOR_REQUIRED`，右手在恢复安全位 | 保留内部插孔重试；结果明确 safe state。 |
-| Module 10 右待机 | 放置后回待机 | Module 9 成功结果 | `RIGHT_IDLE` | `FAULT` | 将 `tests/loop` 的实现迁回模块，并提供标准结果。 |
+| Module 10 右待机 | 放置后回待机 | Module 9 成功结果 | `RIGHT_IDLE` | `FAULT` | 实现已迁入模块目录，并提供标准结果。 |
 | Module 6 左待机 | 左手回待机 | 当前左臂状态 | `LEFT_IDLE` | `FAULT` | 补清晰 CLI 和标准结果。 |
 
 ## 6. 调度主线
@@ -177,7 +176,7 @@ Module 9 执行 Servo 时只持有 `RIGHT_ARM`，**不阻塞左臂普通任务**
 2. 先完成左臂边界整理：Module 1 与 5.1 均输出 `graspuptop` handoff；删除 5.1 内部的旧桌中放置调用；Module 3 的配置解析器按 `--placement-kind` 读取现有 `[buffer]` 或 `[middle]` 段，并以进入 `graspuptop` 时的末端旋转移动至固定目标位置。
 3. 给 Module 0/1/3/4.1/5/6/8/9/10 加统一 result wrapper，先做 plan-only/模拟结果测试。
 4. 将右手 `4.2 → 7 → 8.1` 小总控封装为一个稳定的复合模块接口。
-5. 将 Module 10 从 `tests/loop` 迁回模块目录，并删除新总控对 `tests/loop` 的依赖。
+5. Module 10 已迁回模块目录；后续仅维护模块内实现。
 6. 编写并单测 `scheduler_rules.py`：正面、反面、UNCERTAIN、重试耗尽、人工恢复、左右并发。
 7. 在不执行真实运动的模式下进行端到端状态机演练。
 8. 分阶段启用真实运动，并保留每一步的结果 JSON、状态快照和日志以便回放。

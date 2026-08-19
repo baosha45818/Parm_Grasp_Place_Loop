@@ -164,17 +164,19 @@ modules/module_9_right_place/logs/
   hole_a_workpiece_<n>_retry_session_<timestamp>.log
 ```
 
-由总控 [`modular_dual_arm_loop.py`](../../modular_dual_arm_loop.py) 执行时，总控为整轮循环创建唯一运行目录：
+由新总控 `controller/main.py` 执行时，总控为整轮循环创建唯一运行目录：
 
 ```text
-output/modular_dual_arm_loop/<run_id>/
+controller/runtime/<run_id>/
   run.log                  # 总控、子进程标准输出和错误输出的完整运行记录
   events.jsonl             # 总控结构化事件
   summary.json             # 总控耗时与成功率汇总
   latest_module_status.json # 最新模块状态
 ```
 
-当前总控实际绑定的是旧入口 `place_hole_a_wiggle_new_config.py`，不是本 README 描述的 `place_hole_wiggle.py`。因此总控运行时应优先查看上述 `run.log`；旧入口仍会额外把 Module 9 的尝试日志和重试会话日志写入 `modules/module_9_right_place/logs/`。两类日志用途不同：前者用于整轮系统关联，后者用于放置阶段的力数据和进洞判定分析。
+新总控调用本目录的 `place_hole_wiggle.py`。总控运行时应优先查看
+`controller/runtime/<run_id>/logs/`；Module 9 自身仍会把尝试和重试会话日志写入
+`modules/module_9_right_place/logs/`。两类日志用途不同：前者用于整轮系统关联，后者用于放置阶段的力数据和进洞判定分析。
 
 常用事件包括：
 

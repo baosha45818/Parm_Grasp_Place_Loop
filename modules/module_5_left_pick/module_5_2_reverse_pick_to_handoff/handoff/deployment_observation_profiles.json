@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "xiangxin": {
+    "head_pose_deg": {"pitch": 25.0, "yaw": 35.0},
+    "default_mask_mode": "auto",
+    "auto_mask_config": "tools/handoff_observation/head_d435_auto_mask_config.json",
+    "description": "Xiangxin 反抓交接观察位；固定 SAM2 自动点已在该观察角标定。"
+  },
+  "gzhu": {
+    "head_pose_deg": {"pitch": 2.0, "yaw": 26.5},
+    "default_mask_mode": "auto",
+    "auto_mask_config": "tools/handoff_observation/gzhu_head_d435_auto_mask_config.json",
+    "description": "Gzhu 反抓交接观察位；使用仅适用于 pitch=2°、yaw=26.5° 的固定 SAM2 自动点。"
+  }
+}

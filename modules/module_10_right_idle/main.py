@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-IMPLEMENTATION = ROOT / "tests/loop/right_place_and_idle.py"
+IMPLEMENTATION = ROOT / "modules/module_10_right_idle/right_place_and_idle.py"
 
 
 if __name__ == "__main__":

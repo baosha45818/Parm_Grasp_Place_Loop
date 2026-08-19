@@ -9,7 +9,7 @@
 | Module 4 | `module_4_head_judge/module_4_1_buffer_state_estimation/` | 头部 RGB-D、SAM2、正反面与物体位姿 | `buffer_face_check.json` |
 | Module 5 反面分支 | `module_5_left_pick/reverse_pick_to_handoff/grasp/workpiece_2/` | 凸耳抓取位姿、Planner 预检、左臂抓取与抬升 | `convex_tab_grasp_prediction.json`、`grasp_plan.json` |
 
-唯一 STL 来源：`tool/workpiece_2/workpiece_2.stl`。
+唯一 STL 来源：`tools/workpiece_2/workpiece_2.stl`。
 
 ## Module 4：方向与物体位姿
 
@@ -75,10 +75,10 @@ Module 4 output/module_4_1/workpiece_2_reverse/runs/<run-name>/02_icp/fixed_reve
 
 ```bash
 # 工件1：不传参数时保持默认工件1配置。
-uv run modules/modular_dual_arm_loop.py ...
+python3 controller/main.py --mode <mode> --workpiece 2 --live ...
 
 # 工件2：仅反面分支进入本说明的固定反面预测与凸耳反抓流水线。
-uv run modules/modular_dual_arm_loop.py --workpiece 2 ...
+python3 controller/main.py --mode <mode> --workpiece 2 --live ...
 ```
 
 总控将选择值写入 `PARM_LOOP_WORKPIECE`。在左臂反抓阶段，
@@ -123,7 +123,7 @@ python3 /home/dainanjun/zhuyiming/push_T_ALL/workpiece_2/q1_closed_loop_pipeline
 不修改其实现。工件1改由模块内
 `module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py` 运行。
 
-`tests/reversed_head_observation_2/full-execute` 仍是独立联调工具，不会被总控
+旧 workpiece-2 独立联调工具已删除，不会被总控
 调用，因为它还包含右手最终放置，会与 Module 9 的职责冲突。
 
 ## 当前限制

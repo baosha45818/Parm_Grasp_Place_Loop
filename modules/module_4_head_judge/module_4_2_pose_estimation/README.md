@@ -133,8 +133,8 @@ STL +Y = 语义 +Y、STL +Z = 语义 +Z。原点的z不在工件中心，而在�
 |---|---|---|
 | `POSE_ESTIMATION_PYTHON` | 运行脚本的 Python | 项目 `.venv/bin/python` |
 | `PARM_HEAD_HOST` | 头部服务地址 | `localhost` |
-| `POSE_ESTIMATION_SAM2_SOCKET` | SAM2 Unix socket | `tool/sam2-service/runtime/sam2-service.sock` |
-| `POSE_ESTIMATION_SAM2_BIN` | SAM2 服务可执行文件 | `tool/sam2-service/.venv/bin/sam2-service` |
+| `POSE_ESTIMATION_SAM2_SOCKET` | SAM2 Unix socket | `tools/sam2-service/runtime/sam2-service.sock` |
+| `POSE_ESTIMATION_SAM2_BIN` | SAM2 服务可执行文件 | `tools/sam2-service/.venv/bin/sam2-service` |
 
 若 SAM2 socket 尚不存在，脚本会尝试启动常驻的 `sam2-service`。服务启动/推理失败时，本模块不会得到有效 mask。
 

@@ -12,13 +12,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PYTHON="${SCRIPT_DIR}/.venv/bin/python"
-LEGACY_PYTHON="${SCRIPT_DIR}/../../tool/sam2-service/.venv/bin/python"
 if [[ -x "${LOCAL_PYTHON}" ]]; then
     PYTHON_SERVICE="${LOCAL_PYTHON}"
-elif [[ -x "${LEGACY_PYTHON}" ]]; then
-    # Transitional interpreter reuse only: PYTHONPATH below forces all SAM2
-    # service code and checkpoints to come from tools/sam2-service.
-    PYTHON_SERVICE="${LEGACY_PYTHON}"
 else
     echo "sam2-service Python environment is unavailable" >&2
     echo "Run: cd ${SCRIPT_DIR} && uv sync --python 3.10" >&2

@@ -1,6 +1,10 @@
 # 两类工件左臂反抓与右臂交接的全部预设关节位。
 # 坐标单位为 deg；交接中心相对 body_base，单位为 m。
 # 修改后需重新启动对应模块/总控，运行中的进程不会自动重新读取本文件。
+#
+# 注意：云台观察角、手眼标定和 SAM2 自动标点是“部署”参数，不能按工件共用。
+# xiangxin 与 gzhu 的值在文件末尾的 [deployment.<mode>] 分区单独维护；
+# 调用 load_workpiece_handoff_profile() 会按照 PARM_DEPLOYMENT_MODE 选择它们。
 
 [workpiece_1.left_reverse_grasp]
 ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
@@ -26,7 +30,7 @@ left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.016
 # grasp_joints_deg = [164.523, 57.0258, -68.7826, 78.3201, -24.2591, 3.8508, 78.1156]
 grasp_joints_deg = [168.4313, 55.7886, -67.901, 89.9698, -23.648, -3.5541, 71.7984]
 # 工件1反抓交接后、进入 Module 9 前的统一右臂放置准备位；必须与
-# tests/loop/simple_dual_arm_loop.py 的 RIGHT_PLACE_READY_JOINTS_DEG 保持一致。
+# 该位姿由 Module 8.2 与 Module 9 的正式交接链共享。
 place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
 
 place_ready_tolerance_deg = 0.5
@@ -58,3 +62,24 @@ grasp_joints_deg = [163.1305, 59.7847, -70.9730, 79.0452, -21.6032, 0.3420, 79.2
 place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
 post_release_clearance_minus_x_m = 0.03
 post_release_clearance_plus_z_m = 0.03
+
+# ---------------------- 现场部署专用覆盖（不得合并） ----------------------
+
+[deployment.xiangxin.left_observation]
+# 祥鑫相机/手眼标定的反抓交接观察位与固定 SAM2 自动标点。
+head_pitch_deg = 25.0
+head_yaw_deg = 35.0
+alignment = "tools/calibration/head_d435/xiangxin_reverse_observation.json"
+auto_mask_config = "tools/handoff_observation/head_d435_auto_mask_config.json"
+
+[deployment.gzhu.left_observation]
+# 广珠相机/手眼标定的反抓交接观察位；绝不能套用祥鑫的 25°/35° 自动点。
+head_pitch_deg = 2.0
+head_yaw_deg = 26.5
+alignment = "tools/calibration/head_d435/gzhu_reverse_observation.json"
+auto_mask_config = "tools/handoff_observation/gzhu_head_d435_auto_mask_config.json"
+
+[deployment.gzhu.workpiece_2_right_handoff]
+# 广珠工件2右手接住后进入放置准备位的独立示教点。右手“接住”本身的
+# prepare/pregrasp/grasp 三组关节位与公共工件2配置一致；只有该后续位置不同。
+place_ready_joints_deg = [102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196]

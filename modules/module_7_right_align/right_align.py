@@ -44,7 +44,7 @@ if str(LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(LOOP_ROOT))
 
 from planning_log import append_event, planner_start_pose, planning_event
-from tool.planner_task_retry import retry_task_creation
+from tools.planner_task_retry import retry_task_creation
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 # The SDK reports ``eef_pose`` in the planner's ``right_hand_transfer_base``

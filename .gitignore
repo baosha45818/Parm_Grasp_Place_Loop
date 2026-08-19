@@ -11,7 +11,7 @@ runtime/
 third_party/graspnet/deploy/version7/jobs/
 modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/runs/
 modules/module_5_left_pick/module_5_1_reverse_grasp/workpiece_2_pipeline/grasp/visualizations/
-tool/inspection_support/legacy_inspect/output_pc1/
+tools/inspection_support/legacy_inspect/output_pc1/
 reverse_grasp/grasp/runs/
 modules/module_7_right_align/vendor/push_t/saved_poses/
 tmp/

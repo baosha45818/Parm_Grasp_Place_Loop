@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
         "--socket",
         default=os.environ.get(
             "PARM_SAM2_URL",
-            f"unix://{PROJECT_ROOT / 'tool/sam2-service/runtime/sam2-service.sock'}",
+            f"unix://{PROJECT_ROOT / 'tools/sam2-service/runtime/sam2-service.sock'}",
         ),
     )
     return parser.parse_args()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -55,12 +56,31 @@ def _positive(section: dict[str, Any], key: str, label: str) -> float:
     return value
 
 
-def load_workpiece_handoff_profile(workpiece: str, path: Path = POSITIONS_PATH) -> dict[str, Any]:
-    """返回与旧 profile 兼容的、已校验的单个工件位置配置。"""
+def load_workpiece_handoff_profile(
+    workpiece: str,
+    path: Path = POSITIONS_PATH,
+    *,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    """返回按部署模式绑定的工件反抓/交接配置。
+
+    关节运动的公共部分仍按工件维护；云台角、手眼标定、自动标点以及少数
+    现场专用右臂位置必须由 ``xiangxin``/``gzhu`` 分开选择，禁止静默混用。
+    """
     if workpiece not in {"1", "2"}:
         raise ValueError(f"workpiece 必须是 '1' 或 '2'，当前为 {workpiece!r}")
     resolved = path.expanduser().resolve()
     raw = _parse_toml_subset(resolved)
+    selected_mode = (mode or os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin")).strip()
+    if selected_mode not in {"xiangxin", "gzhu"}:
+        raise ValueError(
+            "反抓交接配置的 mode 必须是 xiangxin 或 gzhu，"
+            f"当前为 {selected_mode!r}"
+        )
+    deployment = ((raw.get("deployment") or {}).get(selected_mode) or {})
+    deployment_observation = dict(deployment.get("left_observation") or {})
+    if not deployment_observation:
+        raise RuntimeError(f"位置配置缺少 deployment.{selected_mode}.left_observation")
     section = (((raw.get(f"workpiece_{workpiece}") or {})))
     if not isinstance(section, dict):
         raise RuntimeError(f"位置配置缺少 workpiece_{workpiece}: {resolved}")
@@ -92,6 +112,27 @@ def load_workpiece_handoff_profile(workpiece: str, path: Path = POSITIONS_PATH) 
     if not alignment.is_file():
         raise FileNotFoundError(f"{handoff_label}.alignment 不存在: {alignment}")
     left_handoff["alignment"] = alignment.resolve()
+    # 部署覆盖必须在公共工件字段校验完成后进行；这样公共关节位不会被误改。
+    try:
+        left_handoff["head_pitch_deg"] = float(deployment_observation["head_pitch_deg"])
+        left_handoff["head_yaw_deg"] = float(deployment_observation["head_yaw_deg"])
+        deployment_alignment = ROOT / str(deployment_observation["alignment"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"deployment.{selected_mode}.left_observation 缺少有效云台角或标定"
+        ) from exc
+    if not deployment_alignment.is_file():
+        raise FileNotFoundError(
+            f"deployment.{selected_mode}.left_observation.alignment 不存在: "
+            f"{deployment_alignment}"
+        )
+    left_handoff["alignment"] = deployment_alignment.resolve()
+    auto_mask_config = ROOT / str(deployment_observation.get("auto_mask_config", ""))
+    if not auto_mask_config.is_file():
+        raise FileNotFoundError(
+            f"deployment.{selected_mode}.left_observation.auto_mask_config 不存在: "
+            f"{auto_mask_config}"
+        )
 
     right_handoff = dict(section.get("right_handoff") or {})
     right_label = f"workpiece_{workpiece}.right_handoff"
@@ -104,11 +145,22 @@ def load_workpiece_handoff_profile(workpiece: str, path: Path = POSITIONS_PATH) 
             right_handoff[key] = _vector(right_handoff, key, 7, right_label)
         for key in ("post_release_clearance_minus_x_m", "post_release_clearance_plus_z_m"):
             right_handoff[key] = _positive(right_handoff, key, right_label)
+    deployment_right = dict(
+        deployment.get(f"workpiece_{workpiece}_right_handoff") or {}
+    )
+    if "place_ready_joints_deg" in deployment_right:
+        right_handoff["place_ready_joints_deg"] = _vector(
+            deployment_right, "place_ready_joints_deg", 7,
+            f"deployment.{selected_mode}.workpiece_{workpiece}_right_handoff",
+        )
 
     # 保持 Module 5-2/8-2 的原字段形状，避免因配置迁移改变运动逻辑。
     return {
         "schema_version": 1,
-        "profile_id": f"workpiece_{workpiece}_reverse_grasp_handoff_toml_v1",
+        "profile_id": (
+            f"{selected_mode}_workpiece_{workpiece}_reverse_grasp_handoff_toml_v2"
+        ),
+        "deployment_mode": selected_mode,
         "workpiece": workpiece,
         "left_reverse_grasp": left_ready,
         "left_observation": {
@@ -116,6 +168,7 @@ def load_workpiece_handoff_profile(workpiece: str, path: Path = POSITIONS_PATH) 
             "observation_joints_deg": list(left_handoff["observation_joints_deg"]),
             "head_pose_deg": {"pitch": left_handoff["head_pitch_deg"], "yaw": left_handoff["head_yaw_deg"]},
             "alignment": left_handoff["alignment"],
+            "auto_mask_config": auto_mask_config.resolve(),
         },
         "handoff": {
             "center_body_m": list(left_handoff["handoff_center_body_m"]),

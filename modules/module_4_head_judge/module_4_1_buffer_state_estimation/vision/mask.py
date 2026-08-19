@@ -21,8 +21,8 @@ from .sam2_client import prompt_segment
 MODULE_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = MODULE_ROOT.parents[2]
 CONFIG_ROOT = MODULE_ROOT / "configs"
-DEFAULT_SOCKET = PROJECT_ROOT / "tool/sam2-service/runtime/sam2-service.sock"
-SAM2_BINARY = PROJECT_ROOT / "tool/sam2-service/.venv/bin/sam2-service"
+DEFAULT_SOCKET = PROJECT_ROOT / "tools/sam2-service/runtime/sam2-service.sock"
+SAM2_BINARY = PROJECT_ROOT / "tools/sam2-service/.venv/bin/sam2-service"
 
 
 def _fit_table_plane(points: np.ndarray) -> np.ndarray:

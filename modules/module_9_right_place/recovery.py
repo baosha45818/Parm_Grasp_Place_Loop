@@ -7,7 +7,7 @@ import os
 from move_by_joints import current_pose, ensure_ready, import_sdk, rotvec_to_rpy
 from motion_primitives import move_in_active_session
 from right_arm_state import wait_for_right_task_stopped
-from tool.left_motion_right_servo_lock import right_servo_guard
+from tools.left_motion_right_servo_lock import right_servo_guard
 
 
 def lift_after_exhausted_search(

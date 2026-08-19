@@ -62,7 +62,7 @@ if str(LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(LOOP_ROOT))
 from tools.planner_task_retry import retry_task_creation
 # Use the SDK installed in the GraspNet virtualenv.  In particular, do not
-# prepend runtime/parm_sdk's archived 20260717 wheel: it speaks the legacy
+# prepend an archived SDK wheel: it may speak the legacy
 # gripper protocol and maps schema-3 left_gripper/right_gripper states to None.
 # The deployment environment is provisioned with the 20260803 SDK, which
 # supplies Arm, Gripper and Planner together.
@@ -318,7 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--weight-check-root",
         type=Path,
         default=DEFAULT_WEIGHT_CHECK_ROOT,
-        help="project root containing tests.grasp_weight_check",
+        help="project root containing tools.grasp_weight_check",
     )
     return parser
 
@@ -326,12 +326,12 @@ def build_parser() -> argparse.ArgumentParser:
 def load_weight_check_api(args: argparse.Namespace) -> tuple[Any, Any, Any, Any]:
     """Load the already-tested weight classifier without duplicating it here."""
     root = Path(args.weight_check_root).resolve()
-    module_file = root / "tests" / "grasp_weight_check" / "grasp_weight_check.py"
+    module_file = root / "tools" / "grasp_weight_check" / "grasp_weight_check.py"
     if not module_file.exists():
         raise RuntimeError(f"grasp weight check module is missing: {module_file}")
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
-    from tests.grasp_weight_check import (  # type: ignore[import-not-found]
+    from tools.grasp_weight_check import (
         GraspClass,
         WeightThresholds,
         collect_force_window,

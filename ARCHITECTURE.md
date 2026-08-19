@@ -40,9 +40,8 @@ Buffer Z候选、执行放置、松爪、失败恢复和回程。
 
 ## 总控状态
 
-旧 `modules/modular_dual_arm_loop.py` 和
-`modules/modular_dual_arm_loop_grasp.py` 尚未适配新链路，不属于当前有效入口。
-新总控应直接编排 Module1与Module3，不再声明 Module2阶段或其结果协议。
+旧双层总控已删除。当前唯一有效入口为 `controller/main.py`；它直接编排正式模块，
+不再声明 Module2阶段或其结果协议。
 
 ## 安全原则
 

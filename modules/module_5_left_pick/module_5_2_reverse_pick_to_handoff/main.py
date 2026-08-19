@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import datetime
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,11 +23,11 @@ REVERSE_IMPL = ROOT / 'modules/module_5_left_pick/module_5_2_reverse_pick_to_han
 sys.path.insert(0, str(ROOT))
 
 from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import reverse_grasp_record_from_icp
-from tool.inspection_support.stl_model import load_stl_triangles_m
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.deployment_modes import MODES
+from tools.inspection_support.stl_model import load_stl_triangles_m
 
 
-GRASP_CONFIG = ROOT / 'modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/grasp/config/workpiece_1_grasp.json'
-DEFAULT_STL = ROOT / 'tool/welding_up_side_1118_only_2_small_screws_removed.stl'
+DEFAULT_STL = ROOT / 'tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl'
 EXECUTOR = REVERSE_IMPL / 'execute_confirmed_grasp.py'
 OUTPUT_ROOT = ROOT / 'output/module_5_left_pick/reverse_buffer_regrasp'
 MAX_ICP_ROTATION_PROJECTION_ERROR = .01
@@ -35,12 +36,52 @@ MAX_ICP_ROTATION_PROJECTION_ERROR = .01
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--buffer-check-result', type=Path, required=True)
+    parser.add_argument('--mode', choices=('gzhu', 'xiangxin'),
+                        help='显式指定现场；未指定时必须与 M4 输出和总控环境一致')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--planner-host', default='127.0.0.1')
     parser.add_argument('--arm-host', default='192.168.3.11')
     parser.add_argument('--gripper-host', default='192.168.3.11')
     parser.add_argument('--speed', type=float, default=.20)
     return parser.parse_args()
+
+
+def _mode_grasp_config(payload: dict, explicit_mode: str | None) -> tuple[str, Path]:
+    """将反抓点补偿原子绑定到 M4 的现场 mode，禁止 xiangxin/gzhu 混用。"""
+    reported_mode = str(payload.get('mode') or '').strip()
+    environment_mode = os.environ.get('PARM_DEPLOYMENT_MODE', '').strip()
+    candidates = {
+        source: value
+        for source, value in (
+            ('--mode', explicit_mode),
+            ('M4 Buffer Check', reported_mode or None),
+            ('PARM_DEPLOYMENT_MODE', environment_mode or None),
+        )
+        if value is not None
+    }
+    unique = set(candidates.values())
+    if not unique:
+        raise RuntimeError(
+            '反抓缺少现场 mode：M4 结果必须包含 mode，或调用时传入 --mode'
+        )
+    if len(unique) != 1:
+        details = ', '.join(f'{source}={value!r}' for source, value in candidates.items())
+        raise RuntimeError(f'反抓现场 mode 不一致，拒绝混用抓取补偿：{details}')
+    mode_name = unique.pop()
+    try:
+        deployment = MODES[mode_name]
+    except KeyError as exc:
+        raise RuntimeError(f'未知反抓现场 mode：{mode_name!r}') from exc
+    config = deployment.workpiece_1_grasp_config.resolve()
+    if not config.is_file():
+        raise FileNotFoundError(f'{mode_name} 的工件1反抓补偿配置不存在：{config}')
+    config_mode = json.loads(config.read_text(encoding='utf-8')).get('mode')
+    if config_mode != mode_name:
+        raise RuntimeError(
+            f'反抓补偿配置与现场 mode 不匹配：{config} 的 mode={config_mode!r}，'
+            f'应为 {mode_name!r}'
+        )
+    return mode_name, config
 
 
 def _nearest_proper_rotation(matrix: np.ndarray) -> tuple[np.ndarray, float]:
@@ -91,6 +132,7 @@ def _camera_matrix(capture_dir: Path) -> np.ndarray:
 def main() -> int:
     args = parse_args()
     payload, diagnostic, T, table_normal = _load_back_icp(args.buffer_check_result)
+    mode_name, grasp_config = _mode_grasp_config(payload, args.mode)
     capture_dir = Path(payload.get('capture_dir') or '')
     if not capture_dir.is_dir():
         raise RuntimeError(f'Buffer Check capture_dir 不存在: {capture_dir}')
@@ -98,9 +140,11 @@ def main() -> int:
     record = reverse_grasp_record_from_icp(
         T, table_normal, _camera_matrix(capture_dir),
         load_stl_triangles_m(DEFAULT_STL).reshape(-1, 3),
-        json.loads(GRASP_CONFIG.read_text(encoding='utf-8')),
+        json.loads(grasp_config.read_text(encoding='utf-8')),
         object_key=str(diagnostic.get('object_key') or 'buffer-check-0'),
         quality={key: quality[key] for key in ('icp_fitness', 'icp_rmse_m') if key in quality} | {
+            'deployment_mode': mode_name,
+            'grasp_config': str(grasp_config),
             'depth_match_fraction': (quality.get('render') or {}).get('match_fraction'),
             'buffer_check_result': str(args.buffer_check_result),
             'buffer_check_capture_dir': str(capture_dir),

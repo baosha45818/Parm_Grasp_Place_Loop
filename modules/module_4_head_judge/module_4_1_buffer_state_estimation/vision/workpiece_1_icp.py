@@ -28,8 +28,8 @@ BODY_HEAD_CALIBRATION = (
     )).expanduser().resolve()
 )
 sys.path[:0] = [str(ROOT), str(HERE)]
-from tool.inspection_support.mask_depth import mask_depth_to_points_cam, voxel_downsample_np, remove_radius_outliers_np
-from tool.inspection_support.stl_model import load_stl_triangles_m, sample_surface_points
+from tools.inspection_support.mask_depth import mask_depth_to_points_cam, voxel_downsample_np, remove_radius_outliers_np
+from tools.inspection_support.stl_model import load_stl_triangles_m, sample_surface_points
 from tools.icp import tabletop_constrained_point_to_plane_icp
 from .geometry import workspace_roi_mask
 
@@ -229,7 +229,7 @@ def write_icp_alignment_3d(path, observed, aligned_cad, table_n, side, quality):
 
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--capture-dir', type=Path, required=True)
-    p.add_argument('--stl', type=Path, default=ROOT/'tool/welding_up_side_1118_only_2_small_screws_removed.stl')
+    p.add_argument('--stl', type=Path, default=ROOT/'tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl')
     p.add_argument('--orientation-config', type=Path, default=MODULE_ROOT/'configs/workpiece_1.json')
     a = p.parse_args(); d = a.capture_dir
     meta = json.loads((d/'metadata.json').read_text()); rgb = cv2.imread(str(d/'rgb_000.png')); depth = cv2.imread(str(d/'depth_aligned_000.png'), cv2.IMREAD_UNCHANGED)

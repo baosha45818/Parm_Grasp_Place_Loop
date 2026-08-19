@@ -10,7 +10,7 @@
 
 Module 5-1、5-2 与 Module 8-2 均在每次启动时读取 TOML。修改任一工件的
 位置不会改变另一工件；修改后重新启动总控或对应独立模块即可生效。旧的
-`left_reverse_regrasp_ready_joints.json` 和 `workpiece_2_handoff_profile.json`
+`left_reverse_regrasp_ready_joints.json` 与正式交接位置 TOML
 只保留用于历史追溯，不再是这些执行链的配置来源。
 
 反抓重量分段、采样稳定性和采样窗口参数则统一在

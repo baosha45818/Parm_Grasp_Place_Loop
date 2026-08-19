@@ -4,40 +4,24 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import math
 import os
-from pathlib import Path
 import sys
 import time
 from typing import Any
 
 
-LOOP_ROOT = next(
-    (parent for parent in Path(__file__).resolve().parents if parent.name == "Parm_Grasp_Place_Loop"),
-    Path(__file__).resolve().parents[2],
-)
-
-
 def import_sdk() -> Any:
+    """只使用项目 .venv 已安装的 Parm SDK，不再回退到归档运行包。"""
     try:
-        return importlib.import_module("parm_sdk")
-    except ImportError:
-        override = os.environ.get("PARM_SDK_WHEEL", "").strip()
-        candidates = [Path(override)] if override else []
-        candidates.extend(sorted(
-            (LOOP_ROOT / "runtime/parm_sdk").glob("parm_sdk-*.whl"),
-            reverse=True,
-        ))
-        for wheel in candidates:
-            if wheel.is_file():
-                sys.path.insert(0, str(wheel))
-                try:
-                    return importlib.import_module("parm_sdk")
-                except ImportError:
-                    continue
-    raise ImportError("无法导入 parm_sdk；请安装 SDK 或设置 PARM_SDK_WHEEL。")
+        import parm_sdk
+    except ImportError as exc:
+        raise ImportError(
+            "无法导入 parm_sdk；请使用项目虚拟环境启动，例如："
+            ".venv/bin/python controller/main.py ..."
+        ) from exc
+    return parm_sdk
 
 
 def finite(values: Any, count: int, name: str) -> list[float]:

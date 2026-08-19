@@ -29,8 +29,8 @@ M1 成功时左手已在 `graspuptop` 持件。Buffer 是单容量：总控只�
 若状态仍表示上一件正在 Buffer 生命周期中，总控拒绝放置并保持左手在
 `graspuptop`，不会用新件覆盖旧件。
 
-真实执行必须显式提供 `--live`，不会调用旧
-`modules/modular_dual_arm_loop.py` 或 `tests/loop/simple_dual_arm_loop.py`。
+真实执行必须显式提供 `--live`；项目已移除旧双层总控，唯一入口是本目录的
+`main.py`。
 
 ```bash
 python3 controller/main.py --mode xiangxin --workpiece 1 --live

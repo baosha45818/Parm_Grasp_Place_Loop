@@ -13,17 +13,17 @@ import numpy as np
 
 
 # This module-owned copy lives four levels below the loop root.  It must not
-# resolve through tests/reversed_head_observation_2 at runtime.
+# resolve through tools.handoff_observation at runtime.
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tests.reversed_head_observation.check_plan import (  # noqa: E402
+from tools.handoff_observation.check_plan import (  # noqa: E402
     START_JOINTS_DEG,
     max_joint_error_deg,
     validate_joint_vector,
 )
-from tests.reversed_head_observation.execute_handoff import (  # noqa: E402
+from tools.handoff_observation.execute_handoff import (  # noqa: E402
     read_tcp,
     validate_joint_return_plan,
 )
@@ -33,24 +33,24 @@ from modules.module_8_right_grasp.module_8_2_left_handoff.gripper_compat import 
     release_left_gripper,
 )
 from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile  # noqa: E402
-from tests.reversed_head_observation.execute_taught_tail_handoff import (  # noqa: E402
+from tools.handoff_observation.execute_taught_tail_handoff import (  # noqa: E402
     validate_arm_joint_plan,
     validate_right_cartesian_plan,
     wait_for_joint_target,
     wait_for_pose_close,
 )
-from tests.reversed_head_observation.handoff_attachment import (  # noqa: E402
+from tools.handoff_observation.handoff_attachment import (  # noqa: E402
     request_attachment_owner,
 )
-from tests.reversed_head_observation.handoff_geometry import (  # noqa: E402
+from tools.handoff_observation.handoff_geometry import (  # noqa: E402
     transform_error,
     transform_to_object_pose,
     validate_transform,
 )
-from tests.reversed_head_observation.move_object_center import (  # noqa: E402
+from tools.handoff_observation.move_object_center import (  # noqa: E402
     handoff_axis_errors,
 )
-from tests.reversed_head_observation.preflight_handoff import (  # noqa: E402
+from tools.handoff_observation.preflight_handoff import (  # noqa: E402
     build_runtime,
     load_icp_object_transform,
     validate_icp_for_motion,

@@ -4,7 +4,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from tool.inspection_support.sam2_icp import prompt_segment
+from tools.inspection_support.sam2_icp import prompt_segment
 
 
 def _spread(region: np.ndarray, count: int = 3) -> list[list[int]]:

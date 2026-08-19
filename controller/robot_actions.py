@@ -116,14 +116,12 @@ def _open_grippers(host: str) -> None:
 
 
 def _preflight(args: argparse.Namespace) -> None:
-    from modules.module_0_prepare.ensure_graspnet_service import ensure_graspnet_service
     from modules.module_0_prepare.ensure_sam2_service import ensure_sam2_service
     from modules.module_0_prepare.preflight_robot_infrastructure import preflight_robot_infrastructure
 
     # Module 1 在自身进程中直接用 RealSense 驱动打开 D405；总控启动阶段
     # 不占用、不探测任何相机，避免预检与实际采集争抢设备。
     ensure_sam2_service()
-    ensure_graspnet_service()
     preflight_robot_infrastructure(
         planner_host=args.planner_host,
         arm_host=args.arm_host,

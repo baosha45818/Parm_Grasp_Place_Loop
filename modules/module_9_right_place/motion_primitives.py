@@ -23,7 +23,7 @@ from cli_and_logging import write_control_snapshot
 from placement_session import PlacementSession
 from right_arm_state import current_right_joints_deg, wait_for_right_joint_target
 from servo_worker import push_servo_pose_with_timeout
-from tool.planner_runtime import PlannerRuntime
+from tools.planner_runtime import PlannerRuntime
 
 
 class TargetNotReached(RuntimeError):

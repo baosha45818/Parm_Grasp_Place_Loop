@@ -34,12 +34,22 @@ if __name__ == "__main__" and Path(sys.executable).resolve() != PYTHON.resolve()
         [str(PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]],
     )
 
-DEFAULT_ALIGNMENT = (
-    Path(os.environ.get(
+# 新总控会显式导出 PARM_BODY_HEAD_CALIBRATION。保留按 mode 推导的回退，
+# 让已经启动的总控在人工确认后重试交接时，也不会错误退回 xiangxin 标定。
+_DEPLOYMENT_MODE = os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin")
+_DEFAULT_ALIGNMENT_BY_MODE = {
+    "gzhu": ROOT / "tools/calibration/head_d435/gzhu_reverse_observation.json",
+    "xiangxin": ROOT / "tools/calibration/head_d435/xiangxin_reverse_observation.json",
+}
+DEFAULT_ALIGNMENT = Path(
+    os.environ.get(
         "PARM_BODY_HEAD_CALIBRATION",
-        ROOT / "tools/calibration/head_d435/xiangxin_reverse_observation.json",
-    )).expanduser().resolve()
-)
+        _DEFAULT_ALIGNMENT_BY_MODE.get(
+            _DEPLOYMENT_MODE,
+            _DEFAULT_ALIGNMENT_BY_MODE["xiangxin"],
+        ),
+    )
+).expanduser().resolve()
 # Backward-compatible exports used by the reversed-head observation contract.
 # The per-workpiece profile remains the runtime source of truth.
 HANDOFF_HEAD_PITCH_DEG = 25.0
@@ -47,7 +57,10 @@ HANDOFF_HEAD_YAW_DEG = 35.0
 DEFAULT_OUTPUT_DIR = ROOT / "output/reversed_head_pose_d435"
 DEFAULT_AUTO_MASK_CONFIG = (
     ROOT
-    / "tests/reversed_head_observation/head_d435_auto_mask_config.json"
+    / "tools/handoff_observation/head_d435_auto_mask_config.json"
+)
+DEPLOYMENT_OBSERVATION_PROFILES = (
+    Path(__file__).resolve().parent / "deployment_observation_profiles.json"
 )
 WORKPIECE_2_CONFIG_DIR = Path(__file__).resolve().parent / "workpiece_2_config"
 WORKPIECE_2_POSE_CONFIG = WORKPIECE_2_CONFIG_DIR / "head_d435_pose_config.json"
@@ -56,7 +69,7 @@ WORKPIECE_2_AUTO_MASK_CONFIG = (
 )
 WORKPIECE_2_HANDOFF_CONFIG = WORKPIECE_2_CONFIG_DIR / "handoff_config.json"
 WORKPIECE_2_OUTPUT_DIR = ROOT / "output/module_5_2_workpiece_2_head_d435"
-HEAD_MOTION = ROOT / "tool/move_head_gimbal.py"
+HEAD_MOTION = ROOT / "tools/move_head_gimbal.py"
 NO_GRASP_EXIT_CODE = 20
 LEFT_GRIPPER_HELD_POSITION_MIN_PERCENT = 20.0
 
@@ -92,8 +105,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--auto-mask-config",
         type=Path,
-        default=DEFAULT_AUTO_MASK_CONFIG,
-        help="固定观察位自动ROI和SAM2正负点配置",
+        help="覆盖当前部署的固定观察位自动 ROI/SAM2 正负点配置",
     )
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
     # The legacy observation helpers name this endpoint ``driver-host``, but
@@ -180,6 +192,35 @@ def newest_result(output_dir: Path, previous: set[Path]) -> Path:
     return max(results, key=lambda path: path.stat().st_mtime).resolve()
 
 
+def camera_serial_from_alignment(alignment: Path) -> str:
+    """读取与 body_base 外参同属一次现场标定的头部相机序列号。"""
+    payload = json.loads(alignment.read_text(encoding="utf-8"))
+    serial = str(payload.get("camera_serial", "")).strip()
+    if not serial:
+        raise ValueError(f"头部标定缺少 camera_serial：{alignment}")
+    return serial
+
+
+def deployment_observation_profile() -> dict:
+    """读取现场专属观察角与可用的 SAM2 自动点配置。"""
+    mode = os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin").strip()
+    payload = json.loads(DEPLOYMENT_OBSERVATION_PROFILES.read_text(encoding="utf-8"))
+    try:
+        profile = dict(payload[mode])
+        head_pose = dict(profile["head_pose_deg"])
+        profile["head_pose_deg"] = {
+            "pitch": float(head_pose["pitch"]),
+            "yaw": float(head_pose["yaw"]),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"反抓交接观察配置无效或缺少部署 {mode!r}: "
+            f"{DEPLOYMENT_OBSERVATION_PROFILES}"
+        ) from exc
+    profile["mode"] = mode
+    return profile
+
+
 def publish_handoff_result(
     destination: Path,
     result: Path,
@@ -219,10 +260,14 @@ def main() -> int:
         if args.mask_mode is None:
             args.mask_mode = "auto"
         return main_workpiece_2(args)
-    if args.mask_mode is None:
-        args.mask_mode = "auto"
     profile = load_workpiece_handoff_profile("1")
-    observation = profile["left_observation"]
+    observation = dict(profile["left_observation"])
+    deployment_observation = deployment_observation_profile()
+    # 左手关节观察位和交接中心仍由工件 profile 管理；云台角、自动点必须
+    # 按现场管理，不能把 xiangxin 的 25°/35° 点位套到 gzhu 的 2°/26.5° 画面。
+    observation["head_pose_deg"] = deployment_observation["head_pose_deg"]
+    if args.mask_mode is None:
+        args.mask_mode = str(deployment_observation["default_mask_mode"])
     handoff_center = list(profile["handoff"]["center_body_m"])
     from modules.module_0_prepare.ensure_sam2_service import (
         require_sam2_service,
@@ -238,19 +283,33 @@ def main() -> int:
     alignment = args.alignment.expanduser().resolve()
     if not alignment.is_file():
         raise FileNotFoundError(f"D435外参不存在：{alignment}")
+    camera_serial = camera_serial_from_alignment(alignment)
     output_dir = args.output_dir.expanduser().resolve()
-    auto_mask_config = args.auto_mask_config.expanduser().resolve()
-    if args.mask_mode == "auto" and not auto_mask_config.is_file():
-        raise FileNotFoundError(
-            f"自动分割配置不存在：{auto_mask_config}"
+    auto_mask_config: Path | None = args.auto_mask_config
+    if auto_mask_config is None:
+        configured_path = deployment_observation.get("auto_mask_config")
+        auto_mask_config = (
+            (ROOT / str(configured_path)).resolve()
+            if configured_path else None
         )
+    else:
+        auto_mask_config = auto_mask_config.expanduser().resolve()
+    if args.mask_mode == "auto":
+        if auto_mask_config is None:
+            raise RuntimeError(
+                f"{deployment_observation['mode']} 在观察角 "
+                f"{observation['head_pose_deg']} 尚无已标定的固定 SAM2 自动点；"
+                "请使用 --mask-mode interactive 完成交互分割后再标定自动点。"
+            )
+        if not auto_mask_config.is_file():
+            raise FileNotFoundError(f"自动分割配置不存在：{auto_mask_config}")
     feedback_sign = head_feedback_pitch_sign()
 
     # 1. 左手经共用高位准备点到共用观察位。
     observation_exit = run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.execute_plan",
+        "tools.handoff_observation.execute_plan",
         "--planner-host",
         args.planner_host,
         "--driver-host",
@@ -291,9 +350,11 @@ def main() -> int:
     run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.estimate_pose_head_d435",
+        "tools.handoff_observation.estimate_pose_head_d435",
         "--alignment",
         str(alignment),
+        "--camera-serial",
+        camera_serial,
         "--propagate-head-extrinsic",
         "--output-frame",
         "body_base",
@@ -303,7 +364,7 @@ def main() -> int:
         args.mask_mode,
         "--no-auto-gripper-prompt",
         "--auto-mask-config",
-        str(auto_mask_config),
+        str(auto_mask_config or DEFAULT_AUTO_MASK_CONFIG),
         "--output-dir",
         str(output_dir),
         "--planner-host",
@@ -319,7 +380,9 @@ def main() -> int:
     result = newest_result(output_dir, previous)
     print(
         f"[module-5-2] 反手交接观察完成；SAM2分割模式={args.mask_mode}；"
-        f"自动配置={auto_mask_config if args.mask_mode == 'auto' else '未使用'}",
+        f"自动配置={auto_mask_config if args.mask_mode == 'auto' else '未使用'}；"
+        f"部署={deployment_observation['mode']}；"
+        f"云台={observation['head_pose_deg']}",
         flush=True,
     )
     print(f"[module-5-2] 本轮D435结果：{result}", flush=True)
@@ -328,7 +391,7 @@ def main() -> int:
     run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.move_object_center",
+        "tools.handoff_observation.move_object_center",
         "--result",
         str(result),
         "--target-center",
@@ -394,7 +457,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     observation_exit = run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.execute_plan",
+        "tools.handoff_observation.execute_plan",
         "--planner-host", args.planner_host,
         "--driver-host", args.driver_host,
         "--arm-host", args.arm_host,
@@ -426,7 +489,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.estimate_pose_head_d435",
+        "tools.handoff_observation.estimate_pose_head_d435",
         "--config", str(WORKPIECE_2_POSE_CONFIG),
         "--alignment", str(observation["alignment"]),
         "--propagate-head-extrinsic",
@@ -446,7 +509,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
     run([
         sys.executable,
         "-m",
-        "tests.reversed_head_observation.move_object_center",
+        "tools.handoff_observation.move_object_center",
         "--result", str(result),
         "--config", str(WORKPIECE_2_HANDOFF_CONFIG),
         "--target-center", *(str(value) for value in handoff_center),

@@ -110,11 +110,11 @@ DEFAULT_HEAD_SERIAL = "261222076212"
 DEFAULT_CAPTURE_ROOT = PARM_PROJECT_ROOT / "output/module_4_1"
 SAM2_SOCKET = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_SOCKET",
-    str(PARM_PROJECT_ROOT / "tool/sam2-service/runtime/sam2-service.sock"),
+    str(PARM_PROJECT_ROOT / "tools/sam2-service/runtime/sam2-service.sock"),
 ))
 SAM2_BIN = Path(os.environ.get(
     "POSE_ESTIMATION_SAM2_BIN",
-    str(PARM_PROJECT_ROOT / "tool/sam2-service/.venv/bin/sam2-service"),
+    str(PARM_PROJECT_ROOT / "tools/sam2-service/.venv/bin/sam2-service"),
 ))
 # Trapezoidal tabletop region marked by the operator on workpiece_1 capture
 # 584. Vertices are clockwise in the 1280x720 head RGB frame, and follow the

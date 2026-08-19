@@ -20,7 +20,7 @@ move_by_joints.py
 
 move_by_eef_pose.py
   ├─ 使用同目录 move_by_joints.py 的位姿、SDK 和状态检查函数
-  └─ 使用项目根目录 tool/planner_task_retry.py 的规划任务重试函数
+  └─ 使用项目根目录 tools/planner_task_retry.py 的规划任务重试函数
 ```
 
 三个脚本运行时都需要可用的 `parm_sdk` 和相应的硬件/服务。`arm_head_teach.py` 是交互式脚本，还要求在 Linux/Unix 的真实终端中运行；不适用于无 TTY 的后台任务。

@@ -43,7 +43,7 @@ def _api() -> tuple[Any, Any, Any, Any]:
     """延迟加载公共重量分类 API，避免纯规划路径连接硬件。"""
     if str(LOOP_ROOT) not in sys.path:
         sys.path.insert(0, str(LOOP_ROOT))
-    from tests.grasp_weight_check import (  # type: ignore[import-not-found]
+    from tools.grasp_weight_check import (
         GraspClass,
         WeightThresholds,
         collect_force_window,

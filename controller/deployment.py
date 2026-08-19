@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 
 _PROFILES = {
@@ -24,6 +25,17 @@ _PROFILES = {
 }
 
 
+# 总控启动时一次性绑定现场标定。反抓交接模块会继承该环境变量；若未设置，
+# 它为了兼容独立旧脚本会回退到 xiangxin 标定，容易在 gzhu 现场错误连接
+# 261722072445。这里必须与 --mode 原子保持一致。
+_HEAD_CALIBRATION_BY_MODE = {
+    "gzhu": "gzhu_reverse_observation.json",
+    "xiangxin": "xiangxin_reverse_observation.json",
+}
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_HEAD_CALIBRATION_DIR = _PROJECT_ROOT / "tools/calibration/head_d435"
+
+
 def apply(args: argparse.Namespace) -> None:
     """显式参数优先；否则严格采用所选 mode，禁止继承另一现场的旧环境。"""
     profile = _PROFILES[args.mode]
@@ -40,3 +52,7 @@ def apply(args: argparse.Namespace) -> None:
             setattr(args, field, value)
         os.environ[env_name] = str(value)
     os.environ["PARM_DEPLOYMENT_MODE"] = args.mode
+    calibration = _HEAD_CALIBRATION_DIR / _HEAD_CALIBRATION_BY_MODE[args.mode]
+    if not calibration.is_file():
+        raise FileNotFoundError(f"模式 {args.mode} 的头部相机标定不存在：{calibration}")
+    os.environ["PARM_BODY_HEAD_CALIBRATION"] = str(calibration)

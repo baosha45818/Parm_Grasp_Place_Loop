@@ -33,7 +33,7 @@ PROJECT_ROOT = MODULE_ROOT.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 from modules.stage_result import write_stage_result
-from tool.planner_task_retry import retry_task_creation
+from tools.planner_task_retry import retry_task_creation
 RUNTIME_PYTHON = PROJECT_ROOT / ".venv/bin/python"
 if not RUNTIME_PYTHON.is_file():
     raise RuntimeError(f"总控运行环境不存在: {RUNTIME_PYTHON}")

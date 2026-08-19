@@ -1,8 +1,0 @@
-<?xml version="1.0"?>
-<robot xmlns:xacro="http://ros.org/wiki/xacro" name="scene">
-
-	<link name="base_link" />
-
-	<!-- 固定式焊接机器人 -->
-	<xacro:include filename="$(find anchor_config)/description/urdf/anchor-hjt.urdf.xacro" />
-</robot>

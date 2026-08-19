@@ -130,8 +130,8 @@ def cancel_both_arms(arm_host: str) -> None:
 
 def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
     """Run workpiece-1 at the shared high handoff with its original grasp relation."""
-    from tool.planner_runtime import PlannerRuntime
-    from tests.reversed_head_observation import execute_taught_tail_handoff as handoff
+    from tools.planner_runtime import PlannerRuntime
+    from tools.handoff_observation import execute_taught_tail_handoff as handoff
 
     profile = load_workpiece_handoff_profile("1")
     right_handoff = profile["right_handoff"]

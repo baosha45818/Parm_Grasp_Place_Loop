@@ -101,7 +101,7 @@ workpiece_pipeline.py
 │  └─ buffer_grasp.py 根据 --workpiece 自行选择并读取
 ├─ Module 7 的 configs/workpiece_{1,2}_turn_candidates.toml
 │  └─ module 7 的 right_align.py 会自行调用此路径
-├─ planning_log.py 与 tool/planner_task_retry.py
+├─ planning_log.py 与 tools/planner_task_retry.py
 └─ parm_sdk、Arm / Gripper / Planner 及视觉设备服务
 ```
 

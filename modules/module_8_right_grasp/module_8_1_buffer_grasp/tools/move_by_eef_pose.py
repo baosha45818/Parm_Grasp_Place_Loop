@@ -19,7 +19,7 @@ LOOP_ROOT = Path(__file__).resolve().parents[3]
 if str(LOOP_ROOT) not in sys.path:
     sys.path.insert(0, str(LOOP_ROOT))
 
-from tool.planner_task_retry import retry_task_creation
+from tools.planner_task_retry import retry_task_creation
 from move_by_joints import (
     ensure_ready,
     finite,

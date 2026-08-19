@@ -1,5 +1,5 @@
 {
-  "stl_path": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tool/workpiece_2/workpiece_2.stl",
+  "stl_path": "/home/dainanjun/Public/Parm_Grasp_Place_Loop/tools/workpiece_2/workpiece_2.stl",
   "R_object_stl": [[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
   "object_origin_stl_m": [0.0, 0.0, 0.0],
   "camera_role": "head_d435i",

@@ -44,7 +44,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from planning_log import planner_start_pose, planning_event
-from tool.planner_task_retry import retry_task_creation
+from tools.planner_task_retry import retry_task_creation
 
 
 DEFAULT_LINE_ENTRY_CLEARANCE_M = 0.020

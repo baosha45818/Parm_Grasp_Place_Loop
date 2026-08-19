@@ -27,7 +27,7 @@ def _config_values() -> dict[str, str]:
 
 def _thresholds() -> tuple[Any, int, float, float]:
     """读取共享采样参数；反抓仅使用其中的抓空上限。"""
-    from tests.grasp_weight_check import WeightThresholds
+    from tools.grasp_weight_check import WeightThresholds
 
     if not WEIGHT_CONFIG.is_file():
         raise FileNotFoundError(f"共享重量配置不存在: {WEIGHT_CONFIG}")
@@ -51,7 +51,7 @@ def _thresholds() -> tuple[Any, int, float, float]:
 
 def _collect_window(force_sensor_host: str):
     from parm_sdk import ForceSensor
-    from tests.grasp_weight_check import collect_force_window
+    from tools.grasp_weight_check import collect_force_window
 
     _, sample_count, timeout_s, settle_s = _thresholds()
     with ForceSensor(host=force_sensor_host, hand=1) as sensor:
@@ -74,7 +74,7 @@ def verify_object_after_lift(
     minimum_held_mass_g: float | None = None,
 ) -> dict[str, Any]:
     """上提 3 cm 且到位后判断是否有工件，不区分单件或多件。"""
-    from tests.grasp_weight_check import classify_grasp_weight
+    from tools.grasp_weight_check import classify_grasp_weight
 
     thresholds, _, _, _ = _thresholds()
     minimum_mass_g = (

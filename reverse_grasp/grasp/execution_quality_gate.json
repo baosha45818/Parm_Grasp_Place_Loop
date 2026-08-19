@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "source": "Module 5-1 gate adapted to workpiece_2 single-view raised-structure geometry",
-  "minimum_icp_fitness": 0.6,
-  "minimum_depth_match_fraction": 0.7,
-  "maximum_icp_rmse_m": 0.006,
-  "description": "workpiece_2's raised reverse face has less single-view CAD overlap than Module 5-1's legacy part. Require jointly: fitness >= 0.60, depth match >= 0.70, and ICP RMSE <= 6 mm. A rejected pose may still be visualized but must not be sent to Planner."
-}

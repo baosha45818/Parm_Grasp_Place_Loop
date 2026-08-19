@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from loop_config import HoleAInsertionConfig
 from loop_types import Holding, ObjectPose, ResultStatus, RightArmState, clear_right_object, make_result
 from modules.module_0_prepare.gripper_state_compat import is_gripper_usable
-from tool.planner_runtime import PlannerRuntime
+from tools.planner_runtime import PlannerRuntime
 
 if TYPE_CHECKING:
     from parm_sdk import ForceSensor
