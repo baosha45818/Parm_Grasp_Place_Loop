@@ -7,3 +7,6 @@ Module 5 只消费 Module 4.1 发布的正反状态与 ICP TF；不采集图像�
 - `module_5_2_reverse_pick_to_handoff/`：`BACK`。左手按 ICP TF 反抓并进入双臂交接准备，随后由 Module 8.2 接取。
 
 `UNCERTAIN`、观察次数、重抓次数和人工恢复全部由 `controller/scheduler_rules.py` 处理；Module 5 不猜测工件状态。
+
+Module 5.1 的输入契约、独立启动命令、安全边界和输出字段见
+[`module_5_1_front_pick_to_graspuptop/README.md`](module_5_1_front_pick_to_graspuptop/README.md)。

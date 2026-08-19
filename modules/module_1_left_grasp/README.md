@@ -46,7 +46,8 @@ D405 RGB-D
 - 按水平夹爪轴投影应用最大 7 mm 抓取中心补偿
 
 两种模式都保留反面工件局部 `-X` 方向 1.5 mm 公共偏置。点云避碰允许在
-上述 21/27 mm 基础上再自动抬高，默认上限 30 mm。
+各模式的固定 Z 偏置基础上再自动抬高，默认上限 30 mm：`gzhu` 从正面
+21 mm/反面 27 mm 开始搜索，`xiangxin` 从 0 mm 开始搜索。
 
 ## 运行
 
@@ -101,12 +102,16 @@ Module 1 只有在以下条件全部通过后才写出 handoff：
 - 左夹爪稳定报告持件
 - 力传感器判定为单个工件 `SINGLE`
 - 返回抓取后安全抬升位仍保持 `SINGLE`
+- 到达最终 `graspuptop` 交接位后仍确认左夹爪持件
 
 推荐固定输出路径：
 
 ```text
 output/module_1_left_grasp/verified_handoff.json
 ```
+
+该路径需要通过 `--weight-handoff-file` 显式指定；未指定时，handoff 写入本轮
+运行目录下的 `weight_handoff.json`。
 
 Module 3 只接受其中 `weight_check_enabled=true` 且
 `weight_check.classification="SINGLE"` 的结果。
