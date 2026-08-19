@@ -45,10 +45,10 @@ leg_accel_mm_s2 = 20.0
 axis = "z"
 # 预压沿该坐标轴的运动方向。
 direction = "negative"
-# 第一次搜索尝试的预压距离，单位：mm；工字工件为 0，抵达搜索位后直接 X−搜索。
-first_attempt_mm = 0.0
-# 每次搜索距离耗尽后，下一次尝试额外增加的预压距离，单位：mm；0 表示不追加预压。
-retry_increment_mm = 0.0
+# 第一次搜索尝试的预压距离，单位：mm。
+first_attempt_mm = 1.0
+# 每次搜索距离耗尽后，下一次尝试额外增加的预压距离，单位：mm。
+retry_increment_mm = 1.5
 # 预压线速度，单位：mm/s。
 speed_mm_s = 1.0
 # 预压线加速度，单位：mm/s²。
