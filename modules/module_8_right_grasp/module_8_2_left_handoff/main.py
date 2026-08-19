@@ -82,6 +82,11 @@ def parse_args() -> argparse.Namespace:
         help="工件编号；总控默认从 PARM_LOOP_WORKPIECE 传入，缺省为原工件1流程",
     )
     parser.add_argument(
+        "--mode", choices=("xiangxin", "gzhu"),
+        default=os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin"),
+        help="必须与 Module 4-1 / Module 5-2 使用相同的现场部署模式",
+    )
+    parser.add_argument(
         "--right-place-ready-file",
         type=Path,
         help="可选：右臂到放置准备位后写入的总控同步标记文件",
@@ -133,7 +138,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
     from tools.planner_runtime import PlannerRuntime
     from tools.handoff_observation import execute_taught_tail_handoff as handoff
 
-    profile = load_workpiece_handoff_profile("1")
+    profile = load_workpiece_handoff_profile("1", mode=args.mode)
     right_handoff = profile["right_handoff"]
     high_handoff_center = list(profile["handoff"]["center_body_m"])
     high_grasp_joints_deg = list(right_handoff["grasp_joints_deg"])
@@ -424,7 +429,7 @@ def write_right_place_ready_marker(
 
 def execute_workpiece_2_handoff(result: Path, args: argparse.Namespace) -> int:
     """Run only workpiece-2 handoff; final right placement remains Module 9."""
-    profile = load_workpiece_handoff_profile("2")
+    profile = load_workpiece_handoff_profile("2", mode=args.mode)
     handoff = profile["handoff"]
     right_handoff = profile["right_handoff"]
     for path, label in (
@@ -475,6 +480,7 @@ def execute_workpiece_2_handoff(result: Path, args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
+    os.environ["PARM_DEPLOYMENT_MODE"] = args.mode
     if args.speed_multiplier <= 0.0:
         raise ValueError("--speed-multiplier must be positive")
     result = args.result.expanduser().resolve()

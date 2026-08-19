@@ -126,6 +126,12 @@ def parse_args() -> argparse.Namespace:
         help="工件编号；总控默认从 PARM_LOOP_WORKPIECE 传入，缺省为原工件1流程",
     )
     parser.add_argument(
+        "--mode",
+        choices=("xiangxin", "gzhu"),
+        default=os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin"),
+        help="现场部署；必须与 Module 4-1 的 mode 相同",
+    )
+    parser.add_argument(
         "--handoff-result-file",
         type=Path,
         help="可选：写入包含本轮result.json路径的Module 5-2握手JSON",
@@ -256,16 +262,25 @@ def publish_handoff_result(
 
 def main() -> int:
     args = parse_args()
+    # 后续 profile 加载、云台反馈符号及右臂交接都从同一个环境读取 mode。
+    os.environ["PARM_DEPLOYMENT_MODE"] = args.mode
     if args.workpiece == "2":
         if args.mask_mode is None:
             args.mask_mode = "auto"
         return main_workpiece_2(args)
-    profile = load_workpiece_handoff_profile("1")
+    profile = load_workpiece_handoff_profile("1", mode=args.mode)
     observation = dict(profile["left_observation"])
     deployment_observation = deployment_observation_profile()
     # 左手关节观察位和交接中心仍由工件 profile 管理；云台角、自动点必须
     # 按现场管理，不能把 xiangxin 的 25°/35° 点位套到 gzhu 的 2°/26.5° 画面。
     observation["head_pose_deg"] = deployment_observation["head_pose_deg"]
+    # TOML 是交接链的最终部署配置；JSON 保留给已有工具使用。启动时比对二者，
+    # 防止有人只改了一侧而把广珠自动标点套到祥鑫观察角（或反过来）。
+    if observation["head_pose_deg"] != profile["left_observation"]["head_pose_deg"]:
+        raise RuntimeError(
+            "交接部署配置不一致：reverse_grasp_handoff_positions.toml 与 "
+            "deployment_observation_profiles.json 的云台观察角不同"
+        )
     if args.mask_mode is None:
         args.mask_mode = str(deployment_observation["default_mask_mode"])
     handoff_center = list(profile["handoff"]["center_body_m"])
@@ -287,11 +302,7 @@ def main() -> int:
     output_dir = args.output_dir.expanduser().resolve()
     auto_mask_config: Path | None = args.auto_mask_config
     if auto_mask_config is None:
-        configured_path = deployment_observation.get("auto_mask_config")
-        auto_mask_config = (
-            (ROOT / str(configured_path)).resolve()
-            if configured_path else None
-        )
+        auto_mask_config = Path(observation["auto_mask_config"]).resolve()
     else:
         auto_mask_config = auto_mask_config.expanduser().resolve()
     if args.mask_mode == "auto":
@@ -429,7 +440,7 @@ def main_workpiece_2(args: argparse.Namespace) -> int:
         sam2_url,
     )
 
-    profile = load_workpiece_handoff_profile("2")
+    profile = load_workpiece_handoff_profile("2", mode=args.mode)
     observation = profile["left_observation"]
     handoff = profile["handoff"]
     handoff_center = list(handoff["center_body_m"])

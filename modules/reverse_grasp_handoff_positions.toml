@@ -17,9 +17,6 @@ max_grasp_attempts = 5
 [workpiece_1.left_handoff]
 prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
 observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
-head_pitch_deg = 25.0
-head_yaw_deg = 35.0
-alignment = "modules/module_4_head_judge/module_4_2_pose_estimation/calibration/head_charuco_13x5_calibration_head.json"
 handoff_center_body_m = [0.4200, 0.1000, 0.2500]
 axis_tolerance_deg = 2.0
 center_tolerance_mm = 25.0
@@ -46,9 +43,6 @@ max_grasp_attempts = 5
 [workpiece_2.left_handoff]
 prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
 observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
-head_pitch_deg = 25.0
-head_yaw_deg = 35.0
-alignment = "modules/module_4_head_judge/module_4_2_pose_estimation/calibration/head_charuco_13x5_calibration_head.json"
 handoff_center_body_m = [0.4200, 0.1000, 0.2500]
 axis_tolerance_deg = 2.0
 center_tolerance_mm = 25.0
@@ -78,6 +72,21 @@ head_pitch_deg = 2.0
 head_yaw_deg = 26.5
 alignment = "tools/calibration/head_d435/gzhu_reverse_observation.json"
 auto_mask_config = "tools/handoff_observation/gzhu_head_d435_auto_mask_config.json"
+
+[deployment.gzhu.workpiece_1_left_handoff]
+# 239c401：去祥鑫前，广珠工件1最后一次实测通过的整套左手交接参数。
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+axis_tolerance_deg = 2.0
+center_tolerance_mm = 25.0
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[deployment.gzhu.workpiece_1_right_handoff]
+# 239c401：广珠工件1右手接取及接取后的放置准备位，不能使用祥鑫的新位姿。
+grasp_joints_deg = [164.523, 57.0258, -68.7826, 78.3201, -24.2591, 3.8508, 78.1156]
+place_ready_joints_deg = [30.4353, 23.8637, 0.5905, 66.3409, -62.0439, -64.3304, 25.7149]
+place_ready_tolerance_deg = 0.5
 
 [deployment.gzhu.workpiece_2_right_handoff]
 # 广珠工件2右手接住后进入放置准备位的独立示教点。右手“接住”本身的

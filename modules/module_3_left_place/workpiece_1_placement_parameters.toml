@@ -8,7 +8,7 @@ target_z_candidates_m = [-0.320000]
 release_z_candidates_m = []
 
 [middle]
-target_left_eef_xyz_m = [0.537668, 0.008779, -0.320000]
+target_left_eef_xyz_m = [0.537668, -0.028779, -0.320000]
 target_z_candidates_m = [-0.340000]
 # Empty means open the gripper at the target without a second LIN descent.
 release_z_candidates_m = []

@@ -101,18 +101,34 @@ def load_workpiece_handoff_profile(
     for key in ("prepare_joints_deg", "observation_joints_deg", "left_return_joints_deg"):
         left_handoff[key] = _vector(left_handoff, key, 7, handoff_label)
     left_handoff["handoff_center_body_m"] = _vector(left_handoff, "handoff_center_body_m", 3, handoff_label)
-    for key in ("head_pitch_deg", "head_yaw_deg"):
-        value = float(left_handoff.get(key, float("nan")))
-        if not math.isfinite(value):
-            raise RuntimeError(f"{handoff_label}.{key} 必须为有限数值")
-        left_handoff[key] = value
     for key in ("axis_tolerance_deg", "center_tolerance_mm"):
         left_handoff[key] = _positive(left_handoff, key, handoff_label)
-    alignment = ROOT / str(left_handoff.get("alignment", ""))
-    if not alignment.is_file():
-        raise FileNotFoundError(f"{handoff_label}.alignment 不存在: {alignment}")
-    left_handoff["alignment"] = alignment.resolve()
-    # 部署覆盖必须在公共工件字段校验完成后进行；这样公共关节位不会被误改。
+    deployment_left = dict(
+        deployment.get(f"workpiece_{workpiece}_left_handoff") or {}
+    )
+    # 部署记录可冻结一整套已实测交接点；它覆盖公共工件字段，避免后续为另一
+    # 个现场调整公共参数时污染该现场的已验证轨迹。
+    for key in (
+        "prepare_joints_deg", "observation_joints_deg", "left_return_joints_deg",
+    ):
+        if key in deployment_left:
+            left_handoff[key] = _vector(
+                deployment_left, key, 7,
+                f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
+            )
+    if "handoff_center_body_m" in deployment_left:
+        left_handoff["handoff_center_body_m"] = _vector(
+            deployment_left, "handoff_center_body_m", 3,
+            f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
+        )
+    for key in ("axis_tolerance_deg", "center_tolerance_mm"):
+        if key in deployment_left:
+            left_handoff[key] = _positive(
+                deployment_left, key,
+                f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
+            )
+    # 云台角/标定不是工件参数。只允许从 deployment.<mode> 读取，避免旧配置
+    # 把广珠和祥鑫的观察位、自动标点合并为同一组值。
     try:
         left_handoff["head_pitch_deg"] = float(deployment_observation["head_pitch_deg"])
         left_handoff["head_yaw_deg"] = float(deployment_observation["head_yaw_deg"])
@@ -148,9 +164,15 @@ def load_workpiece_handoff_profile(
     deployment_right = dict(
         deployment.get(f"workpiece_{workpiece}_right_handoff") or {}
     )
-    if "place_ready_joints_deg" in deployment_right:
-        right_handoff["place_ready_joints_deg"] = _vector(
-            deployment_right, "place_ready_joints_deg", 7,
+    for key in ("grasp_joints_deg", "place_ready_joints_deg"):
+        if key in deployment_right:
+            right_handoff[key] = _vector(
+                deployment_right, key, 7,
+                f"deployment.{selected_mode}.workpiece_{workpiece}_right_handoff",
+            )
+    if workpiece == "1" and "place_ready_tolerance_deg" in deployment_right:
+        right_handoff["place_ready_tolerance_deg"] = _positive(
+            deployment_right, "place_ready_tolerance_deg",
             f"deployment.{selected_mode}.workpiece_{workpiece}_right_handoff",
         )
 

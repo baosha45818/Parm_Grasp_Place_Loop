@@ -73,6 +73,40 @@ def artifact(runtime: Path, name: str, attempt: str | int) -> Path:
     return path
 
 
+def latest_reverse_handoff_result(state: RuntimeState) -> Path:
+    """返回当前运行中最新一次成功发布的 M5.2 D435 位姿结果。
+
+    ``module_5_reverse_handoff`` 只是在「已持件但交接观察失败」后的恢复入口。
+    它的旧产物不能覆盖后续完整 ``module_5_reverse`` 成功后刚生成的交接位姿，
+    否则 M8 会把上一件工件的 ICP TF 用到当前工件上。
+    """
+    candidates: list[tuple[float, int, Path, Path]] = []
+    for priority, module in enumerate(("module_5_reverse", "module_5_reverse_handoff")):
+        source = state.artifacts.get(module)
+        if not source:
+            continue
+        pointer = Path(source)
+        try:
+            payload = json.loads(pointer.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if payload.get("event") != "module_5_2_left_handoff_ready":
+            continue
+        result = Path(str(payload.get("result") or ""))
+        if not result.is_file():
+            continue
+        created_at = payload.get("created_at")
+        try:
+            timestamp = float(created_at)
+        except (TypeError, ValueError):
+            timestamp = pointer.stat().st_mtime
+        # 同一时间戳时优先完整 M5 反抓分支；恢复分支只应在它确实更新后胜出。
+        candidates.append((timestamp, -priority, result, pointer))
+    if not candidates:
+        raise RuntimeError("没有可供 Module 8 使用的成功 M5.2 交接位姿结果")
+    return max(candidates, key=lambda item: (item[0], item[1]))[2]
+
+
 def context_for(name: str, state: RuntimeState, args: argparse.Namespace, result: Path) -> dict[str, str]:
     common = {
         "mode": args.mode, "workpiece": args.workpiece, "result": str(result),
@@ -86,9 +120,7 @@ def context_for(name: str, state: RuntimeState, args: argparse.Namespace, result
     if name in {"module_5_front", "module_5_reverse"}:
         common["buffer_result"] = state.artifacts["module_4_buffer_state"]
     if name == "module_8_handoff":
-        pointer = Path(state.artifacts.get("module_5_reverse_handoff", state.artifacts["module_5_reverse"]))
-        payload = json.loads(pointer.read_text(encoding="utf-8"))
-        common["handoff_result"] = str(payload.get("result") or pointer)
+        common["handoff_result"] = str(latest_reverse_handoff_result(state))
         common["handoff_ready"] = str(result.with_name(f"{result.stem}_ready.json"))
     return common
 
