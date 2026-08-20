@@ -42,8 +42,13 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Local hardware calibration, captures, and operational configuration
+# Local hardware calibration, captures, and operational configuration.
+# Keep only the root calibration guide versioned; nested/local calibration
+# directories retain the historical ignore rule.
 calibration/
+!/calibration/
+/calibration/*
+!/calibration/README.md
 # ``tools/calibration`` contains the deployed, versioned runtime calibrations;
 # only ad-hoc calibration output elsewhere remains ignored.
 !tools/calibration/

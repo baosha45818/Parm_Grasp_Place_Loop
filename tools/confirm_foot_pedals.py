@@ -63,24 +63,37 @@ def properties(device: str) -> dict[str, str]:
 def by_path(event_device: str) -> str:
     expected = os.path.realpath(event_device)
     matches = [
-        path for path in glob.glob("/dev/input/by-path/*event-kbd")
+        path for path in glob.glob("/dev/input/by-path/*event*")
         if os.path.realpath(path) == expected
     ]
     return matches[0] if matches else event_device
 
 
-def find_key1_pedals() -> list[str]:
-    pedals: list[str] = []
+def physical_pedal_id(device: str) -> str:
+    """合并同一只踏板暴露出来的 keyboard/consumer-control 多个 event 节点。"""
+    value = properties(device).get("ID_PATH", "")
+    # 例：pci-...-usb-0:5.4:1.0 与 ...:1.1 属于同一个 USB 踏板。
+    if value:
+        return re.sub(r":\d+\.\d+$", "", value)
+    return os.path.realpath(f"/sys/class/input/{Path(device).name}/device")
+
+
+def find_key1_pedals() -> dict[str, list[str]]:
+    pedals: dict[str, list[str]] = {}
     for device in sorted(glob.glob("/dev/input/event*")):
         info = properties(device)
         if info.get("ID_VENDOR_ID") == VENDOR_ID and info.get("ID_MODEL_ID") == PRODUCT_ID:
-            pedals.append(device)
+            pedals.setdefault(physical_pedal_id(device), []).append(device)
     return pedals
 
 
-def wait_for_press(candidates: list[str], label: str, timeout_s: float) -> str:
+def wait_for_press(candidates: dict[str, list[str]], label: str, timeout_s: float) -> tuple[str, str]:
     print(f"\n请在 {timeout_s:.0f} 秒内只踩一下【{label}】。", flush=True)
-    handles = {os.open(device, os.O_RDONLY | os.O_NONBLOCK): device for device in candidates}
+    handles = {
+        os.open(device, os.O_RDONLY | os.O_NONBLOCK): (pedal_id, device)
+        for pedal_id, devices in candidates.items()
+        for device in devices
+    }
     buffers = {fd: b"" for fd in handles}
     try:
         deadline = time.monotonic() + timeout_s
@@ -92,7 +105,9 @@ def wait_for_press(candidates: list[str], label: str, timeout_s: float) -> str:
                     raw, buffers[fd] = buffers[fd][:EVENT.size], buffers[fd][EVENT.size:]
                     _, _, event_type, _, value = EVENT.unpack(raw)
                     if event_type == EV_KEY and value == 1:
-                        return handles[fd]
+                        pedal_id, device = handles[fd]
+                        print(f"[INFO] 已识别 {label}: {device} -> {by_path(device)}", flush=True)
+                        return pedal_id, device
     finally:
         for fd in handles:
             os.close(fd)
@@ -103,8 +118,18 @@ def update_driver_script(path: Path, left: str, right: str) -> Path:
     if not path.is_file():
         raise FileNotFoundError(f"找不到踏板驱动配置：{path}")
     text = path.read_text(encoding="utf-8")
-    updated = re.sub(r"(--pedal arm=1:device=)[^\\s\\\\]+", rf"\g<1>{left}", text)
-    updated = re.sub(r"(--pedal arm=2:device=)[^\\s\\\\]+", rf"\g<1>{right}", updated)
+    # 仅替换每一行的设备值。必须以空白切断旧路径；不能用错误转义的字符类，
+    # 否则会在路径中的字母 s 处截断，并把旧路径尾部拼到新路径后。
+    updated = re.sub(
+        r"(?m)^(\s*--pedal arm=1:device=)\S+",
+        lambda match: f"{match.group(1)}{left}",
+        text,
+    )
+    updated = re.sub(
+        r"(?m)^(\s*--pedal arm=2:device=)\S+",
+        lambda match: f"{match.group(1)}{right}",
+        updated,
+    )
     if updated == text:
         raise RuntimeError("未找到 arm=1 / arm=2 的踏板配置行，未修改文件")
     backup = path.with_name(path.name + ".bak." + datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -124,15 +149,18 @@ def main() -> int:
         return 2
     pedals = find_key1_pedals()
     if len(pedals) != 2:
-        print(f"[FAIL] 找到 {len(pedals)} 只 Key-1 踏板（期望 2）：{pedals}", file=sys.stderr)
+        print(f"[FAIL] 找到 {len(pedals)} 个 Key-1 物理踏板（期望 2）：{pedals}", file=sys.stderr)
         print("请检查 USB 连接；设备特征应为 VID=2704、PID=2018。", file=sys.stderr)
         return 2
 
     print("[INFO] 找到两只 Key-1 踏板：", flush=True)
-    for device in pedals:
-        print(f"  {device}  ->  {by_path(device)}", flush=True)
-    left_event = wait_for_press(pedals, "左踏板（arm 1）", args.timeout)
-    right_event = wait_for_press([item for item in pedals if item != left_event], "右踏板（arm 2）", args.timeout)
+    for pedal_id, devices in pedals.items():
+        print(f"  {pedal_id}", flush=True)
+        for device in devices:
+            print(f"    {device}  ->  {by_path(device)}", flush=True)
+    left_pedal, left_event = wait_for_press(pedals, "左踏板（arm 1）", args.timeout)
+    right_candidates = {key: value for key, value in pedals.items() if key != left_pedal}
+    right_pedal, right_event = wait_for_press(right_candidates, "右踏板（arm 2）", args.timeout)
     left, right = by_path(left_event), by_path(right_event)
     print("\n[PASS] 踏板映射确认完成：", flush=True)
     print(f"  arm 1 / 左踏板: {left}", flush=True)
