@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "description": "Gzhu 反抓交接固定观察位的 SAM2 提示点；头部命令 pitch=2 deg、yaw=26.5 deg。由 annotate_gzhu_handoff_prompts.py 重新人工标注。",
+  "roi_xyxy_normalized": [
+    0.23846755,
+    0.46175243,
+    0.56606724,
+    0.91515994
+  ],
+  "positive_points_normalized": [
+    [
+      0.46677091,
+      0.72044506
+    ],
+    [
+      0.35105551,
+      0.68289291
+    ]
+  ],
+  "negative_points_normalized": [
+    [
+      0.46364347,
+      0.57858136
+    ],
+    [
+      0.43236904,
+      0.80111266
+    ],
+    [
+      0.28068804,
+      0.84422809
+    ]
+  ],
+  "mask_color_bgr": [
+    0,
+    255,
+    0
+  ],
+  "mask_alpha": 0.45
+}

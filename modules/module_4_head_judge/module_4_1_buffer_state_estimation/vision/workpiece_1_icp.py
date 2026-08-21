@@ -21,6 +21,7 @@ from scipy.spatial import cKDTree
 HERE = Path(__file__).resolve().parent
 MODULE_ROOT = HERE.parent
 ROOT = MODULE_ROOT.parents[2]
+CAD_TEMPLATE_PATH = ROOT / 'tools/workpiece_1/cad_pointcloud_template.npz'
 BODY_HEAD_CALIBRATION = (
     Path(os.environ.get(
         'PARM_BODY_HEAD_CALIBRATION',
@@ -29,7 +30,7 @@ BODY_HEAD_CALIBRATION = (
 )
 sys.path[:0] = [str(ROOT), str(HERE)]
 from tools.inspection_support.mask_depth import mask_depth_to_points_cam, voxel_downsample_np, remove_radius_outliers_np
-from tools.inspection_support.stl_model import load_stl_triangles_m, sample_surface_points
+from tools.inspection_support.stl_model import load_cad_pointcloud_template
 from tools.icp import tabletop_constrained_point_to_plane_icp
 from .geometry import workspace_roi_mask
 
@@ -229,12 +230,12 @@ def write_icp_alignment_3d(path, observed, aligned_cad, table_n, side, quality):
 
 def main():
     p = argparse.ArgumentParser(); p.add_argument('--capture-dir', type=Path, required=True)
-    p.add_argument('--stl', type=Path, default=ROOT/'tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl')
+    p.add_argument('--cad-template', type=Path, default=CAD_TEMPLATE_PATH)
     p.add_argument('--orientation-config', type=Path, default=MODULE_ROOT/'configs/workpiece_1.json')
     a = p.parse_args(); d = a.capture_dir
     meta = json.loads((d/'metadata.json').read_text()); rgb = cv2.imread(str(d/'rgb_000.png')); depth = cv2.imread(str(d/'depth_aligned_000.png'), cv2.IMREAD_UNCHANGED)
     masks = np.load(d/'sam2_masks/masks.npz')['masks']; k = meta['color_intrinsics']; K = np.array([[k['fx'],0,k['ppx']],[0,k['fy'],k['ppy']],[0,0,1.]])
-    tris = load_stl_triangles_m(a.stl); cad_icp = sample_surface_points(tris, 14000, 3); cad_render = sample_surface_points(tris, 90000, 4)
+    cad_icp, cad_render = load_cad_pointcloud_template(a.cad_template)
     # The deployment mode binds this calibration to the captured camera serial.
     orientation = json.loads(a.orientation_config.read_text())
     body_head = json.loads(BODY_HEAD_CALIBRATION.read_text())

@@ -186,3 +186,38 @@ def sample_surface_points(triangles_m: np.ndarray,
         + c[:, None] * tris[idx, 2]
     )
     return pts.astype(np.float64)
+
+
+def load_cad_pointcloud_template(
+    template_path: str | Path,
+    *,
+    expected_icp_points: int = 14000,
+    expected_render_points: int = 90000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Load and validate a persistent CAD surface point-cloud template.
+
+    Both returned arrays are expressed in the raw STL frame and use metres.
+    """
+    template_path = Path(template_path)
+    with np.load(template_path, allow_pickle=False) as archive:
+        schema_version = int(np.asarray(archive["schema_version"]).item())
+        units = str(np.asarray(archive["units"]).item())
+        icp_points = np.asarray(archive["icp_points_m"], dtype=np.float64)
+        render_points = np.asarray(archive["render_points_m"], dtype=np.float64)
+    if schema_version != 1:
+        raise RuntimeError(
+            f"unsupported CAD point-cloud template schema {schema_version}: {template_path}"
+        )
+    if units != "m":
+        raise RuntimeError(f"CAD point-cloud template units must be 'm': {template_path}")
+    expected_shapes = (
+        (icp_points, (int(expected_icp_points), 3), "icp_points_m"),
+        (render_points, (int(expected_render_points), 3), "render_points_m"),
+    )
+    for points, expected_shape, name in expected_shapes:
+        if points.shape != expected_shape or not np.isfinite(points).all():
+            raise RuntimeError(
+                f"invalid {name} in {template_path}: expected finite {expected_shape}, "
+                f"got {points.shape}"
+            )
+    return icp_points, render_points

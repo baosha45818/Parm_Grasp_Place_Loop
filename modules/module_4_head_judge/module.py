@@ -78,6 +78,7 @@ def _require_paths(workpiece_id: str, mode: HeadD435Mode) -> None:
         MODULE_4_1_ROOT / "vision/mask.py",
         MODULE_4_1_ROOT / f"vision/workpiece_{workpiece_id}_icp.py",
         CONFIG_ROOT / f"workpiece_{workpiece_id}.json",
+        LOOP_ROOT / f"tools/workpiece_{workpiece_id}/cad_pointcloud_template.npz",
         mode.calibration_path,
         mode.workspace_path(workpiece_id),
     ]

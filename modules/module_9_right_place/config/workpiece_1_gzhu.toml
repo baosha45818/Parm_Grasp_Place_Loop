@@ -8,7 +8,7 @@ arm_host = "192.168.88.1"
 force_sensor_host = "localhost"
 
 # 固定示教起点的右臂七轴关节角，单位：deg；来自 arm_pose_20260817_090449_559255.json 的 right.joint_positions_deg。
-initial_right_joints_deg = [53.8756, 17.6399, -33.2707, 78.8653, -58.0599, -67.25, 19.4115]
+initial_right_joints_deg = [52.328, 16.136, -28.724, 78.745, -60.687, -64.255, 18.386]
 # 单段连续搜索使用的世界坐标轴；按工字工件修改。
 search_axis = "x"
 # 单段连续搜索在该坐标轴上的运动方向；按工字工件修改。
@@ -85,15 +85,15 @@ first_hole_settle_down_mm = 0.0
 # 第一洞确认后直接沿世界 Z+ 抬升的距离，单位：mm。
 first_hole_lift_mm = 20.0
 # 从第一洞到第二洞沿世界 Y+ 的偏移距离，单位：mm。
-y_offset_mm = 30.0
+y_offset_mm = 28.0
 # 进入第二洞沿世界 Z− 的下降距离，单位：mm；在原 20 mm 基础上额外下压 2 mm。
 descend_mm = 22.0
 # 第二洞下降完成后沿世界 Z+ 抬升的距离，单位：mm。
 lift_after_second_hole_mm = 22.0
 # 第二洞完成后最终平移所使用的世界坐标轴。
 final_axis = "y"
-# 第二洞完成后最终平移方向。
-final_direction = "positive"
+# 第二洞完成后最终平移方向；世界 Y− 为工字工件的向外放置方向。
+final_direction = "negative"
 # 第二洞完成后沿最终方向平移的距离，单位：mm。
 final_distance_mm = 40.0
 # 第二洞路径中抬升和 Y 平移的线速度，单位：mm/s。
@@ -115,7 +115,7 @@ pause_after_first_down_s = 0.5
 # 第二洞下降完成后的停留时间，单位：s。
 pause_after_second_down_s = 0.5
 
-# 进洞确认后的后退、下压辅助动作参数；在进入第二洞路径前执行。
+# 第一洞辅助完美进洞，因为有些时候工件的洞不是正对着peg顶，需要往回拉
 [post_entry]
 # 是否执行本段进洞后辅助动作。
 enabled = true

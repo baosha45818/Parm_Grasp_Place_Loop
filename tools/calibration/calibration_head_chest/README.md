@@ -15,7 +15,9 @@
     ├── head_d435i_camera.py                RealSense D435i 彩色相机适配器
     ├── chest_orbbec_camera.py              Orbbec Femto Bolt 彩色相机适配器
     ├── configs/
-    │   ├── calibration_head_config.json    头部 D435i 的配置
+    │   ├── calibration_head_config.json    头部 D435i 的 ChArUco 配置
+    │   ├── calibration_head_chessboard_11x8_config.json
+    │   │                                   头部 D435i 的 11×8 棋盘格配置（30 mm 方格）
     │   └── calibration_chest_config.json   胸部 Orbbec 的配置
     ├── outputs/                            采集样本和标定结果；首次采集时自动创建
     │   ├── head_d435i/
@@ -38,9 +40,22 @@
       --head-pitch-deg 0 \
       --head-yaw-deg 0
 
+### 头部 D435i（11×8 棋盘格）
+
+    $PY calibration_head.py \
+      --config configs/calibration_head_chessboard_11x8_config.json \
+      --collect --solve \
+      --samples 18 \
+      --head-pitch-deg 38.5 \
+      --head-yaw-deg 0
+
 默认输入/输出目录为 outputs/head_d435i/，成功结果为：
 
     outputs/head_d435i/calibration_head.json
+
+棋盘格配置使用独立目录和文件名，避免与 ChArUco 样本混用：
+
+    outputs/head_d435i_chessboard_11x8/calibration_head_chessboard_11x8.json
 
 注意！！！云台的 pitch/yaw 不由本脚本控制；这两个参数仅写进结果 JSON。重新调整云台姿态后，必须重新采集和标定。
 
@@ -77,14 +92,14 @@
 | camera_type | realsense_d435i 选择 RealSense；orbbec_femto_bolt 选择 Orbbec |
 | camera_model | 写入最终标定 JSON 的设备型号 |
 | default_serial | 默认设备序列号；可由命令行 --serial 临时覆盖 |
-| default_board | 标定板定义；当前两份配置都使用相同 ChArUco 板 |
+| default_board | 标定板定义；必须与实际物理标定板一致 |
 | calibration_type | 写入结果的标定类型描述 |
 | transform_key | 最终结果中相机外参矩阵的字段名 |
 | intrinsics_source | 默认内参来源说明 |
 | output_subdir | outputs/ 下的默认相机子目录 |
 | result_filename | 质量通过时的标定结果文件名 |
 
-当前标定板是 DICT_4X4_100、13×5 方格、方格边长 15 mm、marker 边长 11 mm。若更换了物理板，必须同步修改对应配置的 default_board 后重新采集。
+`calibration_head_config.json` 和胸部配置使用 DICT_4X4_100、13×5 方格、方格边长 15 mm、marker 边长 11 mm 的 ChArUco 板。`calibration_head_chessboard_11x8_config.json` 使用 11×8 内角点、方格边长 30 mm 的普通棋盘格；左上、左下为白色，右上为黑色。若更换了物理板，必须同步修改对应配置的 default_board 后重新采集。
 
 胸部配置当前记录的默认序列号为 CL8654103PJ。若现场设备不同，推荐先临时运行：
 
@@ -202,7 +217,7 @@
 
     modules/module_4_head_judge/module_4_2_pose_estimation/tabletop_pointcloud_workpiece_pose.py
 
-标定完成后将标定文件拷贝一份到/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/calibration里供 Module 4-2 消费（需要视情况重命名标定文件）。
+标定完成后将标定文件拷贝一份到/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/calibration里供 Module 4-2 消费（需要修改4-2的引用）。
 
 将头部标定结果通过该脚本的 --calibration 参数传入时，它主要使用：
 

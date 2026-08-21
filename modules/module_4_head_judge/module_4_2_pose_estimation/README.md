@@ -78,7 +78,7 @@ calibration/sdk_base_to_planner_alignment.json
 
 脚本会拒绝“沿用默认标定但修改头部 pitch/yaw”的组合。若要使用其他观察位，必须提供该观察位重新标定得到的 `--calibration` 文件。
 
-目录中还保留 `calibration/head_charuco_13x5_calibration_head.json`，它对应另一套相机/观察位标定，**不是当前默认标定**。若显式使用它，必须同时提供它对应的头部 pitch/yaw。换场景、相机或观察位必须重新标定，否则位姿估计不准。
+目录中还保留 `calibration/head_charuco_13x5_calibration_head.json`，它对应另一套标定板/观察位标定，是在祥鑫时的标定**不是当前默认标定**。若显式使用它，必须同时提供它对应的头部 pitch/yaw。换场景、相机或观察位必须重新标定，否则位姿估计不准。
 
 ### 3.2 工件 STL 与语义坐标系
 

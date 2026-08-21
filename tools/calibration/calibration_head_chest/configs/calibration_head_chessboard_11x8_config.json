@@ -1,0 +1,22 @@
+{
+  "camera_name": "head_d435i",
+  "camera_type": "realsense_d435i",
+  "camera_model": "Intel RealSense D435i",
+  "default_serial": "261222076212",
+  "default_board": {
+    "inner_cols": 11,
+    "inner_rows": 8,
+    "square_size_m": 0.03,
+    "top_left_color": "white",
+    "corner_colors": {
+      "top_left": "white",
+      "bottom_left": "white",
+      "top_right": "black"
+    }
+  },
+  "calibration_type": "eye_to_hand_fixed_head_pose",
+  "transform_key": "T_base_head_camera",
+  "intrinsics_source": "D435i_active_color_profile",
+  "output_subdir": "head_d435i_chessboard_11x8",
+  "result_filename": "calibration_head_chessboard_11x8.json"
+}

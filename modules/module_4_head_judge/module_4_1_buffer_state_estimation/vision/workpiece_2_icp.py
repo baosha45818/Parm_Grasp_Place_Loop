@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from modules.module_4_head_judge.module_4_1_buffer_state_estimation import (  # noqa: E402
     full6d_pose_solver as pose_solver,
 )
+from tools.inspection_support.stl_model import load_cad_pointcloud_template  # noqa: E402
 from .geometry import (  # noqa: E402
     camera_matrix,
     depth_to_xyz,
@@ -38,7 +39,8 @@ from .geometry import (  # noqa: E402
 
 
 ASSET_ROOT = MODULE_ROOT / "assets/workpiece_2"
-STL_PATH = ASSET_ROOT / "workpiece_2.stl"
+STL_PATH = PROJECT_ROOT / "tools/workpiece_2/workpiece_2.stl"
+CAD_TEMPLATE_PATH = PROJECT_ROOT / "tools/workpiece_2/cad_pointcloud_template.npz"
 SEMANTIC_PATH = ASSET_ROOT / "workpiece2.semantic.json"
 CONFIG_PATH = MODULE_ROOT / "configs/workpiece_2.json"
 BODY_HEAD_PATH = (
@@ -222,7 +224,8 @@ def main() -> int:
     required = [
         capture_dir / "metadata.json", capture_dir / "rgb_000.png",
         capture_dir / "depth_aligned_000.png", masks_dir / "masks.npz",
-        masks_dir / "meta.json", STL_PATH, SEMANTIC_PATH, args.config, BODY_HEAD_PATH,
+        masks_dir / "meta.json", STL_PATH, CAD_TEMPLATE_PATH, SEMANTIC_PATH,
+        args.config, BODY_HEAD_PATH,
     ]
     missing = [path for path in required if not path.is_file()]
     if missing:
@@ -247,8 +250,7 @@ def main() -> int:
     stl_semantic = pose_solver.load_semantic_calibration(SEMANTIC_PATH)
     positive_face_axis = pose_solver.load_positive_face_axis(SEMANTIC_PATH)
     landmarks = pose_solver.semantic_landmarks(vertices, stl_semantic)
-    cad = pose_solver.sample_stl_surface(STL_PATH, 14000, seed=3)
-    cad_render = pose_solver.sample_stl_surface(STL_PATH, 90000, seed=4)
+    cad, cad_render = load_cad_pointcloud_template(CAD_TEMPLATE_PATH)
     solver_args = _solver_args(config)
 
     diagnostics: list[dict] = []
