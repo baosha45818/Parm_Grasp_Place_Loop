@@ -174,13 +174,13 @@ z_offset_candidates_m = [0.0, 0.1]
 # 阶段 4 原始遍历数 = len(x) × len(y) × len(z) × len(roll) × len(pitch) × len(yaw)
 # = 2 × 3 × 2 × 7 × 5 × 6 = 2520；组合循环顺序为 x→y→z→roll→pitch→yaw，
 # yaw 变化最快。每批最多并行 3 条 RRTConnect 规划，选优先级最高的可达候选。
-roll_candidates_deg = [ 0.0, 20.0, -20.0]
+roll_candidates_deg = [ 20.0, -20.0]
 
 # 工件局部 pitch 摆正候选。
-pitch_candidates_deg = [ 0.0, -20.0, 20.0]
+pitch_candidates_deg = [ -20.0, 20.0]
 
 # 工件局部 yaw 摆正候选，优先落在 Q1。
-yaw_candidates_deg = [35.0, 30.0, 40.0, 60.0, 70.0, 0.0]
+yaw_candidates_deg = [35.0, 30.0, 40.0, 60.0, 70.0]
 
 # 并行 RRTConnect 摆正规划的最大 worker 数。
 rrt_turn_parallelism = 3

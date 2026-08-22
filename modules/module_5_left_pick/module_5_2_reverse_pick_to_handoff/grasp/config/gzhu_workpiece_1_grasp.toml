@@ -1,0 +1,18 @@
+schema_version = 1
+owner_module = "module_5_left_pick/reverse_pick_to_handoff"
+mode = "gzhu"
+workpiece = "1"
+adapter = "unique_back_prediction"
+stl = "tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl"
+wide_head_outward_grasp_offset_m = 0.005
+wide_head_inward_grasp_offset_m = 0.010
+wide_head_image_left_grasp_lateral_offset_m = 0.0
+wide_head_image_right_grasp_lateral_offset_m = 0.0
+grasp_lateral_offset_axis = "grasp_frame_+Y"
+grasp_lateral_offset_rule = "保留 gzhu 重构前的宽头内外向补偿，不增加图像横向补偿。"
+
+[perception]
+orientation_config = "../../../../module_4_head_judge/module_4_1_buffer_state_estimation/configs/workpiece_1.json"
+
+[execution]
+approach_angles_deg = [90.0, 75.0, -75.0]

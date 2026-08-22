@@ -632,20 +632,22 @@ def actual_right_eef_from_driver(
     return compose_pose(current_pose(arm, arm_id), driver_to_right_eef)
 
 
-def require_driver_right_eef_at_target(
-    arm: object, *, arm_id: int, driver_to_right_eef: list[float], target: list[float],
+def require_planner_right_eef_at_target(
+    planner: object, *, frame_id: str, right_eef_frame: str, target: list[float],
     position_tolerance_m: float, orientation_tolerance_rad: float, timeout_s: float, stage: str,
 ) -> list[float]:
-    """Refuse to start servo until the driver confirms right_eef is at its expected start pose."""
+    """Refuse descent until the planner TF confirms right_eef is at its expected start pose."""
     deadline = time.monotonic() + timeout_s
     last_pose: list[float] | None = None
     while time.monotonic() < deadline:
-        last_pose = actual_right_eef_from_driver(arm, arm_id, driver_to_right_eef)
+        last_pose = pose_from_lookup_transform(
+            planner.lookup_transform(frame_id, right_eef_frame).get("data")
+        )
         position_error = math.sqrt(sum((last_pose[axis] - target[axis]) ** 2 for axis in range(3)))
         orientation_error = orientation_distance_rad(last_pose[3:], target[3:])
         if position_error <= position_tolerance_m and orientation_error <= orientation_tolerance_rad:
             print(
-                f"{stage}：驱动状态确认 right_eef 已到预抓取点；"
+                f"{stage}：规划器 TF 确认 right_eef 已到预抓取点；"
                 f"位置误差={position_error * 1000.0:.2f} mm，"
                 f"姿态误差={math.degrees(orientation_error):.2f}°。"
             )
@@ -655,7 +657,7 @@ def require_driver_right_eef_at_target(
     position_error = math.sqrt(sum((last_pose[axis] - target[axis]) ** 2 for axis in range(3)))
     orientation_error = orientation_distance_rad(last_pose[3:], target[3:])
     raise RuntimeError(
-        f"{stage}：驱动状态的 right_eef 未到预抓取点，禁止 RRTstar 下探；"
+        f"{stage}：规划器 TF 的 right_eef 未到预抓取点，禁止 RRTstar 下探；"
         f"实际 xyz={[round(value, 6) for value in last_pose[:3]]}，"
         f"目标 xyz={[round(value, 6) for value in target[:3]]}，"
         f"位置误差={position_error * 1000.0:.1f} mm，"
@@ -1771,8 +1773,8 @@ def main() -> int:
             sample_frequency=selected_pregrasp_frequency * args.trajectory_execution_speed_scale,
         )
         try:
-            reached_pregrasp_tcp = require_driver_right_eef_at_target(
-                arm, arm_id=args.arm_id, driver_to_right_eef=servo_eef_offset,
+            reached_pregrasp_tcp = require_planner_right_eef_at_target(
+                planner, frame_id=args.frame_id, right_eef_frame=ik_frame,
                 target=selected_pregrasp_target,
                 position_tolerance_m=args.servo_position_tolerance_m,
                 orientation_tolerance_rad=args.servo_orientation_tolerance_rad,
@@ -1806,8 +1808,8 @@ def main() -> int:
                     "阶段 1c 精确 RRTstar 预抓取修正不可规划或执行失败；"
                     "不会开始 RRTstar 下探。"
                 ) from exc
-            reached_pregrasp_tcp = require_driver_right_eef_at_target(
-                arm, arm_id=args.arm_id, driver_to_right_eef=servo_eef_offset,
+            reached_pregrasp_tcp = require_planner_right_eef_at_target(
+                planner, frame_id=args.frame_id, right_eef_frame=ik_frame,
                 target=selected_pregrasp_target,
                 position_tolerance_m=args.servo_position_tolerance_m,
                 orientation_tolerance_rad=args.servo_orientation_tolerance_rad,

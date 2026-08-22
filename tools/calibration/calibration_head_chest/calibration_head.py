@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Eye-to-hand calibration for the head D435i or chest Orbbec camera."""
+"""Eye-to-hand calibration for a camera installed at a named robot position."""
 
 from __future__ import annotations
 
@@ -20,28 +20,60 @@ from head_d435i_camera import HeadD435iCamera
 
 CODE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = CODE_DIR / "configs"
-DEFAULT_CONFIG_PATH = CONFIG_DIR / "calibration_head_config.json"
+DEFAULT_CONFIG_PATH = CONFIG_DIR / "realsense_d435i_head_charuco.json"
 OUTPUT_ROOT = CODE_DIR / "outputs"
+SAMPLE_CAMERA_KEY = "camera"
+
+def _load_json(path: Path, label: str) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"{label} not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid {label} JSON: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} must be a JSON object: {path}")
+    return payload
+
+
+def _load_referenced_config(setup_path: Path, reference: object, label: str) -> dict:
+    if not isinstance(reference, str) or not reference:
+        raise RuntimeError(f"{label} reference must be a non-empty relative path")
+    target = (setup_path.parent / reference).resolve()
+    return _load_json(target, label)
 
 
 def load_config(path: Path) -> dict:
-    try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise RuntimeError(f"calibration config not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"invalid calibration config JSON: {path}: {exc}") from exc
-    required = {
-        "camera_name", "camera_type", "camera_model", "default_serial",
-        "default_board", "calibration_type", "transform_key",
-        "intrinsics_source", "output_subdir", "result_filename",
-    }
+    """Load the four user-maintained calibration settings.
+
+    Camera model and position are labels only. The adapter is detected from
+    the connected device matching ``camera_serial`` rather than inferred from
+    either label.
+    """
+    config = _load_json(path, "calibration config")
+    if {"camera_model", "camera_serial", "position", "board_config"} <= config.keys():
+        board = _load_referenced_config(path, config["board_config"], "board config")
+        config = {
+            "camera_model": config["camera_model"],
+            "default_serial": config["camera_serial"],
+            "position": config["position"],
+            "default_board": board,
+            "config_format": "simple_v3",
+        }
+    else:
+        # Retained for existing private configurations.
+        config["config_format"] = "legacy"
+
+    if config["config_format"] == "legacy":
+        config.setdefault("position", config.get("camera_name"))
+    required = {"camera_model", "default_serial", "position", "default_board"}
     if missing := sorted(required - config.keys()):
         raise RuntimeError(f"calibration config missing fields: {missing}")
-    if config["camera_type"] not in {"realsense_d435i", "orbbec_femto_bolt"}:
-        raise RuntimeError(f"unsupported camera_type: {config['camera_type']!r}")
     if not isinstance(config["default_board"], dict):
         raise RuntimeError("calibration config field default_board must be an object")
+    for key in ("camera_model", "default_serial", "position"):
+        if not isinstance(config[key], str) or not config[key]:
+            raise RuntimeError(f"calibration config field {key!r} must be a non-empty string")
     return config
 
 
@@ -54,14 +86,14 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=Path, default=DEFAULT_CONFIG_PATH,
-        help="camera configuration JSON, e.g. configs/calibration_head_config.json",
+        help="calibration setup JSON, e.g. configs/realsense_d435i_head_charuco.json",
     )
     parser.add_argument("--collect", action="store_true")
     parser.add_argument("--solve", action="store_true")
     parser.add_argument(
         "--data", type=Path,
-        default=OUTPUT_ROOT / str(config["output_subdir"]),
-        help="sample/result directory (defaults to outputs/<camera>)",
+        default=OUTPUT_ROOT / selected.config.stem,
+        help="sample/result directory (defaults to outputs/<config filename>)",
     )
     parser.add_argument("--samples", type=int, default=18)
     parser.add_argument("--arm-host", default="192.168.3.11")
@@ -74,8 +106,8 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--head-pitch-deg", type=float, default=0.0, help="recorded only for the head camera")
-    parser.add_argument("--head-yaw-deg", type=float, default=0.0, help="recorded only for the head camera")
+    parser.add_argument("--head-pitch-deg", type=float, default=0.0, help="recorded for a position with gimbal_pose enabled")
+    parser.add_argument("--head-yaw-deg", type=float, default=0.0, help="recorded for a position with gimbal_pose enabled")
     parser.add_argument("--teach-free", dest="teach_free", action="store_true", default=True)
     parser.add_argument("--drag-teach", dest="teach_free", action="store_false")
     parser.add_argument("--max-translation-rms-mm", type=float, default=5.0)
@@ -91,12 +123,32 @@ def parse_args() -> tuple[argparse.Namespace, dict]:
     return parser.parse_args(), config
 
 
-def create_camera(config: dict, serial: str, width: int, height: int, fps: int):
-    if config["camera_type"] == "realsense_d435i":
-        return HeadD435iCamera(serial, width, height, fps)
-    if config["camera_type"] == "orbbec_femto_bolt":
-        return ChestOrbbecCamera(serial, width, height, fps)
-    raise RuntimeError(f"unsupported camera_type: {config['camera_type']!r}")
+class AutoDetectedCamera:
+    """Open the SDK that recognises the configured serial number."""
+
+    def __init__(self, serial: str, width: int, height: int, fps: int):
+        self.serial, self.width, self.height, self.fps = serial, width, height, fps
+        self._camera = None
+
+    def __enter__(self):
+        failures = []
+        for factory in (HeadD435iCamera, ChestOrbbecCamera):
+            camera = factory(self.serial, self.width, self.height, self.fps)
+            try:
+                self._camera = camera.open()
+                return self._camera
+            except Exception as exc:
+                camera.close()
+                failures.append(f"{factory.__name__}: {exc}")
+        raise RuntimeError(f"no supported camera found for serial {self.serial!r}: " + "; ".join(failures))
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._camera is not None:
+            self._camera.close()
+
+
+def create_camera(serial: str, width: int, height: int, fps: int) -> AutoDetectedCamera:
+    return AutoDetectedCamera(serial, width, height, fps)
 
 
 def main() -> None:
@@ -105,21 +157,13 @@ def main() -> None:
         raise SystemExit("choose --collect and/or --solve")
     if min(args.width, args.height, args.fps, args.samples) <= 0:
         raise SystemExit("--width, --height, --fps, and --samples must be positive")
-    is_head = config["camera_type"] == "realsense_d435i"
-    if is_head and (not -45.0 <= args.head_pitch_deg <= 45.0 or not -60.0 <= args.head_yaw_deg <= 60.0):
-        raise SystemExit("head pose outside SDK limits: pitch [-45,45], yaw [-60,60] degrees")
-
-    camera_name = str(config["camera_name"])
+    position = str(config["position"])
     board = dict(config["default_board"])
     if args.collect:
-        pose_note = (
-            f" pitch={args.head_pitch_deg:.2f} deg, yaw={args.head_yaw_deg:.2f} deg."
-            if is_head else ""
-        )
-        print(f"[{camera_name}] Keep this camera rigidly fixed throughout this session.{pose_note}")
+        print(f"[{position}] Keep this camera rigidly fixed throughout this session.")
         capture_samples(
-            create_camera(config, args.serial, args.width, args.height, args.fps),
-            camera_name, args.arm_host, args.arm_id, board, args.data, args.samples, args.teach_free,
+            create_camera(args.serial, args.width, args.height, args.fps),
+            SAMPLE_CAMERA_KEY, args.arm_host, args.arm_id, board, args.data, args.samples, args.teach_free,
             gripper_host=None if args.disable_gripper_toggle else args.gripper_host,
             gripper_hand=args.gripper_hand, gripper_force=args.gripper_force,
         )
@@ -132,7 +176,7 @@ def main() -> None:
     if missing := sorted(excluded - available):
         raise RuntimeError(f"excluded sample indices not found: {missing}")
     samples = [sample for sample in samples if int(sample["index"]) not in excluded]
-    intrinsics_source = str(config["intrinsics_source"])
+    intrinsics_source = "active camera profile"
     if args.intrinsics is not None:
         payload = json.loads(args.intrinsics.read_text(encoding="utf-8"))
         matrix = np.asarray(payload.get("camera_matrix"), dtype=np.float64)
@@ -144,11 +188,11 @@ def main() -> None:
             sample["distortion_coeffs"] = distortion.tolist()
         intrinsics_source = str(args.intrinsics)
     if args.review_corners and board.get("type") not in {"aruco_grid", "charuco"}:
-        samples = review_board_corners(samples, args.data, board, camera_name=camera_name)
-    samples = refresh_board_poses(samples, args.data, camera_name, board)
+        samples = review_board_corners(samples, args.data, board, camera_name=SAMPLE_CAMERA_KEY)
+    samples = refresh_board_poses(samples, args.data, SAMPLE_CAMERA_KEY, board)
     T_base_camera, T_eef_board, rms, used, rejected, rows = solve_laser_robust(
         samples, max_outlier_fraction=args.max_outlier_fraction,
-        min_samples=args.min_accepted_samples, camera_name=camera_name,
+        min_samples=args.min_accepted_samples, camera_name=SAMPLE_CAMERA_KEY,
     )
     translation = [row["translation_mm"] for row in rows]
     rotation = [row["rotation_deg"] for row in rows]
@@ -173,7 +217,8 @@ def main() -> None:
         and quality["rotation_max_deg"] <= args.max_rotation_max_deg
     )
     result = {
-        "camera_name": camera_name,
+        "camera_name": position,
+        "position": position,
         "camera_model": config["camera_model"],
         "camera_serial": args.serial,
         "calibration_type": config["calibration_type"],
@@ -184,7 +229,7 @@ def main() -> None:
         "explicitly_excluded_indices": sorted(excluded),
         "camera_matrix": samples[0].get("camera_matrix"),
         "distortion_coeffs": samples[0].get("distortion_coeffs"),
-        "intrinsics_source": intrinsics_source,
+        "intrinsics_source": "active camera profile" if args.intrinsics is None else intrinsics_source,
         "image_size": samples[0].get("image_size"),
         "robot_pose_source": "parm_sdk state.<arm>.eef_pose",
         "corner_assignment": (
@@ -194,21 +239,21 @@ def main() -> None:
         ),
         "rms_residual": rms,
         "residual": quality,
-        config["transform_key"]: transform_to_json(T_base_camera),
+        "T_base_camera": transform_to_json(T_base_camera),
         "T_eef_board": transform_to_json(T_eef_board),
         "status": "ACCEPTED" if accepted else "REJECTED_QUALITY_GATE",
         "created_at": datetime.now().isoformat(timespec="seconds"),
     }
-    if is_head:
-        result["head_pose_deg"] = {"pitch": args.head_pitch_deg, "yaw": args.head_yaw_deg}
-    output = args.data / (
-        str(config["result_filename"]) if accepted
-        else f"{Path(str(config['result_filename'])).stem}_rejected.json"
+    result["mount_pose_deg"] = {"pitch": args.head_pitch_deg, "yaw": args.head_yaw_deg}
+    result_stem = f"calibration_{args.config.stem}"
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    output = OUTPUT_ROOT / (
+        f"{result_stem}.json" if accepted else f"{result_stem}_rejected.json"
     )
     save_json(output, result)
     if not accepted:
         raise RuntimeError(
-            f"{camera_name} calibration rejected: kept={len(used)}/{len(samples)}, "
+            f"{position} calibration rejected: kept={len(used)}/{len(samples)}, "
             f"translation rms/max={quality['translation_rms_mm']:.1f}/{quality['translation_max_mm']:.1f}mm, "
             f"rotation rms/max={quality['rotation_rms_deg']:.2f}/{quality['rotation_max_deg']:.2f}deg; "
             f"diagnostic saved to {output}"

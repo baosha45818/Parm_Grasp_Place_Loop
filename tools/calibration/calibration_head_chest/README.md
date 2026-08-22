@@ -1,5 +1,7 @@
 # 头部与胸部相机外参标定
 
+> 每个入口配置只维护相机型号、序列号、位置与标定板；详见 [configs/README.md](configs/README.md)。
+
 本目录使用同一个入口脚本，为固定安装的两台相机执行 eye-to-hand（相机相对机器人基座）标定：
 
 - 头部 Intel RealSense D435i；
@@ -15,13 +17,13 @@
     ├── head_d435i_camera.py                RealSense D435i 彩色相机适配器
     ├── chest_orbbec_camera.py              Orbbec Femto Bolt 彩色相机适配器
     ├── configs/
-    │   ├── calibration_head_config.json    头部 D435i 的 ChArUco 配置
-    │   ├── calibration_head_chessboard_11x8_config.json
-    │   │                                   头部 D435i 的 11×8 棋盘格配置（30 mm 方格）
-    │   └── calibration_chest_config.json   胸部 Orbbec 的配置
+    │   ├── realsense_d435i_head_charuco.json
+    │   ├── realsense_d435i_head_chessboard_11x8.json
+    │   ├── orbbec_femto_bolt_chest_charuco.json
+    │   └── boards/                         可复用标定板配置
     ├── outputs/                            采集样本和标定结果；首次采集时自动创建
-    │   ├── head_d435i/
-    │   └── chest_orbbec/
+    │   ├── calibration_head_config/
+    │   └── calibration_chest_config/
     └── __pycache__/                        Python 自动生成的字节码缓存，可忽略
 
 ## 快速使用
@@ -31,10 +33,12 @@
     cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/tools/calibration/calibration_head_chest
     PY=/home/dainanjun/Public/Parm_Grasp_Place_Loop/.venv/bin/python
 
+`--collect` 用于连接相机和机械臂、在预览窗口中采集图像与末端位姿；`--solve` 用于读取已有样本并计算外参。两者同时使用时，脚本先采集、再立即求解。只想采集时只传 `--collect`；已有样本只想重新计算时只传 `--solve`。
+
 ### 头部 D435i
 
     $PY calibration_head.py \
-      --config configs/calibration_head_config.json \
+      --config configs/realsense_d435i_head_charuco.json \
       --collect --solve \
       --samples 18 \
       --head-pitch-deg 0 \
@@ -43,32 +47,32 @@
 ### 头部 D435i（11×8 棋盘格）
 
     $PY calibration_head.py \
-      --config configs/calibration_head_chessboard_11x8_config.json \
+      --config configs/realsense_d435i_head_chessboard_11x8.json \
       --collect --solve \
       --samples 18 \
       --head-pitch-deg 38.5 \
       --head-yaw-deg 0
 
-默认输入/输出目录为 outputs/head_d435i/，成功结果为：
+默认采样目录为 `outputs/realsense_d435i_head_charuco/`；最终标定结果直接写入 `outputs/`：
 
-    outputs/head_d435i/calibration_head.json
+    outputs/calibration_realsense_d435i_head_charuco.json
 
 棋盘格配置使用独立目录和文件名，避免与 ChArUco 样本混用：
 
-    outputs/head_d435i_chessboard_11x8/calibration_head_chessboard_11x8.json
+    outputs/calibration_realsense_d435i_head_chessboard_11x8.json
 
 注意！！！云台的 pitch/yaw 不由本脚本控制；这两个参数仅写进结果 JSON。重新调整云台姿态后，必须重新采集和标定。
 
 ### 胸部 Orbbec
 
     $PY calibration_head.py \
-      --config configs/calibration_chest_config.json \
+      --config configs/orbbec_femto_bolt_chest_charuco.json \
       --collect --solve \
       --samples 18
 
-默认输入/输出目录为 outputs/chest_orbbec/，成功结果为：
+默认采样目录为 `outputs/orbbec_femto_bolt_chest_charuco/`；最终标定结果直接写入 `outputs/`：
 
-    outputs/chest_orbbec/calibration_chest.json
+    outputs/calibration_orbbec_femto_bolt_chest_charuco.json
 
 胸部相机使用 Orbbec SDK；不要把它的序列号填入头部配置，或将头部 D435i 的序列号填入胸部配置。
 
@@ -77,37 +81,18 @@
 已有采样图像和 sample_*.json 时，不连接相机或机械臂也可以重跑求解：
 
     $PY calibration_head.py \
-      --config configs/calibration_head_config.json \
+      --config configs/realsense_d435i_head_charuco.json \
       --solve
 
-可用 --data /path/to/samples 指定非默认样本目录。默认目录按相机分开；如手动覆盖 --data，请避免让两台相机共用同一个目录。
+可用 --data /path/to/samples 指定非默认样本目录。默认目录按安装位置分开；如在同一位置换了相机，请通过 --data 使用全新的样本目录，避免混用旧相机的样本。
 
 ## 选择与修改配置
 
---config 选择 configs/ 下的 JSON 文件。每份 JSON 包含：
+`--config` 选择 `configs/` 下的入口 JSON。每份入口配置只含相机型号、序列号、位置，以及指向 `boards/` 中物理板定义的 `board_config`。字段说明及换相机步骤见 [configs/README.md](configs/README.md)。
 
-| 字段 | 用途 |
-| --- | --- |
-| camera_name | 样本元数据、求解筛选与默认输出目录的相机名称 |
-| camera_type | realsense_d435i 选择 RealSense；orbbec_femto_bolt 选择 Orbbec |
-| camera_model | 写入最终标定 JSON 的设备型号 |
-| default_serial | 默认设备序列号；可由命令行 --serial 临时覆盖 |
-| default_board | 标定板定义；必须与实际物理标定板一致 |
-| calibration_type | 写入结果的标定类型描述 |
-| transform_key | 最终结果中相机外参矩阵的字段名 |
-| intrinsics_source | 默认内参来源说明 |
-| output_subdir | outputs/ 下的默认相机子目录 |
-| result_filename | 质量通过时的标定结果文件名 |
+更换相机时，修改 `camera_serial`；`camera_model` 只用于标识，可按习惯命名。脚本会按序列号自动尝试已支持的 RealSense 与 Orbbec SDK。
 
-`calibration_head_config.json` 和胸部配置使用 DICT_4X4_100、13×5 方格、方格边长 15 mm、marker 边长 11 mm 的 ChArUco 板。`calibration_head_chessboard_11x8_config.json` 使用 11×8 内角点、方格边长 30 mm 的普通棋盘格；左上、左下为白色，右上为黑色。若更换了物理板，必须同步修改对应配置的 default_board 后重新采集。
-
-胸部配置当前记录的默认序列号为 CL8654103PJ。若现场设备不同，推荐先临时运行：
-
-    $PY calibration_head.py \
-      --config configs/calibration_chest_config.json \
-      --collect --serial 实际序列号
-
-确认后再更新 configs/calibration_chest_config.json 的 default_serial。
+`realsense_d435i_head_charuco.json` 和 `orbbec_femto_bolt_chest_charuco.json` 默认引用 DICT_4X4_100、13×5 方格、方格边长 15 mm、marker 边长 11 mm 的 ChArUco 板。`realsense_d435i_head_chessboard_11x8.json` 引用 11×8 内角点、方格边长 30 mm 的普通棋盘格。换物理板时，只需要修改入口配置的 `board_config`，并重新采集。
 
 ## 各代码文件的作用
 
@@ -217,7 +202,7 @@
 
     modules/module_4_head_judge/module_4_2_pose_estimation/tabletop_pointcloud_workpiece_pose.py
 
-标定完成后将标定文件拷贝一份到/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/calibration里供 Module 4-2 消费（需要修改4-2的引用）。
+标定完成后将标定文件拷贝一份到/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_4_head_judge/module_4_2_pose_estimation/calibration里供 Module 4-2 消费（需要修改4-2的引用，修改DEFAULT_CALIBRATION参数）。
 
 将头部标定结果通过该脚本的 --calibration 参数传入时，它主要使用：
 

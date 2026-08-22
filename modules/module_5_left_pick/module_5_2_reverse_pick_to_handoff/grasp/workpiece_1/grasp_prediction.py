@@ -10,6 +10,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
+
 HERE = Path(__file__).resolve().parent
 MODULE_ROOT = HERE.parent
 LOOP_ROOT = MODULE_ROOT.parents[3]
@@ -18,7 +20,7 @@ if str(LOOP_ROOT) not in sys.path:
 
 from tools.stl_model import load_stl_triangles_m
 
-DEFAULT_CONFIG = MODULE_ROOT / "config/workpiece_1_grasp.json"
+DEFAULT_CONFIG = MODULE_ROOT / "config/xiangxin_workpiece_1_grasp.toml"
 
 
 def normalize(vector: np.ndarray) -> np.ndarray:
@@ -165,7 +167,7 @@ def predict(capture_dir: Path, diagnostics_path: Path, config_path: Path = DEFAU
     metadata = json.loads((capture_dir / "metadata.json").read_text(encoding="utf-8"))
     intr = metadata["color_intrinsics"]
     K = np.array([[intr["fx"], 0, intr["ppx"]], [0, intr["fy"], intr["ppy"]], [0, 0, 1]], dtype=float)
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = load_config_mapping(config_path)
     stl = Path(config["stl"])
     if not stl.is_absolute():
         stl = LOOP_ROOT / stl

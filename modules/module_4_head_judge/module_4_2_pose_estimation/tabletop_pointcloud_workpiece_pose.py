@@ -217,10 +217,8 @@ def component_pose(component: np.ndarray, camera_matrix: np.ndarray, distortion:
         _pixel_to_base_xy(head_pixel, camera_matrix, distortion, t_base_camera, plane_z)
         - _pixel_to_base_xy(tail_pixel, camera_matrix, distortion, t_base_camera, plane_z)
     )
-    center_base = _pixel_to_base_xy(center_pixel, camera_matrix, distortion, t_base_camera, plane_z)
     return {
-        "center_pixel_xy": center_pixel.tolist(), "center_base_xy_m": center_base.tolist(),
-        "center_base_xy_mm": (center_base * 1000.0).tolist(),
+        "center_pixel_xy": center_pixel.tolist(),
         "grasp_center_pixel_xy": ((tail_pixel + head_pixel) / 2.0).tolist(),
         "head_pixel_xy": head_pixel.tolist(), "tail_pixel_xy": tail_pixel.tolist(),
         "head_direction_base_angle_deg": base_angle_deg, "head_direction_base_quadrant": base_quadrant,
@@ -247,7 +245,7 @@ def write_icp_workpiece_frame(rgb: np.ndarray, poses: list[dict], camera_matrix:
         # ``workpiece`` always means the configured semantic frame here, not
         # the raw STL axes.  For workpiece 2 this applies diag(-1, -1, 1), so
         # using the STL transform would reverse the displayed X and Y arrows.
-        transform = np.asarray(pose["T_head_camera_workpiece_semantic"], dtype=np.float64)
+        transform = np.asarray(pose["T_head_camera_workpiece"], dtype=np.float64)
         origin = transform[:3, 3]
         endpoints = np.stack([origin + axis_length_m * transform[:3, axis] for axis in range(3)])
         pixels, _ = cv2.projectPoints(
@@ -1176,17 +1174,6 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
         "low_reasons": low_reasons,
         "advisories": advisories,
         "thresholds": thresholds,
-        "checks": {
-            "orientation": orientation,
-            "observed_points": int(len(observed)),
-            "icp_fitness": fitness,
-            "icp_rmse_mm": rmse_mm,
-            "depth_score_mm": score_mm,
-            "front_back_score_margin_mm": face_margin_mm,
-            "near_optimal_candidate_count": near_count,
-            "near_optimal_max_center_deviation_mm": near_center_deviation_mm,
-            "near_optimal_max_rotation_deviation_deg": near_rotation_deviation_deg,
-        },
     }
     T_base_semantic = base_camera @ T_camera_stl @ stl_semantic
     T_camera_semantic = T_camera_stl @ stl_semantic
@@ -1217,27 +1204,16 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
     }
     record.update({
         "center_pixel_xy": center_px.tolist(), "head_pixel_xy": head_px.tolist(),
-        "tail_pixel_xy": tail_px.tolist(), "center_base_xy_m": center_b[:2].tolist(),
-        "center_base_xy_mm": (center_b[:2] * 1000).tolist(), "head_base_xy_m": head_b[:2].tolist(),
+        "tail_pixel_xy": tail_px.tolist(), "head_base_xy_m": head_b[:2].tolist(),
         "tail_base_xy_m": tail_b[:2].tolist(), "head_direction_base_vector": direction.tolist(),
         "head_direction_base_xy_unit": (horizontal_direction / horizontal_length).tolist(),
         "head_direction_base_angle_deg": yaw, "head_direction_base_quadrant": quadrant,
-        "robot_base_xy_yaw": {"x_m": float(center_b[0]), "y_m": float(center_b[1]),
-            "x_mm": float(center_b[0] * 1000), "y_mm": float(center_b[1] * 1000),
-            "yaw_rad": math.radians(yaw), "yaw_deg": yaw, "yaw_quadrant": quadrant,
-            "yaw_definition": "horizontal projection of CAD semantic +X (tail to head), estimated by full-6DoF mask-local point-cloud ICP"},
-        "robot_base_xyz_rpy": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]),
-            "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll),
-            "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0,
-            "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)"},
         "pose_body_base": {"x_m": float(center_b[0]), "y_m": float(center_b[1]), "z_m": float(center_b[2]),
             "roll_rad": roll, "pitch_rad": pitch, "yaw_rad": yaw_rpy, "roll_deg": math.degrees(roll),
             "pitch_deg": math.degrees(pitch), "yaw_deg": math.degrees(yaw_rpy) % 360.0,
             "rpy_convention": "intrinsic ZYX (yaw, then pitch, then roll)", "rotation_matrix": T_base_semantic[:3, :3].tolist()},
         "orientation": orientation,
-        "object_side": {"FRONT": "positive_face_full_6dof", "BACK": "reverse_face_full_6dof", "OTHER": "ambiguous_face_full_6dof"}[orientation],
         "orientation_score_margin_mm": None if margin_m is None else margin_m * 1000,
-        "required_orientation_margin_mm": args.minimum_face_margin_mm,
         "face_hypotheses": face_hypotheses, "candidate_confidence": candidate_confidence,
         "pose_confidence": pose_confidence,
         "icp": {"rmse_mm": rmse * 1000, "fitness": fitness, "depth_score_mm": score * 1000,
@@ -1247,7 +1223,6 @@ def icp_pose_for_mask(component: np.ndarray, xyz: np.ndarray, depth: np.ndarray,
             "table_penetration_mm": penetration_m * 1000,
             "origin_constraint": "projected semantic origin must lie in the SAM2 workpiece mask"},
         "T_head_camera_stl": T_camera_stl.tolist(), "T_head_camera_workpiece": T_camera_semantic.tolist(),
-        "T_head_camera_workpiece_semantic": T_camera_semantic.tolist(),
         "T_body_base_workpiece_semantic": T_base_semantic.tolist(),
     })
     return record
@@ -1309,23 +1284,34 @@ def main() -> int:
         penalties = []
         for pose in attempt_poses:
             confidence = pose["pose_confidence"]
-            checks, thresholds = confidence["checks"], confidence["thresholds"]
+            thresholds = confidence["thresholds"]
+            icp = pose["icp"]
+            selected_candidates = pose["candidate_confidence"]
+            selected_side = pose["orientation"]
+            if selected_side not in selected_candidates:
+                # OTHER means FRONT/BACK were too close.  The selected ICP
+                # pose is still the lower-scoring of the two candidates.
+                selected_side = min(
+                    selected_candidates,
+                    key=lambda side: float(selected_candidates[side]["top_three"][0]["depth_score_mm"]),
+                )
+            candidate = selected_candidates.get(selected_side, {})
             penalties.append(sum((
-                max(0.0, (thresholds["acceptable_min_observed_points"] - checks["observed_points"])
+                max(0.0, (thresholds["acceptable_min_observed_points"] - icp["observed_points"])
                     / thresholds["acceptable_min_observed_points"]),
-                max(0.0, (thresholds["acceptable_min_fitness"] - checks["icp_fitness"])
+                max(0.0, (thresholds["acceptable_min_fitness"] - icp["fitness"])
                     / thresholds["acceptable_min_fitness"]),
-                max(0.0, (checks["icp_rmse_mm"] - thresholds["acceptable_max_rmse_mm"])
+                max(0.0, (icp["rmse_mm"] - thresholds["acceptable_max_rmse_mm"])
                     / thresholds["acceptable_max_rmse_mm"]),
-                max(0.0, (checks["depth_score_mm"] - thresholds["acceptable_max_depth_score_mm"])
+                max(0.0, (icp["depth_score_mm"] - thresholds["acceptable_max_depth_score_mm"])
                     / thresholds["acceptable_max_depth_score_mm"]),
-                max(0.0, (checks["near_optimal_max_center_deviation_mm"]
+                max(0.0, (float(candidate.get("near_optimal_max_center_deviation_from_best_mm", 0.0))
                     - thresholds["reject_near_optimal_center_deviation_mm"])
                     / thresholds["reject_near_optimal_center_deviation_mm"]),
-                max(0.0, (checks["near_optimal_max_rotation_deviation_deg"]
+                max(0.0, (float(candidate.get("near_optimal_max_rotation_deviation_from_best_deg", 0.0))
                     - thresholds["reject_near_optimal_rotation_deviation_deg"])
                     / thresholds["reject_near_optimal_rotation_deviation_deg"]),
-                1.0 if checks["orientation"] == "OTHER" else 0.0,
+                1.0 if pose["orientation"] == "OTHER" else 0.0,
             )))
         return (
             float(sum(len(pose["pose_confidence"]["low_reasons"]) for pose in attempt_poses)),
@@ -1407,8 +1393,8 @@ def main() -> int:
                 # entries proceed from right to left.  Use X only as a stable
                 # tie-breaker when two centres have the same Y coordinate.
                 poses.sort(key=lambda pose: (
-                    float(pose["center_base_xy_m"][1]),
-                    float(pose["center_base_xy_m"][0]),
+                    float(pose["T_body_base_workpiece_semantic"][1][3]),
+                    float(pose["T_body_base_workpiece_semantic"][0][3]),
                 ))
 
                 write_icp_workpiece_frame(

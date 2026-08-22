@@ -1,0 +1,9 @@
+{
+  "type": "charuco",
+  "dictionary": "DICT_4X4_100",
+  "squares_x": 13,
+  "squares_y": 5,
+  "square_size_m": 0.015,
+  "marker_size_m": 0.011,
+  "homography_interpolation": false
+}

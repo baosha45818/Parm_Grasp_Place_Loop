@@ -52,6 +52,7 @@ from motion_primitives import (  # noqa: E402
     pre_search_approach_leg,
     move_continuous_linear_step,
     move_in_active_session,
+    move_place_ready_to_saved_joints_cached,
     move_to_saved_joints_planned,
     move_to_saved_joints_servo,
 )
@@ -144,13 +145,26 @@ def placement_main(argv: list[str] | None = None) -> int:
                 timeout_event="right_cancel_wait_timeout",
             )
         print("正在移动到保存的起始位姿……")
-        if args.initial_motion == "planner-movej":
+        if args.initial_motion == "planner-movej" and args.search_attempt == 1:
+            initial_source = move_place_ready_to_saved_joints_cached(
+                arm,
+                args.planner_config,
+                saved_joints_deg,
+                workpiece=args.trajectory_workpiece,
+                planner_name=args.initial_joint_planner,
+            )
+            log_event("initial_joint_motion_completed", source=initial_source)
+        elif args.initial_motion == "planner-movej":
+            # 重试前右臂已从搜索位抬升，不再是 Module 8 的 place-ready 起点；
+            # 不能播放首点固定的缓存轨迹。
             move_to_saved_joints_planned(
                 arm, args.planner_config, saved_joints_deg,
                 planner_name=args.initial_joint_planner,
             )
+            log_event("initial_joint_motion_completed", source="planner_retry")
         else:
             move_to_saved_joints_servo(arm, saved_joints_deg)
+            log_event("initial_joint_motion_completed", source="joint_servo")
         # The taught joint pose is a safe landmark.  Start the legacy Hole-A
         # search only after the requested world-frame approach from that pose.
 

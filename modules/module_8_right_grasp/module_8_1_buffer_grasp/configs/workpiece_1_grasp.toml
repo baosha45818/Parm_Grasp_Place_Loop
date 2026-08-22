@@ -38,7 +38,7 @@ servo_max_angular_accel_radps2 = 0.6
 # 向控制器推送 ServoPose 目标的频率 [Hz]；仅允许脚本支持的离散频率。
 servo_hz = 50.0
 # ServoPose 末端稳定判定的位置误差上限 [m]；超过该值直到超时则本段失败。
-servo_position_tolerance_m = 0.0005
+servo_position_tolerance_m = 0.001
 # ServoPose 末端稳定判定的三维姿态角误差上限 [rad]；超过该值直到超时则本段失败。
 servo_orientation_tolerance_rad = 0.035
 # ServoPose 推送最终目标后等待位置和姿态进入上述容差的最长时间 [s]。

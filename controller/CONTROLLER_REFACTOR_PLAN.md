@@ -40,7 +40,6 @@ controller/
 ├── scheduler_rules.py      # 纯调度规则：状态 + 结果 -> 下一模块/动作
 ├── module_registry.py      # 模块命令、输入映射、结果文件、资源声明
 ├── module_runner.py        # 启动模块、超时、读取或补齐结果
-├── robot_actions.py         # 启动预置、Buffer 观察位（非业务动作）
 ├── safety.py                # Ctrl+C/停止事件的双臂取消链
 ├── deployment.py            # xiangxin/gzhu 现场地址和环境统一注入
 ├── contracts.py            # 统一结果协议及校验

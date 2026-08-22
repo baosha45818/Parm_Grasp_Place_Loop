@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
+
 
 MODULE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = MODULE_DIR.parents[3]
@@ -67,7 +69,7 @@ MODES = {
         head_host="127.0.0.1",
         head_feedback_pitch_sign=-1,
         workpiece_1_body_z_down_m=0.020,
-        workpiece_1_grasp_config=MODULE_DIR / "config/gzhu_workpiece_1_grasp.json",
+        workpiece_1_grasp_config=MODULE_DIR / "config/gzhu_workpiece_1_grasp.toml",
     ),
     "xiangxin": DeploymentMode(
         name="xiangxin",
@@ -89,7 +91,7 @@ MODES = {
         head_host="192.168.3.22",
         head_feedback_pitch_sign=1,
         workpiece_1_body_z_down_m=0.005,
-        workpiece_1_grasp_config=MODULE_DIR / "config/workpiece_1_grasp.json",
+        workpiece_1_grasp_config=MODULE_DIR / "config/xiangxin_workpiece_1_grasp.toml",
     ),
 }
 
@@ -152,7 +154,7 @@ def load_mode(name: str) -> DeploymentMode:
         raise FileNotFoundError(
             f"模式 {name} 的工件1抓取点配置不存在: {mode.workpiece_1_grasp_config}"
         )
-    grasp_config = json.loads(mode.workpiece_1_grasp_config.read_text(encoding="utf-8"))
+    grasp_config = load_config_mapping(mode.workpiece_1_grasp_config)
     if grasp_config.get("mode") != name:
         raise RuntimeError(
             f"模式 {name} 与工件1抓取点配置不匹配: {mode.workpiece_1_grasp_config}"

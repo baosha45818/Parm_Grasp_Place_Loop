@@ -401,6 +401,11 @@ output/module_4_2/workpiece_<编号>/<递增序号>/
 | `candidate_confidence` | 同侧近似最优候选的一致性诊断 |
 | `pose_confidence` | HIGH/MEDIUM/LOW 和具体原因 |
 
+为避免同一数值在多个别名中重复，当前输出以 `T_body_base_workpiece_semantic` 和
+`pose_body_base` 为唯一的完整位姿表示；`T_head_camera_workpiece` 为对应的相机系语义位姿。
+`head_direction_base_angle_deg`/`head_direction_base_quadrant` 是抓取流程所需的平面朝向。
+ICP 数值只保存在 `icp`，质量等级和阈值只保存在 `pose_confidence`。
+
 当前 Module 8.1 总控使用 `orientation`、`head_direction_base_quadrant`、`head_direction_base_angle_deg`；Module 7 使用完整工件位姿及方向字段。`workpiece-index` 必须与下游目标工件在此数组中的索引一致。
 
 ## 10. 常用参数覆盖示例

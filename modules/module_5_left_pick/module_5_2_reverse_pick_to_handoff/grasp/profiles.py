@@ -8,11 +8,13 @@ import math
 from pathlib import Path
 from typing import Any
 
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
+
 
 MODULE_DIR = Path(__file__).resolve().parent
 CONFIG_DIR = MODULE_DIR / "config"
 DEFAULT_PROFILES = {
-    "1": CONFIG_DIR / "workpiece_1.json",
+    "1": CONFIG_DIR / "xiangxin_workpiece_1_grasp.toml",
     "2": CONFIG_DIR / "workpiece_2.json",
 }
 EXPECTED_ADAPTERS = {
@@ -57,7 +59,7 @@ def load_reverse_grasp_profile(
     path = (profile_path or DEFAULT_PROFILES[workpiece]).expanduser().resolve()
     if not path.is_file():
         raise FileNotFoundError(f"反抓配置不存在: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = load_config_mapping(path)
     if int(payload.get("schema_version", 0)) != 1:
         raise RuntimeError(f"不支持的反抓配置版本: {path}")
     if str(payload.get("workpiece")) != workpiece:

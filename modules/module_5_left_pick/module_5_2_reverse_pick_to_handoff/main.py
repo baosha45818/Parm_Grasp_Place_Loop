@@ -18,6 +18,8 @@ import sys
 
 import numpy as np
 
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
+
 ROOT = Path(__file__).resolve().parents[3]
 REVERSE_IMPL = ROOT / 'modules/module_5_left_pick/module_5_2_reverse_pick_to_handoff/grasp/workpiece_1'
 sys.path.insert(0, str(ROOT))
@@ -75,7 +77,7 @@ def _mode_grasp_config(payload: dict, explicit_mode: str | None) -> tuple[str, P
     config = deployment.workpiece_1_grasp_config.resolve()
     if not config.is_file():
         raise FileNotFoundError(f'{mode_name} 的工件1反抓补偿配置不存在：{config}')
-    config_mode = json.loads(config.read_text(encoding='utf-8')).get('mode')
+    config_mode = load_config_mapping(config).get('mode')
     if config_mode != mode_name:
         raise RuntimeError(
             f'反抓补偿配置与现场 mode 不匹配：{config} 的 mode={config_mode!r}，'
@@ -140,7 +142,7 @@ def main() -> int:
     record = reverse_grasp_record_from_icp(
         T, table_normal, _camera_matrix(capture_dir),
         load_stl_triangles_m(DEFAULT_STL).reshape(-1, 3),
-        json.loads(grasp_config.read_text(encoding='utf-8')),
+        load_config_mapping(grasp_config),
         object_key=str(diagnostic.get('object_key') or 'buffer-check-0'),
         quality={key: quality[key] for key in ('icp_fitness', 'icp_rmse_m') if key in quality} | {
             'deployment_mode': mode_name,

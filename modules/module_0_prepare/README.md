@@ -20,7 +20,7 @@
 - 创建左右手 State、BufferState 和 SystemState。
 - 创建唯一的 Buffer 锁、容量为 1 的左返回值队列、容量为 2 的右返回值队列和全局停止标志。
 - 将 `buffer.capacity=1`、`buffer.full=false`、`buffer.needs_alignment=false`、`buffer.operator=NONE`。
-- 检查设备健康并使用规划器规划、执行双臂到安全初始位姿。不得调用 SDK servo 或旧 `move_to_pose`。
+- 检查设备健康，打开双夹爪，并使用规划器规划、执行双臂到安全初始位姿。不得调用 SDK servo 或旧 `move_to_pose`。
 
 ## Context 与 State 更新
 

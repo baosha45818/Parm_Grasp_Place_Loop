@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -128,12 +129,25 @@ def load_workpiece_base_xy_yaw(path: Path, index: int) -> list[float]:
     if index < 0 or index >= len(workpieces):
         raise ValueError(f"--workpiece-index={index} 超出范围；文件中共有 {len(workpieces)} 个工件")
     entry = workpieces[index]
-    if not isinstance(entry, dict) or not isinstance(entry.get("robot_base_xy_yaw"), dict):
+    if not isinstance(entry, dict):
         raise ValueError(
-            f"workpieces[{index}] 缺少 robot_base_xy_yaw；请使用新版 mask_workpiece_pose.py 重新生成 {path}"
+            f"workpieces[{index}] 不是对象"
         )
-    pose = entry["robot_base_xy_yaw"]
-    x, y, yaw = finite([pose.get("x_m"), pose.get("y_m"), pose.get("yaw_rad")], 3, "robot_base_xy_yaw")
+    transform = entry.get("T_body_base_workpiece_semantic")
+    yaw_deg = entry.get("head_direction_base_angle_deg")
+    if isinstance(transform, list) and len(transform) == 4 and all(isinstance(row, list) and len(row) == 4 for row in transform):
+        x, y = finite([transform[0][3], transform[1][3]], 2, "T_body_base_workpiece_semantic translation")
+        yaw = math.radians(finite([yaw_deg], 1, "head_direction_base_angle_deg")[0])
+    elif isinstance(entry.get("robot_base_xy_yaw"), dict):
+        # Read old result files too; new Module 4.2 results use the canonical
+        # semantic transform and head-direction fields above.
+        pose = entry["robot_base_xy_yaw"]
+        x, y, yaw = finite([pose.get("x_m"), pose.get("y_m"), pose.get("yaw_rad")], 3, "robot_base_xy_yaw")
+    else:
+        raise ValueError(
+            f"workpieces[{index}] 缺少 T_body_base_workpiece_semantic/head_direction_base_angle_deg；"
+            f"请使用新版 tabletop_pointcloud_workpiece_pose.py 重新生成 {path}"
+        )
     return [x, y, 0.0] + rpy_to_rotvec([0.0, 0.0, yaw])
 
 
@@ -165,7 +179,7 @@ def main() -> int:
     )
     source.add_argument(
         "--workpiece-pose-file", type=Path,
-        help="mask_workpiece_pose.py 输出的 JSON；读取 workpieces[].robot_base_xy_yaw 作为目标",
+        help="Module 4.2 输出的 JSON；读取语义位姿和 head_direction_base_angle_deg 作为目标",
     )
     parser.add_argument(
         "--workpiece-index",
@@ -214,7 +228,7 @@ def main() -> int:
         # SDK calibration base is the Planner body_base.
         target_reference_frame = args.frame_id
         source_description = (
-            f"工件位姿文件 {args.workpiece_pose_file} 的 workpieces[{args.workpiece_index}].robot_base_xy_yaw"
+            f"工件位姿文件 {args.workpiece_pose_file} 的 workpieces[{args.workpiece_index}] 语义位姿"
         )
     else:
         raw_target = finite(args.target, 6, "target")

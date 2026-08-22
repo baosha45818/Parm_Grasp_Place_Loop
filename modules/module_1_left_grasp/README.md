@@ -93,9 +93,8 @@ modules/module_1_left_grasp/run.sh \
 如需外部控制器在最终运动前放行，可设置 `MODULE1_EXECUTION_PERMIT_FILE`；
 文件内容必须为 `allow`。未设置时不会等待外部门禁。
 
-## Handoff
-
-Module 1 只有在以下条件全部通过后才写出 handoff：
+## 退出条件
+Module 1 只有在以下条件全部通过后才写满足退出条件：
 
 - Planner 预抓取和 10 cm LIN 下探均可达
 - 抓取后反向 LIN 抬升完成

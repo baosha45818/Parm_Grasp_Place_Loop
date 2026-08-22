@@ -1,0 +1,6 @@
+{
+  "camera_model": "Intel RealSense D435i",
+  "camera_serial": "261222076212",
+  "position": "head_chessboard_11x8",
+  "board_config": "boards/chessboard_11x8_30mm.json"
+}

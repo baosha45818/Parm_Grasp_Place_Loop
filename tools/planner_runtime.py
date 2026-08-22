@@ -335,8 +335,14 @@ class PlannerRuntime:
         *,
         planner: str = "rrtstar",
         use_left_eef_collision_box: bool = False,
+        allow_right_hand_tall_contact: bool = False,
     ) -> dict[str, Any] | None:
-        """Plan one arm joint-space target without executing it."""
+        """Plan one arm joint-space target without executing it.
+
+        ``allow_right_hand_tall_contact`` is deliberately request-local: it
+        keeps all ordinary collision checks enabled while allowing only the
+        planner's predefined right-gripper/tall-box contact pairs.
+        """
         if arm not in {"left", "right"}:
             raise ValueError(f"unknown arm: {arm!r}")
         if len(joints_deg) != 7 or not all(math.isfinite(value) for value in joints_deg):
@@ -352,11 +358,15 @@ class PlannerRuntime:
         target = {
             "joint_values_deg": [float(value) for value in joints_deg],
             "use_left_eef_collision_box": bool(use_left_eef_collision_box),
+            "allow_right_hand_tall_contact": bool(allow_right_hand_tall_contact),
         }
         start_joints_deg = self._recorded_start_joints(arm)
         joint_names = [f"{arm}_arm_joint{index}" for index in range(1, 8)]
         def request() -> dict[str, Any]:
-            allow_right_hand_tall_contact = self._allow_right_hand_tall_contact(arm)
+            allow_tall_contact = (
+                bool(allow_right_hand_tall_contact)
+                or self._allow_right_hand_tall_contact(arm)
+            )
             # The SDK convenience methods do not expose the right-gripper/tall-box
             # exception. Use the equivalent wire request only when either
             # request-local collision policy is needed; ordinary requests retain
@@ -364,7 +374,7 @@ class PlannerRuntime:
             if (
                 planner == "rrtstar"
                 or use_left_eef_collision_box
-                or allow_right_hand_tall_contact
+                or allow_tall_contact
             ):
                 # The server exposes RRTstar although this SDK's public joint
                 # helper only whitelists ptp/lin/ompl.
@@ -386,7 +396,7 @@ class PlannerRuntime:
                 }
                 if use_left_eef_collision_box:
                     payload["use_left_eef_collision_box"] = True
-                if allow_right_hand_tall_contact:
+                if allow_tall_contact:
                     payload["allow_right_hand_tall_contact"] = True
                 return self._planner._trajectory.send_payload(payload, timeout=30.0)
             return self._planner.plan_joint_trajectory(

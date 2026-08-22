@@ -23,6 +23,7 @@ import numpy as np
 
 from tools.execution_timing import ExecutionTiming
 from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.workpiece_1.grasp_prediction import predict as predict_grasp
+from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
 
 
 IMPLEMENTATION_DIR = MODULE_DIR / "implementation"
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1 * float(os.environ.get("PARM_LEFT_SPEED_SCALE", "2.0")),
     )
-    parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=[90.0, 15.0, -15.0])
+    parser.add_argument("--approach-angles-deg", nargs="+", type=float, default=None)
     # 工件 1 反面抓取：默认相对预测目标沿 body_base Z 方向下探 5 mm。
     parser.add_argument("--body-z-down-m", type=float, default=0.005)
     return parser.parse_args()
@@ -162,6 +163,11 @@ def execute_grasp(args: argparse.Namespace, grasp_json: Path, body_head: Path) -
 
 def main() -> int:
     args = parse_args()
+    config = load_config_mapping(args.grasp_config.resolve())
+    if args.approach_angles_deg is None:
+        args.approach_angles_deg = list(config.get("execution", {}).get("approach_angles_deg", []))
+    if not args.approach_angles_deg:
+        raise RuntimeError("抓取配置缺少 execution.approach_angles_deg")
     if not args.execute:
         raise RuntimeError("Module 5-1 真实反抓必须显式传入 --execute")
     _, capture_dir, diagnostics_path, body_head = load_prediction(args.prediction_file)

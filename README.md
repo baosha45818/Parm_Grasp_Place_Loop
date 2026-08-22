@@ -125,17 +125,21 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 4. 让右臂消费上一件工件时，左臂尽早准备下一件；
 5. 为每次运行保存可追溯的状态、结果、日志和原始模块产物。
 
-核心文件如下：
+核心文件如下。状态机、结果归一化、资源锁、失败恢复和每个文件的实现细节见
+[`controller/README.md`](controller/README.md)。
 
 | 文件 | 责任 |
 | --- | --- |
 | [`controller/main.py`](controller/main.py) | 入口、主循环、右臂后台任务、人工输入和停止信号。 |
 | [`controller/scheduler_rules.py`](controller/scheduler_rules.py) | 纯调度规则：根据状态与模块结果决定下一模块。这里不执行机器人代码。 |
 | [`controller/module_registry.py`](controller/module_registry.py) | 模块名称到真实命令、参数和硬件资源锁的集中声明。 |
+| [`controller/module_runner.py`](controller/module_runner.py) | 获取资源锁、启动模块进程组、保存日志并把退出码/JSON 归一化为 `ModuleResult`。 |
 | [`controller/runtime_state.py`](controller/runtime_state.py) | 持久化业务状态：Buffer、Middle、交接位、左右臂、重试计数、产物指针。 |
 | [`controller/contracts.py`](controller/contracts.py) | 统一 `ModuleResult` 协议。 |
 | [`controller/locks.py`](controller/locks.py) | 真实硬件资源锁：左臂、右臂、头部 D435、左腕 D405。 |
-| [`controller/robot_actions.py`](controller/robot_actions.py) | 总控自有的准备、归位和 Buffer 观察位动作。 |
+| [`controller/deployment.py`](controller/deployment.py) | 按 `gzhu/xiangxin` 写入服务地址、部署模式和头部标定环境变量。 |
+| [`modules/module_0_prepare/main.py`](modules/module_0_prepare/main.py) | Module 0 的预检、开夹爪和双臂初始归位。 |
+| [`modules/module_4_head_judge/observation_pose.py`](modules/module_4_head_judge/observation_pose.py) | Module 4.1 前的左臂/头部 Buffer 观察位动作。 |
 | [`controller/safety.py`](controller/safety.py) | Ctrl+C/停止时向两臂发送取消任务。 |
 
 ### 5.1 一次调度循环如何运行
@@ -156,6 +160,47 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 `module_registry.py` 和 `module_runner.py`。因此新增/替换模块时，应先明确它的输入、输出、
 占用资源和错误语义，再修改注册表与调度规则，而不是在 `main.py` 中插入业务 `if`。
 
+### 5.2 总控调度图：左臂主线、分支与右臂后台消费
+
+下图是当前总控实际调度的完整主线。`controller_prepare` 和
+`controller_observation_pose` 是状态机步骤名，实际入口分别是 Module 0 和 Module 4；灰色
+右侧框在独立 worker 中运行，发布成功后左臂可立刻从 M1 开始下一件。
+
+```mermaid
+flowchart TD
+    S([启动]) --> P[controller_prepare<br/>Module 0：预检、开夹爪、左 graspup、右 Idle]
+    P --> M1[M1：左臂抓取]
+    M1 --> B[M3：放入 Buffer]
+    B --> O[controller_observation_pose<br/>Module 4：左臂/头部到观察位]
+    O --> M4[M4.1：Buffer 正反判断与 ICP]
+    M4 --> D{方向可信？}
+    D -->|FRONT| F5[M5.1：正面重抓到 graspup]
+    F5 --> MID[M3：放入 Middle]
+    D -->|BACK| R5[M5.2：反面重抓 + 左手交接准备]
+    R5 --> H8[M8.2：双臂交接]
+    D -->|UNCERTAIN| O
+
+    MID --> PF[发布 FRONT 工件给右臂后台]
+    H8 --> PB[发布 BACK 工件给右臂后台]
+    PF -. 左臂可开始下一件 .-> M1
+    PB -. 左臂可开始下一件 .-> M1
+
+    subgraph RW[右臂后台 worker：同一时刻只运行一件]
+        direction TB
+        RF[M8.1：右臂 Middle 抓取<br/>内部协调 M4.2 / M7] --> RP1[M9：右臂放入孔位] --> RI1[M10：右臂回 Idle]
+        RB[M9：右臂放入孔位] --> RI2[M10：右臂回 Idle]
+    end
+
+    PF --> RF
+    PB --> RB
+    RI1 --> E([本件右臂消费完成])
+    RI2 --> E
+```
+
+在左臂再次发布到 `Middle` 或开始下一次 M8.2 前，主线程会等待上述右臂 worker 完成；这就是
+Middle 和交接区的发布屏障。Buffer 是单容量状态机工位：M1 成功后只有 `buffer=EMPTY` 才允许
+进入 M3(Buffer)，不会用新件覆盖旧件。
+
 每次调用前，总控会为该模块分配独立 `attempt` 与结果路径，并把上下文传入。典型上下文包括：
 
 | 模块类别 | 总控传入的关键输入 |
@@ -168,7 +213,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 模块之间只通过这些显式文件和统一结果传递数据，不能隐式读取上一轮 `output/` 的“最新文件”。
 
-### 5.2 模块输入/输出约定
+### 5.3 模块输入/输出约定
 
 每次模块调用都会产生标准结果：
 
@@ -191,7 +236,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 统一转换为 `SUCCESS/FRONT`、`SUCCESS/BACK`、`RETRY/UNCERTAIN`；M5 的“未抓稳”转换为
 `RETRY/NO_GRASP`。这样总控不会把“可重新观察”的业务失败误当作致命 Python 异常。
 
-### 5.3 持久化业务状态，而非工位文件锁
+### 5.4 持久化业务状态，而非工位文件锁
 
 Buffer、Middle、交接区是物理工位，用 `RuntimeState` 的持久化状态表示：
 
@@ -217,7 +262,7 @@ Handoff: EMPTY → LEFT_READY → TRANSFERRING → EMPTY
 在每次模块调用前后原子写入 `state.json`，因此子进程异常或人工等待时可以准确呈现现场；
 它是诊断记录，不表示总控重启后会自动恢复运动。
 
-### 5.4 硬件锁、后台右臂与发布屏障
+### 5.5 硬件锁、后台右臂与发布屏障
 
 每个注册模块声明它实际独占的硬件资源；`module_runner` 以固定顺序取得文件锁，再启动子进程。
 当前真实资源锁为：
@@ -365,7 +410,7 @@ M8.2。
 
 | 模块 | 主要职责 | 上游 / 下游 |
 | --- | --- | --- |
-| M0 `module_0_prepare` | 提供总控预检使用的 SAM2、Planner、双臂、夹爪、力传感器检查能力。 | 由 `controller_prepare` 调用其检查实现，不作为普通业务步骤单独排队。 |
+| M0 `module_0_prepare` | SAM2、Planner、双臂、夹爪、力传感器预检；打开夹爪并使双臂回安全初始位。 | 总控的 `controller_prepare` 调度其公开入口。 |
 | M1 `module_1_left_grasp` | 左腕 D405 采集、SAM2、STL/ICP、左手抓取和持件验证；成功后到 `graspuptop`。 | 上料区 → M3(Buffer)。 |
 | M3 `module_3_left_place` | 左臂把已在 `graspuptop` 的工件放到固定 Buffer 或固定 Middle，并返回安全上方位。 | M1/M5.1 → Buffer/Middle。 |
 | M4.1 `module_4_1_buffer_state_estimation` | 头部 D435i 对 Buffer 工件做分割、正反判断和 ICP，发布方向与 TF。 | Buffer → M5.1 或 M5.2。 |
@@ -405,7 +450,53 @@ controller/runtime/<run_id>/
 4. `parm_sdk_four_versions/README.md`：四份 SDK wheel 的身份、差异和切换方法；
 5. `plucky_hjt_parm/README.md`：Planner Docker、机器人模型、规划器 Profile 与服务接口。
 
-以下文件是独立的现场/迁移补充，保留但**不并入**主架构说明：
+以下文件是独立的现场专项适配记录，不并入主架构说明：
 
-- [`NEW_COMPUTER_DEPLOYMENT_TROUBLESHOOTING.md`](NEW_COMPUTER_DEPLOYMENT_TROUBLESHOOTING.md)：新电脑迁移、Docker、udev、踏板和模型文件排障记录；
 - [`XIANXIN_SCENE_ADAPTATION.md`](XIANXIN_SCENE_ADAPTATION.md)：祥鑫现场的专项适配记录。
+
+## 11. 新电脑的代码同步与 SAM2 权重
+
+### 11.1 Git 同步
+
+新电脑可以保留已传好的 `.venv`，仅用 Git 更新代码。若 GitHub HTTPS 请求被旧代理或 HTTP/2
+卡住，在本仓库一次性设置：
+
+```bash
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
+git config --local http.proxy ""
+git config --local https.proxy ""
+git config --local http.version HTTP/1.1
+```
+
+若明确需要以远端 `main` 覆盖**已跟踪**的本地代码：
+
+```bash
+git fetch origin
+git reset --hard origin/main
+git status -sb
+git log -1 --oneline
+```
+
+不要把 `git clean -fd` 当作日常更新命令；它会删除未跟踪的模型、标定输出或其他本地资源。
+
+### 11.2 SAM2 bypass tracking 权重缺失
+
+启动 `tools/sam2-service/start_uds_server.sh` 时，如果 EfficientViT 已加载但出现：
+
+```text
+checkpoint not found: .../3rdparty/efficient-sam2/bypass/ckpt/bypass_bottleneck_base.pth
+```
+
+说明缺少一个未被 Git 跟踪的 bypass 权重（约 `0.8 MB`），常见于误执行 `git clean -fd` 后。将旧电脑的
+`bypass_bottleneck_base.pth` 放回：
+
+```text
+tools/sam2-service/3rdparty/efficient-sam2/bypass/ckpt/
+```
+
+然后重新启动：
+
+```bash
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/tools/sam2-service
+./start_uds_server.sh
+```

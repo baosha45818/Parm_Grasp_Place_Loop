@@ -72,6 +72,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--initial-joint-planner", choices=("rrtstar", "ompl"), default="rrtstar",
         help="回固定关节起点的规划器；默认 rrtstar，ompl 使用 RRTConnect 绕障",
     )
+    parser.add_argument(
+        "--trajectory-workpiece", type=str, default="1",
+        help="固定 place-ready→起点轨迹缓存的工件编号（由外层配置传入）",
+    )
     parser.add_argument("--live", action="store_true", help="连接真实硬件")
     parser.add_argument("--confirm-live", action="store_true", help="确认现场安全，允许真实运动")
     parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.3.11"))
@@ -590,6 +594,7 @@ def profile_argv(
         pre_search_argv.extend(["--pre-search-leg", "|".join(str(leg[key]) for key in ("name", "axis", "direction", "distance_mm", "speed_mm_s"))])
     argv = [
         "--initial-joint-planner", "ompl",
+        "--trajectory-workpiece", str(workpiece),
         "--fast-linear-speed-mm-s", str(search_motion["speed_mm_s"]),
         "--fast-linear-accel-mm-s2", str(search_motion["accel_mm_s2"]),
         *pre_search_argv,

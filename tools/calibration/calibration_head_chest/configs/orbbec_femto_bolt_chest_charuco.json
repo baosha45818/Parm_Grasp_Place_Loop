@@ -1,0 +1,6 @@
+{
+  "camera_model": "Orbbec Femto Bolt",
+  "camera_serial": "CL8654103PJ",
+  "position": "chest",
+  "board_config": "boards/charuco_13x5_15mm.json"
+}

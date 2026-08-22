@@ -72,6 +72,18 @@ frame = "world"
 
 规划器在执行 OMPL 轨迹时会自行创建 SDK 连接，并通过环境变量 `PARM_ARM_HOST` 读取右臂地址。Module 9 会在每次真实放置开始前将该环境变量同步为 TOML 的 `arm_host`，因此规划回起始关节位和后续 ServoPose 使用同一台右臂控制器。
 
+### 交接后到放置起点的轨迹缓存
+
+Module 8 把右臂送到 `place-ready` 后，Module 9 的第一轮会从该位置前往 `initial_right_joints_deg`。此段的缓存路径为：
+
+```text
+trajactory/workpiece_<工件号>/place_ready_to_initial.json
+```
+
+逻辑与 Module 3 的 `trajactory` 一致：缓存命中时先读取右臂实际关节角，只有与缓存首点最大环绕误差不超过 **1.0°** 才通过 SDK `follow_trajectory` 回放；轨迹参数、目标关节角或规划配置变更时自动失效。首次没有缓存、缓存不匹配，或首点误差过大时，会用 `--initial-joint-planner`（当前工件配置为 `ompl`）在线规划，并在该请求显式带上 `allow_right_hand_tall_contact=true`：规划器会仅从该请求的派生场景移除 `left_table_positive_x_tall_safety_box` 整块碰撞体；全局场景以及其它环境、桌面和双臂碰撞检查保持不变。只有该轨迹真实执行完成且右臂稳定到目标后才原子写入缓存。
+
+搜索失败后的后续重试从恢复抬升位返回起点，已不在 `place-ready`，因此不会错误回放这条缓存，而是继续在线规划。
+
 所有工件相关的运动参数均由 TOML 提供：`search_motion` 配置连续搜索速度和加速度，`pre_search` 配置接近/预压的距离、速度和加速度，`retry` 配置失败后的最大尝试次数及抬升恢复运动，`second_hole` 配置第一洞和第二洞的距离、速度、加速度、停留时间及断连恢复参数；`post_entry.enabled` 控制进洞确认后是否先执行后退和下压。程序不再保留预接近的常量回退路径。
 
 `[second_hole]` 控制第一洞确认后的可选路径。其中 `first_hole_settle_down_mm` 是第一洞确认后的 Z−下压量，`first_hole_lift_mm` 是下压后离开第一洞的 Z+抬升量；`lift_after_second_hole_mm` 则仅用于第二洞完成后的抬升。只有一个洞的工件应设定 `enabled = false`；此时程序记录 `second_hole_skipped` 后结束，不要求填写其余第二洞距离和速度字段。

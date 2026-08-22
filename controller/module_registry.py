@@ -23,13 +23,18 @@ def _execute_args(enabled: bool, *args: str) -> list[str]:
 
 
 def registry() -> dict[str, ModuleSpec]:
-    def action(action_name: str):
-        return lambda c, live: [
-            str(PYTHON), str(ROOT / "controller/robot_actions.py"), "--action", action_name,
-            "--result-file", c["result"],
-            "--planner-host", c["planner_host"], "--arm-host", c["arm_host"],
-            "--gripper-host", c["gripper_host"], "--force-host", c["force_host"],
-            "--head-host", c["head_host"],
+    def m0_prepare(c: dict[str, str], live: bool) -> list[str]:
+        return [
+            str(PYTHON), str(ROOT / "modules/module_0_prepare/main.py"),
+            "--result-file", c["result"], "--planner-host", c["planner_host"],
+            "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"],
+            "--force-host", c["force_host"], "--speed", c["prepare_speed"],
+        ]
+    def observation_pose(c: dict[str, str], live: bool) -> list[str]:
+        return [
+            str(PYTHON), str(ROOT / "modules/module_4_head_judge/observation_pose.py"),
+            "--result-file", c["result"], "--planner-host", c["planner_host"],
+            "--arm-host", c["arm_host"], "--head-host", c["head_host"],
             "--speed", c["prepare_speed"],
         ]
     def m1(c: dict[str, str], live: bool) -> list[str]:
@@ -43,11 +48,11 @@ def registry() -> dict[str, ModuleSpec]:
     def m5front(c: dict[str, str], live: bool) -> list[str]:
         return [str(PYTHON), str(ROOT / "modules/module_5_left_pick/module_5_1_front_pick_to_graspuptop/main.py"), "--buffer-check-result", c["buffer_result"], "--result-file", c["result"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"]] + _execute_args(live, "--execute")
     def m5reverse(c: dict[str, str], live: bool) -> list[str]:
-        return [str(PYTHON), str(ROOT / "controller/reverse_pipeline.py"), "--buffer-check-result", c["buffer_result"], "--workpiece", c["workpiece"], "--result-file", c["result"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"], "--head-host", c["head_host"]] + _execute_args(live, "--live")
+        return [str(PYTHON), "-m", "modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.pipeline", "--buffer-check-result", c["buffer_result"], "--workpiece", c["workpiece"], "--mode", c["mode"], "--result-file", c["result"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"], "--head-host", c["head_host"]] + _execute_args(live, "--live")
     def m5reverse_handoff(c: dict[str, str], live: bool) -> list[str]:
-        return [str(PYTHON), str(ROOT / "controller/reverse_handoff_resume.py"), "--workpiece", c["workpiece"], "--result-file", c["result"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"], "--head-host", c["head_host"]]
+        return [str(PYTHON), "-m", "modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.resume_handoff", "--workpiece", c["workpiece"], "--mode", c["mode"], "--result-file", c["result"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"], "--head-host", c["head_host"]]
     def m8handoff(c: dict[str, str], live: bool) -> list[str]:
-        return [str(PYTHON), str(ROOT / "modules/module_8_right_grasp/module_8_2_left_handoff/main.py"), "--result", c["handoff_result"], "--workpiece", c["workpiece"], "--right-place-ready-file", c["handoff_ready"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"]]
+        return [str(PYTHON), str(ROOT / "modules/module_8_right_grasp/module_8_2_left_handoff/main.py"), "--result", c["handoff_result"], "--workpiece", c["workpiece"], "--mode", c["mode"], "--right-place-ready-file", c["handoff_ready"], "--planner-host", c["planner_host"], "--arm-host", c["arm_host"], "--gripper-host", c["gripper_host"]]
     def m9(c: dict[str, str], live: bool) -> list[str]:
         return [str(PYTHON), str(ROOT / "modules/module_9_right_place/place_hole_wiggle.py"), "--workpiece", c["workpiece"], "--arm-host", c["arm_host"]] + _execute_args(live, "--live", "--confirm-live")
     def m10(c: dict[str, str], live: bool) -> list[str]:
@@ -55,8 +60,8 @@ def registry() -> dict[str, ModuleSpec]:
     def right_front(c: dict[str, str], live: bool) -> list[str]:
         return [str(PYTHON), str(ROOT / "modules/module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py"), "--workpiece", c["workpiece"], "--result-file", c["result"], "--planner-host", c["planner_host"]] + _execute_args(live, "--execute")
     return {
-        "controller_prepare": ModuleSpec("controller_prepare", ("LEFT_ARM", "RIGHT_ARM", "HEAD_D435"), action("prepare")),
-        "controller_observation_pose": ModuleSpec("controller_observation_pose", ("LEFT_ARM", "HEAD_D435"), action("observation")),
+        "controller_prepare": ModuleSpec("controller_prepare", ("LEFT_ARM", "RIGHT_ARM"), m0_prepare),
+        "controller_observation_pose": ModuleSpec("controller_observation_pose", ("LEFT_ARM", "HEAD_D435"), observation_pose),
         "module_1_left_grasp": ModuleSpec("module_1_left_grasp", ("LEFT_ARM", "LEFT_D405"), m1),
         "module_3_buffer": ModuleSpec("module_3_buffer", ("LEFT_ARM",), m3("buffer")),
         "module_4_buffer_state": ModuleSpec("module_4_buffer_state", ("HEAD_D435",), m4),

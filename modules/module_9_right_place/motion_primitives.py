@@ -24,6 +24,7 @@ from placement_session import PlacementSession
 from right_arm_state import current_right_joints_deg, wait_for_right_joint_target
 from servo_worker import push_servo_pose_with_timeout
 from tools.planner_runtime import PlannerRuntime
+from trajectory_cache import build_compatibility, load as load_trajectory_cache, save as save_trajectory_cache
 
 
 class TargetNotReached(RuntimeError):
@@ -82,6 +83,89 @@ def move_to_saved_joints_planned(
         planner.move_right_joints(target_deg, planner=planner_name)
         print("Planner move_j 已下发，等待右臂物理到固定关节起点。")
         wait_for_right_joint_target(arm, target_deg, "固定关节起点")
+    finally:
+        planner.close()
+
+
+def move_place_ready_to_saved_joints_cached(
+    arm: object,
+    config_path: Path,
+    target_deg: list[float],
+    *,
+    workpiece: str,
+    planner_name: str,
+    start_tolerance_deg: float = 1.0,
+) -> str:
+    """Replay the verified M8-ready route, otherwise plan once and safely seed it.
+
+    This deliberately has no servo fallback.  It is the long collision-sensitive
+    move from Module 8's place-ready pose to Module 9's taught joint landmark.
+    """
+    config = load_config(config_path, live=True)
+    planner = PlannerRuntime(config)
+    compatibility = build_compatibility(
+        target_joints_deg=target_deg,
+        planner=planner_name,
+        planner_config=config_path,
+    )
+    try:
+        planner.open(required_frames={config.base_frame, config.right_tool_frame})
+        cached, cache_status = load_trajectory_cache(
+            workpiece=workpiece, compatibility=compatibility
+        )
+        if cached is not None:
+            response = cached["response"]
+            trajectory = (response.get("data") or {}).get("trajectory") or []
+            actual = current_right_joints_deg(arm)
+            first = [float(value) for value in trajectory[0]]
+            start_error = max(
+                abs((current - expected + 180.0) % 360.0 - 180.0)
+                for current, expected in zip(actual, first)
+            )
+            if start_error <= start_tolerance_deg:
+                print(
+                    f"[轨迹缓存] 回放 place-ready_to_initial：首点最大误差="
+                    f"{start_error:.3f}°。",
+                    flush=True,
+                )
+                planner.execute_planned_result(response)
+                wait_for_right_joint_target(
+                    arm, [float(value) for value in trajectory[-1]], "固定关节起点"
+                )
+                return "trajectory_cache"
+            print(
+                f"[轨迹缓存] place-ready_to_initial 首点误差 {start_error:.3f}° "
+                f"> {start_tolerance_deg:.3f}°，不回放，改为在线规划。",
+                flush=True,
+            )
+            cache_status = "start_mismatch"
+
+        print(
+            f"[轨迹缓存] place-ready_to_initial 未命中（{cache_status}）；"
+            f"Planner {planner_name.upper()} 在线规划并在到位后建库。",
+            flush=True,
+        )
+        response = planner.plan_joint_trajectory(
+            "right",
+            target_deg,
+            planner=planner_name,
+            # 首轮从 Module 8 的 place-ready 离开时，显式采用规划器中
+            # 预定义的“右夹爪可接触高安全盒”请求级碰撞策略。
+            allow_right_hand_tall_contact=True,
+        )
+        if response is None:
+            raise RuntimeError("Planner returned no right place-ready-to-initial plan")
+        planner.execute_planned_result(response)
+        trajectory = ((response.get("data") or {}).get("trajectory") or [])
+        if not trajectory:
+            raise RuntimeError("在线规划结果缺少可执行轨迹")
+        wait_for_right_joint_target(
+            arm, [float(value) for value in trajectory[-1]], "固定关节起点"
+        )
+        save_trajectory_cache(
+            workpiece=workpiece, compatibility=compatibility, planned_response=response
+        )
+        return "planner_seeded_cache"
     finally:
         planner.close()
 

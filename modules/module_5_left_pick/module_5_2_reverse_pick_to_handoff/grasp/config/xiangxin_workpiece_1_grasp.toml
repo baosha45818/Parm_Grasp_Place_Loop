@@ -1,0 +1,20 @@
+schema_version = 1
+owner_module = "module_5_left_pick/reverse_pick_to_handoff"
+mode = "xiangxin"
+workpiece = "1"
+adapter = "unique_back_prediction"
+stl = "tools/workpiece_1/welding_up_side_1118_only_2_small_screws_removed.stl"
+# xiangxin 不对宽头沿工件长轴作内外补偿。
+wide_head_outward_grasp_offset_m = 0.0
+wide_head_inward_grasp_offset_m = 0.0
+grasp_width_axis_stl = [-0.00040286, -0.99999954, -0.00086799]
+wide_head_image_left_grasp_lateral_offset_m = 0.0
+wide_head_image_right_grasp_lateral_offset_m = 0.0
+grasp_lateral_offset_axis = "grasp_frame_+Y"
+grasp_lateral_offset_rule = "Lateral correction is disabled: both offsets are 0 mm."
+
+[perception]
+orientation_config = "../../../../module_4_head_judge/module_4_1_buffer_state_estimation/configs/workpiece_1.json"
+
+[execution]
+approach_angles_deg = [90.0, 75.0, -75.0]
