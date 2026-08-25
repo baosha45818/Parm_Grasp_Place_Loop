@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 from tools.handoff_observation.check_plan import (
+    MODEL_JOINT_LIMITS_DEG,
     START_JOINTS_DEG,
     max_joint_error_deg,
     validate_joint_vector,
@@ -105,6 +107,12 @@ def parse_args() -> argparse.Namespace:
         "--resume-right-at-place-ready",
         action="store_true",
         help="恢复上次中断：右手已持件到放置准备位，仅让左手回中间",
+    )
+    parser.add_argument(
+        "--right-pregrasp-ready-joints-deg",
+        type=float,
+        nargs=7,
+        help="已由并发阶段到达的右臂安全预抓取关节角；跳过重复RRTstar，只执行最终抓取",
     )
     parser.add_argument(
         "--confirm-resume-from-current-held-pose",
@@ -197,8 +205,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--right-retreat-distance-m",
         type=float,
-        default=0.15,
-        help="右手上升后沿body_base -Y后退距离，默认0.08m",
+        default=0.07,
+        help="右手上升后沿body_base -Y后退距离，默认0.07m",
     )
     parser.add_argument(
         "--right-place-ready-joints-deg",
@@ -567,6 +575,127 @@ def validate_nonzero_trajectory(response: dict, label: str) -> dict:
     }
 
 
+def validate_trajectory_joint_limit_margin(
+    response: dict, label: str, margin_deg: float,
+) -> dict:
+    """Hard gate every returned waypoint against request-local safe bounds."""
+    from tools.planner_runtime import ARM_JOINT_POSITION_LIMITS_DEG
+
+    trajectory = ((response.get("data") or {}).get("trajectory") or [])
+    if not isinstance(trajectory, list) or not trajectory:
+        raise RuntimeError(f"{label} has no trajectory for joint-margin validation")
+    minimum_margin = float("inf")
+    minimum_location = None
+    for point_index, point in enumerate(trajectory):
+        validate_joint_vector(point, f"{label}[{point_index}]")
+        for joint_index, (value, limits) in enumerate(
+            zip(point, ARM_JOINT_POSITION_LIMITS_DEG), start=1
+        ):
+            lower, upper = limits
+            actual_margin = min(float(value) - lower, upper - float(value))
+            if actual_margin < minimum_margin:
+                minimum_margin = actual_margin
+                minimum_location = {
+                    "trajectory_point": point_index,
+                    "joint": f"right_arm_joint{joint_index}",
+                    "value_deg": float(value),
+                    "lower_deg": lower,
+                    "upper_deg": upper,
+                }
+            if actual_margin + 1e-9 < margin_deg:
+                raise RuntimeError(
+                    f"{label} violates {margin_deg:.3f}deg joint-limit margin at "
+                    f"point {point_index}, J{joint_index}={float(value):.6f}deg; "
+                    f"bounds=[{lower:.6f}, {upper:.6f}]deg, "
+                    f"actual_margin={actual_margin:.6f}deg"
+                )
+    return {
+        "required_margin_deg": float(margin_deg),
+        "minimum_actual_margin_deg": minimum_margin,
+        "minimum_margin_location": minimum_location,
+    }
+
+
+def save_right_joint_limit_diagnostic(
+    args: argparse.Namespace,
+    retreat_motion: dict,
+    right_ready_target: list[float],
+    *,
+    planning_status: str = "not_started",
+    planning_error: BaseException | None = None,
+) -> tuple[Path, dict]:
+    """Persist the post-retreat start state before Module 9 planning."""
+    from parm_sdk import Arm
+
+    with Arm(host=args.arm_host) as arm:
+        state = arm.get_state() or {}
+    current = ((state.get("state") or {}).get("right") or {}).get("position") or []
+    validate_joint_vector(current, "post-retreat current right joints")
+
+    joints = []
+    for index, (raw, limits) in enumerate(
+        zip(current, MODEL_JOINT_LIMITS_DEG), start=1
+    ):
+        raw = float(raw)
+        lower, upper = (float(limits[0]), float(limits[1]))
+        equivalent = [raw + 360.0 * turns for turns in range(-2, 3)]
+        in_bounds_equivalents = [
+            value for value in equivalent if lower <= value <= upper
+        ]
+        normalized = (
+            min(in_bounds_equivalents, key=lambda value: abs(value - raw))
+            if in_bounds_equivalents
+            else None
+        )
+        joints.append({
+            "joint": f"right_arm_joint{index}",
+            "actual_deg": raw,
+            "planner_lower_deg": lower,
+            "planner_upper_deg": upper,
+            "raw_in_planner_bounds": lower <= raw <= upper,
+            "underflow_deg": max(0.0, lower - raw),
+            "overflow_deg": max(0.0, raw - upper),
+            "equivalent_in_bounds_deg": normalized,
+            "would_require_angle_wrapping": (
+                normalized is not None and abs(normalized - raw) > 1e-9
+            ),
+        })
+
+    payload = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "stage": "after_right_body_base_minus_y_retreat_before_module9_rrtstar",
+        "source_result": str(args.result.resolve()),
+        "arm_host": args.arm_host,
+        "actual_right_joints_deg": [float(value) for value in current],
+        "retreat_planned_first_joints_deg": retreat_motion.get("first_joints_deg"),
+        "retreat_planned_final_joints_deg": retreat_motion.get("final_joints_deg"),
+        "module9_place_ready_target_joints_deg": [
+            float(value) for value in right_ready_target
+        ],
+        "planner_position_limits_source": (
+            "welding_config right_arm.urdf.xacro; mirrored by "
+            "tools.handoff_observation.check_plan.MODEL_JOINT_LIMITS_DEG"
+        ),
+        "joint_limit_checks": joints,
+        "raw_start_state_within_planner_bounds": all(
+            item["raw_in_planner_bounds"] for item in joints
+        ),
+        "planning_status": planning_status,
+        "planning_error": (
+            f"{type(planning_error).__name__}: {planning_error}"
+            if planning_error is not None else None
+        ),
+    }
+    path = args.result.resolve().parent / "right_post_handoff_joint_limit_diagnostic.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    os.replace(temporary, path)
+    return path, payload
+
+
 def densify_short_trajectory(response: dict, minimum_points: int = 21) -> dict:
     """Densify short joint paths that the deployed TOPPRA returns at zero speed."""
     data = response.get("data") or {}
@@ -726,9 +855,13 @@ def finish_after_left_release(planner, args: argparse.Namespace, config: dict) -
         "right",
         transform_to_object_pose(T_base_right_tcp_retreat),
         planner="lin",
+        joint_limit_margin_deg=1.0,
     )
     if right_retreat_plan is None:
         raise RuntimeError("Planner returned no right post-handoff retreat plan")
+    retreat_joint_margin = validate_trajectory_joint_limit_margin(
+        right_retreat_plan, "right_retreat_trajectory", 1.0
+    )
     retreat_motion = validate_nonzero_trajectory(
         right_retreat_plan, "right_retreat_trajectory"
     )
@@ -746,6 +879,7 @@ def finish_after_left_release(planner, args: argparse.Namespace, config: dict) -
             "target": transform_debug(T_base_right_tcp_retreat),
             "plan": trajectory_summary(right_retreat_plan, 2),
             "joint_motion": retreat_motion,
+            "joint_limit_margin": retreat_joint_margin,
             "short_trajectory_workaround": {
                 "original_points": original_retreat_points,
                 "executed_points": executed_retreat_points,
@@ -775,11 +909,44 @@ def finish_after_left_release(planner, args: argparse.Namespace, config: dict) -
     )
 
     right_ready_target = list(args.right_place_ready_joints_deg)
-    right_ready_plan = planner.plan_joint_trajectory(
-        "right", right_ready_target, planner="rrtstar"
+    diagnostic_path, diagnostic = save_right_joint_limit_diagnostic(
+        args, retreat_motion, right_ready_target
     )
+    print(json.dumps({
+        "right_post_retreat_joint_limit_diagnostic": {
+            "path": str(diagnostic_path),
+            "raw_start_state_within_planner_bounds": diagnostic[
+                "raw_start_state_within_planner_bounds"
+            ],
+            "joint_limit_checks": diagnostic["joint_limit_checks"],
+        }
+    }, indent=2, ensure_ascii=False), flush=True)
+    try:
+        right_ready_plan = planner.plan_joint_trajectory(
+            "right", right_ready_target, planner="rrtstar"
+        )
+    except BaseException as exc:
+        save_right_joint_limit_diagnostic(
+            args,
+            retreat_motion,
+            right_ready_target,
+            planning_status="failure",
+            planning_error=exc,
+        )
+        raise
     if right_ready_plan is None:
-        raise RuntimeError("Planner returned no right place-ready plan")
+        error = RuntimeError("Planner returned no right place-ready plan")
+        save_right_joint_limit_diagnostic(
+            args,
+            retreat_motion,
+            right_ready_target,
+            planning_status="failure",
+            planning_error=error,
+        )
+        raise error
+    save_right_joint_limit_diagnostic(
+        args, retreat_motion, right_ready_target, planning_status="success"
+    )
     right_ready_summary = validate_arm_joint_plan(
         right_ready_plan,
         right_ready_target,
@@ -1079,29 +1246,38 @@ def main() -> int:
             args.pregrasp_axis,
         )
         T_base_right_tcp_pregrasp[:3, 3] += pregrasp_offset
-        right_pregrasp_joints, pregrasp_ik = solve_nearby_right_joints(
-            T_base_right_tcp_pregrasp, right_target
-        )
-        right_plan = planner.plan_joint_trajectory(
-            "right", right_pregrasp_joints, planner="rrtstar"
-        )
-        if right_plan is None:
-            raise RuntimeError("Planner returned no right pregrasp joint plan")
-        right_summary = validate_arm_joint_plan(
-            right_plan,
-            right_pregrasp_joints,
-            arm_id=2,
-            label="right_pregrasp_trajectory",
-            tolerance_deg=2.0,
-        )
-        trajectory = (right_plan.get("data") or {}).get("trajectory") or []
-        trajectory_start_check = validate_trajectory_start_matches_current_state(
-            right_plan,
-            arm_host=args.arm_host,
-            arm_id=2,
-            label="right_pregrasp_trajectory",
-            tolerance_deg=2.0,
-        )
+        pregrasp_already_ready = args.right_pregrasp_ready_joints_deg is not None
+        if pregrasp_already_ready:
+            right_pregrasp_joints = list(args.right_pregrasp_ready_joints_deg)
+            pregrasp_ik = {"source": "parallel_pregrasp_ready_marker"}
+            right_plan = None
+            right_summary = {"planner": "PARALLEL_RRTSTAR_ALREADY_EXECUTED", "endpoint_joints_deg": right_pregrasp_joints}
+            trajectory: list[list[float]] = []
+            trajectory_start_check = {"gate": "parallel_pregrasp_joint_feedback"}
+        else:
+            right_pregrasp_joints, pregrasp_ik = solve_nearby_right_joints(
+                T_base_right_tcp_pregrasp, right_target
+            )
+            right_plan = planner.plan_joint_trajectory(
+                "right", right_pregrasp_joints, planner="rrtstar"
+            )
+            if right_plan is None:
+                raise RuntimeError("Planner returned no right pregrasp joint plan")
+            right_summary = validate_arm_joint_plan(
+                right_plan,
+                right_pregrasp_joints,
+                arm_id=2,
+                label="right_pregrasp_trajectory",
+                tolerance_deg=2.0,
+            )
+            trajectory = (right_plan.get("data") or {}).get("trajectory") or []
+            trajectory_start_check = validate_trajectory_start_matches_current_state(
+                right_plan,
+                arm_host=args.arm_host,
+                arm_id=2,
+                label="right_pregrasp_trajectory",
+                tolerance_deg=2.0,
+            )
         report = {
             "mode": "EXECUTE" if args.execute else "PLAN_ONLY",
             "strategy": (
@@ -1131,7 +1307,7 @@ def main() -> int:
             },
             "trajectory_start_check": trajectory_start_check,
             "right_pregrasp_plan": right_summary,
-            "trajectory": trajectory_summary(right_plan, 2),
+            "trajectory": trajectory_summary(right_plan, 2) if right_plan is not None else {"source": "parallel_pregrasp_ready_marker"},
             "safety_note": (
                 "先RRTStar到工件尾端外侧预抓取位；真实到位后重新读取左TCP，"
                 + (
@@ -1166,22 +1342,29 @@ def main() -> int:
                 args.gripper_force, "right",
             ))
 
-        if not confirmed(
+        if not pregrasp_already_ready and not confirmed(
             "确认右夹爪已全开，关节RRTStar到工件尾端外侧预抓取位的"
             "扫掠路径不会碰左臂/工件，输入 y 执行："
         ):
             print("已取消；右臂未运动。")
             return 0
-        planner.execute_planned_result(right_plan)
-        pregrasp_arrival = wait_for_pose_close(
-            planner,
-            config["right_tool_frame"],
-            T_base_right_tcp_pregrasp,
-            args.arrival_translation_tolerance_mm,
-            args.arrival_rotation_tolerance_deg,
-            "right taught tail pregrasp pose",
-            timeout_s=90.0,
-        )
+        if pregrasp_already_ready:
+            wait_for_joint_target(
+                args.arm_host, 2, right_pregrasp_joints, 0.5,
+                "parallel right pregrasp", timeout_s=30.0,
+            )
+            pregrasp_arrival = {"gate": "parallel_pregrasp_joint_feedback", "target_joints_deg": right_pregrasp_joints}
+        else:
+            planner.execute_planned_result(right_plan)
+            pregrasp_arrival = wait_for_pose_close(
+                planner,
+                config["right_tool_frame"],
+                T_base_right_tcp_pregrasp,
+                args.arrival_translation_tolerance_mm,
+                args.arrival_rotation_tolerance_deg,
+                "right taught tail pregrasp pose",
+                timeout_s=90.0,
+            )
         print(f"右臂已到示教区域预抓取位：{pregrasp_arrival}")
 
         # The left hand still rigidly holds the workpiece. Rebuild the workpiece

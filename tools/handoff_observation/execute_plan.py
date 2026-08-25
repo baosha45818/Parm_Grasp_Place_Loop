@@ -201,23 +201,32 @@ def wait_for_left_joint_target(
 
     deadline = time.monotonic() + timeout_s
     last_error_deg = float("inf")
+    last_task_state = ""
     with Arm(host=arm_host) as arm:
         while time.monotonic() < deadline:
             state = arm.get_state() or {}
-            actual = ((state.get("state") or {}).get("left") or {}).get("position") or []
+            left_state = ((state.get("state") or {}).get("left") or {})
+            actual = left_state.get("position") or []
+            last_task_state = str(left_state.get("task_state") or "").strip().lower()
             if len(actual) == 7:
                 errors = [
                     abs((float(value) - float(target) + 180.0) % 360.0 - 180.0)
                     for value, target in zip(actual, target_deg)
                 ]
                 last_error_deg = max(errors)
-                if last_error_deg <= tolerance_deg:
-                    print(f"左臂已实际到位，最大关节误差={last_error_deg:.3f}deg", flush=True)
+                if last_error_deg <= tolerance_deg and last_task_state != "running":
+                    print(
+                        "左臂已实际到位且SDK任务已结束，"
+                        f"最大关节误差={last_error_deg:.3f}deg，"
+                        f"task_state={last_task_state!r}",
+                        flush=True,
+                    )
                     return
             time.sleep(0.05)
     raise RuntimeError(
         f"左臂未在 {timeout_s:.1f}s 内到达规划终点；"
-        f"最后最大关节误差={last_error_deg:.3f}deg"
+        f"最后最大关节误差={last_error_deg:.3f}deg，"
+        f"task_state={last_task_state!r}"
     )
 
 

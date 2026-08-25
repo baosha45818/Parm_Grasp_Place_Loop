@@ -258,7 +258,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="PARM 手臂 Free 示教 + 云台键盘控制")
     parser.add_argument("--arm-id", type=int, choices=(0, 1, 2), required=True,
                         help="0=双臂，1=左臂，2=右臂")
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.4.11"))
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
     parser.add_argument("--head-host", default=os.environ.get("PARM_HEAD_HOST", "localhost"))
     parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))

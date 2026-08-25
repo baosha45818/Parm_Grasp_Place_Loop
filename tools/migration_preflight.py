@@ -48,7 +48,7 @@ PROFILES = {
     "gzhu": Profile(
         mode="gzhu",
         local_subnet_prefix="192.168.88.",
-        arm_host="192.168.88.1",
+        arm_host="192.168.4.11",
         planner_host="127.0.0.1",
         gripper_host="127.0.0.1",
         force_host="127.0.0.1",

@@ -71,7 +71,7 @@ def load_workpiece_handoff_profile(
         raise ValueError(f"workpiece 必须是 '1' 或 '2'，当前为 {workpiece!r}")
     resolved = path.expanduser().resolve()
     raw = _parse_toml_subset(resolved)
-    selected_mode = (mode or os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin")).strip()
+    selected_mode = (mode or os.environ.get("PARM_DEPLOYMENT_MODE", "gzhu")).strip()
     if selected_mode not in {"xiangxin", "gzhu"}:
         raise ValueError(
             "反抓交接配置的 mode 必须是 xiangxin 或 gzhu，"
@@ -81,9 +81,14 @@ def load_workpiece_handoff_profile(
     deployment_observation = dict(deployment.get("left_observation") or {})
     if not deployment_observation:
         raise RuntimeError(f"位置配置缺少 deployment.{selected_mode}.left_observation")
-    section = (((raw.get(f"workpiece_{workpiece}") or {})))
-    if not isinstance(section, dict):
-        raise RuntimeError(f"位置配置缺少 workpiece_{workpiece}: {resolved}")
+    # 配置的唯一来源是 deployment.<mode>.workpiece_<n>：四种组合各自完整
+    # 保存左侧反抓/交接和右侧交接参数，绝不再回退到旧的顶层工件基线。
+    raw_section = deployment.get(f"workpiece_{workpiece}")
+    if not isinstance(raw_section, dict):
+        raise RuntimeError(
+            f"位置配置缺少 deployment.{selected_mode}.workpiece_{workpiece}: {resolved}"
+        )
+    section = dict(raw_section)
 
     left_ready = dict(section.get("left_reverse_grasp") or {})
     left_label = f"workpiece_{workpiece}.left_reverse_grasp"
@@ -103,30 +108,6 @@ def load_workpiece_handoff_profile(
     left_handoff["handoff_center_body_m"] = _vector(left_handoff, "handoff_center_body_m", 3, handoff_label)
     for key in ("axis_tolerance_deg", "center_tolerance_mm"):
         left_handoff[key] = _positive(left_handoff, key, handoff_label)
-    deployment_left = dict(
-        deployment.get(f"workpiece_{workpiece}_left_handoff") or {}
-    )
-    # 部署记录可冻结一整套已实测交接点；它覆盖公共工件字段，避免后续为另一
-    # 个现场调整公共参数时污染该现场的已验证轨迹。
-    for key in (
-        "prepare_joints_deg", "observation_joints_deg", "left_return_joints_deg",
-    ):
-        if key in deployment_left:
-            left_handoff[key] = _vector(
-                deployment_left, key, 7,
-                f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
-            )
-    if "handoff_center_body_m" in deployment_left:
-        left_handoff["handoff_center_body_m"] = _vector(
-            deployment_left, "handoff_center_body_m", 3,
-            f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
-        )
-    for key in ("axis_tolerance_deg", "center_tolerance_mm"):
-        if key in deployment_left:
-            left_handoff[key] = _positive(
-                deployment_left, key,
-                f"deployment.{selected_mode}.workpiece_{workpiece}_left_handoff",
-            )
     # 云台角/标定不是工件参数。只允许从 deployment.<mode> 读取，避免旧配置
     # 把广珠和祥鑫的观察位、自动标点合并为同一组值。
     try:
@@ -161,26 +142,11 @@ def load_workpiece_handoff_profile(
             right_handoff[key] = _vector(right_handoff, key, 7, right_label)
         for key in ("post_release_clearance_minus_x_m", "post_release_clearance_plus_z_m"):
             right_handoff[key] = _positive(right_handoff, key, right_label)
-    deployment_right = dict(
-        deployment.get(f"workpiece_{workpiece}_right_handoff") or {}
-    )
-    for key in ("grasp_joints_deg", "place_ready_joints_deg"):
-        if key in deployment_right:
-            right_handoff[key] = _vector(
-                deployment_right, key, 7,
-                f"deployment.{selected_mode}.workpiece_{workpiece}_right_handoff",
-            )
-    if workpiece == "1" and "place_ready_tolerance_deg" in deployment_right:
-        right_handoff["place_ready_tolerance_deg"] = _positive(
-            deployment_right, "place_ready_tolerance_deg",
-            f"deployment.{selected_mode}.workpiece_{workpiece}_right_handoff",
-        )
-
-    # 保持 Module 5-2/8-2 的原字段形状，避免因配置迁移改变运动逻辑。
+    # 保持 Module 5-2/8-2 的原字段形状，避免因统一配置改变运动逻辑。
     return {
         "schema_version": 1,
         "profile_id": (
-            f"{selected_mode}_workpiece_{workpiece}_reverse_grasp_handoff_toml_v2"
+            f"{selected_mode}_workpiece_{workpiece}_reverse_grasp_handoff_toml_v3"
         ),
         "deployment_mode": selected_mode,
         "workpiece": workpiece,

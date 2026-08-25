@@ -1387,7 +1387,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rrt-turn-parallelism", type=int, default=RRTCONNECT_PLACE_MAX_PARALLELISM)
     parser.add_argument("--planner", choices=("lin", "ptp", RRTCONNECT_PLANNER_KIND, RRTSTAR_PLANNER_KIND),
                         default=RRTCONNECT_PLANNER_KIND)
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.4.11"))
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "localhost"))
     parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))

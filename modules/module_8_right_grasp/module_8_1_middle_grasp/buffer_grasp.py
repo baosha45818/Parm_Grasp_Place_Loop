@@ -775,6 +775,31 @@ def servo_follow_tcp(arm: object, *, arm_id: int, tcp_target: list[float], servo
     )
 
 
+def require_driver_tcp_pose(
+    arm: object, *, arm_id: int, target: list[float], servo_eef_offset: list[float],
+    position_tolerance_m: float, orientation_tolerance_rad: float,
+    settle_timeout_s: float, stage: str,
+) -> None:
+    """Require SDK feedback to confirm the right_eef target before closing."""
+    tcp_rpy = finite(servo_eef_offset, 6, "servo tcp")
+    tcp_pose = tcp_rpy[:3] + rpy_to_rotvec(tcp_rpy[3:])
+    deadline = time.monotonic() + settle_timeout_s
+    final_pose: list[float] | None = None
+    while time.monotonic() < deadline:
+        final_pose = compose_pose(current_pose(arm, arm_id), tcp_pose)
+        if (position_error_m(target, final_pose) <= position_tolerance_m
+                and orientation_error_rad(target, final_pose) <= orientation_tolerance_rad):
+            print(f"{stage} SDK TCP 位姿校验通过。")
+            return
+        time.sleep(0.05)
+    assert final_pose is not None
+    raise RuntimeError(
+        f"{stage} SDK TCP 位姿未在超时内到位："
+        f"位置误差={position_error_m(target, final_pose) * 1000.0:.1f} mm，"
+        f"旋转误差={math.degrees(orientation_error_rad(target, final_pose)):.2f}°。"
+    )
+
+
 def reverse_recorded_servo_joint_path(
     arm: object, *, arm_id: int, joint_path: list[list[float]], sample_frequency_hz: float,
 ) -> None:
@@ -856,7 +881,7 @@ def parse_args() -> argparse.Namespace:
         "--tcp-yaw-toward-workpiece-y-deg", type=float, default=-3.0,
         help="TCP 相对工件的本地 +Z 偏转（度；默认 -3）",
     )
-    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+    parser.add_argument("--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.4.11"))
     parser.add_argument("--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1"))
     parser.add_argument("--gripper-host", default=os.environ.get("PARM_GRIPPER_HOST", "localhost"))
     parser.add_argument("--frame-id", default=os.environ.get("PARM_PLANNER_FRAME", "body_base"))
@@ -1061,8 +1086,15 @@ def main() -> int:
                 joint_path_recorder=final_servo_joint_path,
             )
         else:
-            plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage="沿 TCP +X 从后方延长线推进至抓取点", execution_speed_scale=args.trajectory_execution_speed_scale)
-            recover_target_tcp_pose(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, xy_tolerance_m=args.q1_xy_tolerance_m, z_tolerance_m=args.q1_z_tolerance_m, orientation_tolerance_rad=args.q1_pitch_tolerance_rad, correction_attempts=args.z_pitch_correction_attempts, stage="抓取点 TCP 位姿校验", execution_speed_scale=args.trajectory_execution_speed_scale)
+            plan_and_follow(arm, planner, arm_id=args.arm_id, group=group, frame_id=args.frame_id, ik_frame=ik_frame, tcp_offset=tcp_offset, target=grasp_target, planner_kind=args.planner, max_vel=args.max_vel, max_acc=args.max_acc, retries=args.start_sync_retries, stage="沿 TCP +X 从后方延长线推进至抓取点", execution_speed_scale=args.trajectory_execution_speed_scale, rrtstar_goal_tolerance=False)
+            require_driver_tcp_pose(
+                arm, arm_id=args.arm_id, target=grasp_target,
+                servo_eef_offset=servo_eef_offset,
+                position_tolerance_m=args.servo_position_tolerance_m,
+                orientation_tolerance_rad=args.servo_orientation_tolerance_rad,
+                settle_timeout_s=args.servo_settle_timeout_s,
+                stage="抓取点",
+            )
 
         grasp_attempt_targets = [
             ("初始抓取点", grasp_target),

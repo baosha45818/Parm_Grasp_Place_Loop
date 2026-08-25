@@ -8,8 +8,9 @@
 * 从观察到本模块释放左夹爪之前，工件没有相对左夹爪滑动。
 
 本模块包含双手交接的原子安全步骤，因此会控制右臂、两侧夹爪，并在右臂
-撤离后让左臂回到当前工件profile定义的安全回程位。工件1右臂预抓取和最终
-抓取使用 Planner MoveL；工件2沿用其现场示教 RRTStar 抓取序列。
+撤离后让左臂回到当前工件profile定义的安全回程位。工件1从 Idle 到预抓取使用
+Planner RRTStar（可回放历史轨迹），预抓取到最终抓取使用 Planner LIN；工件2沿用
+其现场示教 RRTStar 抓取序列。
 """
 
 from __future__ import annotations
@@ -34,6 +35,11 @@ from modules.module_8_right_grasp.module_8_2_left_handoff.gripper_compat import 
 )
 from modules.reverse_grasp_handoff_positions import (
     load_workpiece_handoff_profile,
+)
+from modules.module_8_right_grasp.module_8_2_left_handoff.trajectory_cache import (
+    compatibility as pregrasp_cache_compatibility,
+    load as load_pregrasp_trajectory_cache,
+    save as save_pregrasp_trajectory_cache,
 )
 PYTHON = ROOT / ".venv/bin/python"
 if not PYTHON.is_file():
@@ -83,13 +89,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mode", choices=("xiangxin", "gzhu"),
-        default=os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin"),
+        default=os.environ.get("PARM_DEPLOYMENT_MODE", "gzhu"),
         help="必须与 Module 4-1 / Module 5-2 使用相同的现场部署模式",
     )
     parser.add_argument(
         "--right-place-ready-file",
         type=Path,
         help="可选：右臂到放置准备位后写入的总控同步标记文件",
+    )
+    parser.add_argument(
+        "--right-pregrasp-ready-file",
+        type=Path,
+        help="Module 5-2 串行右臂阶段写入的预抓取到位标记；缺省时按 result.json 同目录自动查找",
     )
     parser.add_argument(
         "--speed-multiplier",
@@ -154,13 +165,38 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
     )
 
     original_plan_joint = PlannerRuntime.plan_joint_trajectory
+    original_execute_plan = PlannerRuntime.execute_planned_result
     original_validate_arm_plan = handoff.validate_arm_joint_plan
     original_wait_for_pose_close = handoff.wait_for_pose_close
     original_move_gripper = handoff.move_gripper
     original_read_gripper_state = handoff.read_gripper_state
     original_confirmed = handoff.confirmed
     original_argv = sys.argv
-    right_pregrasp_movel_planned = False
+    pregrasp_cache_context = pregrasp_cache_compatibility(
+        mode=args.mode,
+        profile_id=str(profile["profile_id"]),
+        grasp_joints_deg=high_grasp_joints_deg,
+    )
+    pending_pregrasp_cache_seed: dict[str, Any] | None = None
+    cached_pregrasp_endpoint: list[float] | None = None
+    pregrasp_marker = args.right_pregrasp_ready_file or result.with_name(
+        f"{result.stem}_right_pregrasp_ready.json"
+    )
+    parallel_pregrasp_endpoint: list[float] | None = None
+    if pregrasp_marker.is_file():
+        try:
+            marker = json.loads(pregrasp_marker.read_text(encoding="utf-8"))
+            endpoint = marker.get("right_joints_deg")
+            if marker.get("event") != "right_pregrasp_ready" or not isinstance(endpoint, list) or len(endpoint) != 7:
+                raise ValueError("标记内容不完整")
+            parallel_pregrasp_endpoint = [float(value) for value in endpoint]
+            print(
+                f"[module-8-2] 采用 M5.2 预抓取到位标记：{pregrasp_marker}；"
+                "跳过重复 RRTstar，等待本轮 ICP 的最终 LIN。",
+                flush=True,
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"右臂预抓取到位标记无效：{pregrasp_marker}: {exc}") from exc
 
     def plan_joint_with_right_movel(
         runtime: PlannerRuntime,
@@ -169,7 +205,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         *,
         planner: str = "rrtstar",
     ) -> dict[str, Any] | None:
-        nonlocal right_pregrasp_movel_planned
+        nonlocal cached_pregrasp_endpoint, pending_pregrasp_cache_seed
         if arm != "right":
             return original_plan_joint(
                 runtime, arm, joints_deg, planner=planner
@@ -197,32 +233,64 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         )
         if is_exact_taught_grasp:
             print(
-                "[V2 最终交接] 右臂RRTStar直接到godr1验证的"
-                f"示教关节位：{[round(value, 4) for value in joints_deg]}。",
+                "[V2 最终交接] 右臂从预抓取位以 Planner LIN 直线到"
+                f"godr1验证的示教抓取位：{[round(value, 4) for value in joints_deg]}。",
                 flush=True,
             )
-            return original_plan_joint(
-                runtime, arm, joints_deg, planner="rrtstar"
+            target_tcp = handoff.taught_right_tcp_from_joints(list(joints_deg))
+            return runtime.plan_cartesian_pose(
+                "right", handoff.transform_to_object_pose(target_tcp), planner="lin"
             )
-        if right_pregrasp_movel_planned:
-            raise RuntimeError(
-                "V2遇到未识别的额外右臂关节目标；"
-                "为避免误选MoveL/MoveJ，拒绝继续规划"
-            )
-        right_pregrasp_movel_planned = True
-        target_tcp = handoff.taught_right_tcp_from_joints(
-            list(joints_deg)
+        cached, cache_status = load_pregrasp_trajectory_cache(
+            workpiece="1", compatibility_data=pregrasp_cache_context
         )
+        if cached is not None:
+            response = cached["response"]
+            trajectory = (response.get("data") or {}).get("trajectory") or []
+            try:
+                handoff.validate_trajectory_start_matches_current_state(
+                    response, arm_host=args.arm_host, arm_id=2,
+                    label="right_idle_to_pregrasp_cached_trajectory", tolerance_deg=1.0,
+                )
+                start_matches = True
+            except RuntimeError as exc:
+                start_matches = False
+                print(f"[轨迹缓存] Idle→预抓取首点不匹配：{exc}", flush=True)
+            if start_matches:
+                cached_pregrasp_endpoint = [float(value) for value in trajectory[-1]]
+                print(
+                    "[轨迹缓存] 直接回放 Idle→预抓取 RRTstar 历史轨迹；"
+                    "本轮 ICP 只用于后续 LIN 最终抓取。", flush=True,
+                )
+                return response
+            cache_status = "start_mismatch"
         print(
-            "[V2 MoveL] 右臂预抓取关节目标仅用于"
-            "计算ICP修正预抓取位；改用Planner LIN到该TCP，不执行MoveJ。",
-            flush=True,
+            f"[轨迹缓存] Idle→预抓取未命中（{cache_status}），"
+            "RRTstar 在线规划并在到位后更新缓存。", flush=True,
         )
-        return runtime.plan_cartesian_pose(
-            "right",
-            handoff.transform_to_object_pose(target_tcp),
-            planner="lin",
+        response = original_plan_joint(runtime, arm, joints_deg, planner="rrtstar")
+        if response is not None:
+            pending_pregrasp_cache_seed = response
+        return response
+
+    def execute_plan_and_seed_pregrasp_cache(
+        runtime: PlannerRuntime, response: dict[str, Any]
+    ) -> None:
+        nonlocal pending_pregrasp_cache_seed
+        original_execute_plan(runtime, response)
+        if response is not pending_pregrasp_cache_seed:
+            return
+        trajectory = (response.get("data") or {}).get("trajectory") or []
+        if not trajectory:
+            raise RuntimeError("Idle→预抓取在线轨迹缺少终点")
+        handoff.wait_for_joint_target(
+            args.arm_host, 2, [float(value) for value in trajectory[-1]], 2.0,
+            "right idle-to-pregrasp cache seed", timeout_s=90.0,
         )
+        save_pregrasp_trajectory_cache(
+            workpiece="1", compatibility_data=pregrasp_cache_context, response=response
+        )
+        pending_pregrasp_cache_seed = None
 
     def validate_right_movel_as_arm_plan(
         response: dict,
@@ -232,33 +300,23 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         label: str,
         tolerance_deg: float,
     ) -> dict[str, Any]:
-        if arm_id != 2 or label != "right_pregrasp_trajectory":
-            return original_validate_arm_plan(
-                response,
-                target_deg,
-                arm_id=arm_id,
-                label=label,
-                tolerance_deg=tolerance_deg,
-            )
-        data = response.get("data") or {}
-        if int(data.get("arm_id", -1)) != 2:
-            raise RuntimeError(
-                f"{label} has unexpected arm_id: {data.get('arm_id')}"
-            )
-        trajectory = data.get("trajectory") or []
-        if not isinstance(trajectory, list) or not trajectory:
-            raise RuntimeError(f"{label} has no trajectory")
-        for index, point in enumerate(trajectory):
-            handoff.validate_joint_vector(point, f"{label}[{index}]")
-        return {
-            "arm_id": 2,
-            "planner": "LIN",
-            "trajectory_points": len(trajectory),
-            "sample_frequency_hz": float(
-                data.get("sample_frequency", 10.0)
-            ),
-            "endpoint_joints_deg": list(trajectory[-1]),
-        }
+        if label == "right_pregrasp_trajectory" and cached_pregrasp_endpoint is not None:
+            data = response.get("data") or {}
+            trajectory = data.get("trajectory") or []
+            if int(data.get("arm_id", -1)) != 2 or not trajectory:
+                raise RuntimeError("缓存 Idle→预抓取轨迹无有效右臂终点")
+            return {
+                "arm_id": 2,
+                "planner": "RRTSTAR_TRAJECTORY_CACHE",
+                "trajectory_points": len(trajectory),
+                "sample_frequency_hz": float(data.get("sample_frequency", 10.0)),
+                "endpoint_joints_deg": list(cached_pregrasp_endpoint),
+            }
+        # 在线预抓取和最终 LIN 都保留原有终点关节校验。
+        return original_validate_arm_plan(
+            response, target_deg, arm_id=arm_id, label=label,
+            tolerance_deg=tolerance_deg,
+        )
 
     def wait_for_pose_and_module_9_joints(
         planner: Any,
@@ -270,6 +328,24 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         *,
         timeout_s: float = 30.0,
     ) -> dict[str, Any]:
+        if (
+            label == "right taught tail pregrasp pose"
+            and cached_pregrasp_endpoint is not None
+        ):
+            print(
+                "[轨迹缓存] 预抓取使用缓存安全接近位；"
+                "不要求它与本轮 ICP 预抓取 TCP 重合。",
+                flush=True,
+            )
+            handoff.wait_for_joint_target(
+                args.arm_host, 2, cached_pregrasp_endpoint, 0.5,
+                "workpiece-1 cached right pregrasp", timeout_s=90.0,
+            )
+            return {
+                "gate": "cached_joint_feedback",
+                "target_joints_deg": list(cached_pregrasp_endpoint),
+                "tolerance_deg": 0.5,
+            }
         if label == "right place-ready pose":
             print(
                 "[工件1到位门禁] 放置准备位是关节示教目标；"
@@ -336,7 +412,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         "--right-grasp-joints-deg",
         *[str(value) for value in high_grasp_joints_deg],
         "--final-grasp-motion",
-        "taught-joints",
+        "lin",
         "--right-grasp-tolerance-deg",
         "0.5",
         "--expected-center-m",
@@ -347,6 +423,10 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         "0.05",
         "--pregrasp-axis",
         "object-minus-x",
+        *(
+            ["--right-pregrasp-ready-joints-deg", *[str(value) for value in parallel_pregrasp_endpoint]]
+            if parallel_pregrasp_endpoint is not None else []
+        ),
         "--arrival-translation-tolerance-mm",
         "1.0",
         "--right-place-ready-joints-deg",
@@ -369,6 +449,7 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
     ]
     try:
         PlannerRuntime.plan_joint_trajectory = plan_joint_with_right_movel
+        PlannerRuntime.execute_planned_result = execute_plan_and_seed_pregrasp_cache
         handoff.validate_arm_joint_plan = validate_right_movel_as_arm_plan
         handoff.wait_for_pose_close = wait_for_pose_and_module_9_joints
         handoff.move_gripper = move_gripper_with_left_release_preemption
@@ -376,8 +457,8 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         handoff.confirmed = confirmed_with_v2_prompt
         sys.argv = command_args
         print(
-            "\n[module-8-2] 工件1进入共用高位右臂交接：预抓取使用Planner MoveL；"
-            "最终交接RRTStar直达godr1示教关节位；"
+            "\n[module-8-2] 工件1进入共用高位右臂交接：Idle→预抓取使用"
+            "RRTStar（命中时回放历史轨迹）；预抓取→最终交接使用Planner LIN；"
             "交接后上升、后退使用MoveL，随后右臂MoveJ到模块9上方准备位；"
             "左臂关节回程保持MoveJ。",
             flush=True,
@@ -385,13 +466,14 @@ def execute_movel_handoff(result: Path, args: argparse.Namespace) -> int:
         print(
             "[module-8-2] 工件1高位名义右手抓取TCP：body_base "
             f"xyz(m)={taught_grasp_tcp[:3, 3].tolist()}；"
-            "预抓取仍按实时工件关系计算；最终抓取直接执行现场示教关节位，"
-            "不再把未标定FK结果作为最终LIN目标。",
+            "预抓取仍按实时工件关系计算；最终抓取以实时左TCP×ICP关系"
+            "重建抓取TCP后执行 LIN。",
             flush=True,
         )
         return handoff.main()
     finally:
         PlannerRuntime.plan_joint_trajectory = original_plan_joint
+        PlannerRuntime.execute_planned_result = original_execute_plan
         handoff.validate_arm_joint_plan = original_validate_arm_plan
         handoff.wait_for_pose_close = original_wait_for_pose_close
         handoff.move_gripper = original_move_gripper
@@ -498,7 +580,7 @@ def main() -> int:
 
     execute_movel_handoff(result, args)
     print(
-        "[module-8-2] 右手在共用高位MoveL接取并撤离，随后MoveJ到模块9上方准备位；"
+        "[module-8-2] 右手在共用高位以实时ICP修正的LIN完成接取并撤离，随后MoveJ到模块9上方准备位；"
         "左手已释放并回到共用较高安全位。",
         flush=True,
     )

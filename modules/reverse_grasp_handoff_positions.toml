@@ -1,95 +1,179 @@
-# 两类工件左臂反抓与右臂交接的全部预设关节位。
-# 坐标单位为 deg；交接中心相对 body_base，单位为 m。
-# 修改后需重新启动对应模块/总控，运行中的进程不会自动重新读取本文件。
-#
-# 注意：云台观察角、手眼标定和 SAM2 自动标点是“部署”参数，不能按工件共用。
-# xiangxin 与 gzhu 的值在文件末尾的 [deployment.<mode>] 分区单独维护；
-# 调用 load_workpiece_handoff_profile() 会按照 PARM_DEPLOYMENT_MODE 选择它们。
+# 两个部署现场、两类工件的左臂反抓与右臂交接参数。
+# 关节角单位为 deg；空间距离按参数名分别使用 m 或 mm；时间单位为 s。
+# 所有反抓预备位、左侧交接位、右侧交接/放置准备位必须显式归属
+# deployment.xiangxin 或 deployment.gzhu，不再使用无地区基线。四套组合为
+# deployment.<mode>.workpiece_<1|2>，这是运动位置参数的唯一来源。
+# 总控会将 --mode（默认 gzhu）写入 PARM_DEPLOYMENT_MODE，加载器据此只读取对应现场。
+# 修改后需重启对应模块/总控，运行中的进程不会自动重读本文件。
 
-[workpiece_1.left_reverse_grasp]
-ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-arrival_tolerance_deg = 0.5
-arrival_timeout_s = 90.0
-# 反抓闭爪后只上提 3 cm；工件1在上提后读取左夹爪 gripping/position 状态判断持件。
-post_close_lift_m = 0.03
-max_grasp_attempts = 5
-
-[workpiece_1.left_handoff]
-prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
-handoff_center_body_m = [0.4200, 0.1000, 0.2500]
-axis_tolerance_deg = 2.0
-center_tolerance_mm = 25.0
-left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-
-[workpiece_1.right_handoff]
-# grasp_joints_deg = [164.5464, 56.8637, -68.9227, 78.2515, -24.3923, 3.9098, 78.3202]
-# grasp_joints_deg = [164.523, 57.0258, -68.7826, 78.3201, -24.2591, 3.8508, 78.1156]
-grasp_joints_deg = [168.4313, 55.7886, -67.901, 89.9698, -23.648, -3.5541, 71.7984]
-# 工件1反抓交接后、进入 Module 9 前的统一右臂放置准备位；必须与
-# 该位姿由 Module 8.2 与 Module 9 的正式交接链共享。
-place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
-
-place_ready_tolerance_deg = 0.5
-
-[workpiece_2.left_reverse_grasp]
-ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-arrival_tolerance_deg = 0.5
-arrival_timeout_s = 90.0
-# 反抓闭爪后只上提 3 cm，随后立即进行力传感器持件判断。
-post_close_lift_m = 0.03
-max_grasp_attempts = 5
-
-[workpiece_2.left_handoff]
-prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
-handoff_center_body_m = [0.4200, 0.1000, 0.2500]
-axis_tolerance_deg = 2.0
-center_tolerance_mm = 25.0
-left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
-
-[workpiece_2.right_handoff]
-prepare_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
-pregrasp_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
-# grasp_joints_deg = [163.136, 59.4977, -71.1186, 80.2579, -21.8408, -0.7594, 79.0549]
-# grasp_joints_deg = [160.1531, 59.9112, -66.4508, 74.5312, -22.1388, 2.1286, 77.1885]
-grasp_joints_deg = [160.7436, 59.6571, -67.2445, 73.1085, -22.9902, 4.9466, 78.7417]
-place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
-post_release_clearance_minus_x_m = 0.03
-post_release_clearance_plus_z_m = 0.03
-
-# ---------------------- 现场部署专用覆盖（不得合并） ----------------------
-
-[deployment.xiangxin.left_observation]
-# 祥鑫相机/手眼标定的反抓交接观察位与固定 SAM2 自动标点。
-head_pitch_deg = 25.0
-head_yaw_deg = 35.0
-alignment = "tools/calibration/head_d435/xiangxin_reverse_observation.json"
-auto_mask_config = "tools/handoff_observation/head_d435_auto_mask_config.json"
+# ============================== 广大现场 ==============================
 
 [deployment.gzhu.left_observation]
-# 广珠相机/手眼标定的反抓交接观察位；绝不能套用祥鑫的 25°/35° 自动点。
+# 头部云台俯仰观察角
 head_pitch_deg = 2.0
+# 头部云台偏航观察角
 head_yaw_deg = 26.5
+# body/head D435 手眼标定文件
 alignment = "tools/calibration/head_d435/gzhu_reverse_observation.json"
+# SAM2 自动标点/掩码配置
 auto_mask_config = "tools/handoff_observation/gzhu_head_d435_auto_mask_config.json"
 
-[deployment.gzhu.workpiece_1_left_handoff]
-# 239c401：去祥鑫前，广珠工件1最后一次实测通过的整套左手交接参数。
+[deployment.gzhu.workpiece_1.left_reverse_grasp]
+# 左臂反抓前的 7 轴预备位
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# 预备位各轴允许的最大到位误差
+arrival_tolerance_deg = 0.5
+# 等待左臂到达预备位的最长时间
+arrival_timeout_s = 90.0
+# 反抓闭爪后沿上方抬升的距离，随后读取左夹爪状态判断持件
+post_close_lift_m = 0.03
+# 反抓失败时允许的最大抓取尝试次数
+max_grasp_attempts = 5
+
+[deployment.gzhu.workpiece_1.left_handoff]
+# 左臂交接前的 7 轴准备位（239c401 实测集）
 prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# D435 拍摄交接位姿时的左臂 7 轴观察位（239c401 实测集）
 observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
-handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+# 交接姿态轴向与目标轴向的最大夹角误差
 axis_tolerance_deg = 2.0
+# body_base 坐标系下的交接目标中心 [x, y, z]（239c401 实测集）
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+# 左夹爪工件中心与交接中心的最大位置误差
 center_tolerance_mm = 25.0
+# 左臂释放工件后的 7 轴返回位（239c401 实测集）
 left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
 
-[deployment.gzhu.workpiece_1_right_handoff]
-# 239c401：广珠工件1右手接取及接取后的放置准备位，不能使用祥鑫的新位姿。
-grasp_joints_deg = [160.7436, 59.6571, -67.2445, 73.1085, -22.9902, 4.9466, 78.7417]
+[deployment.gzhu.workpiece_1.right_handoff]
+# 右臂在交接点夹取工件的 7 轴位姿（239c401 实测集）
+grasp_joints_deg = [164.523, 57.0258, -68.7826, 78.3201, -24.2591, 3.8508, 78.1156]
+# 右臂交接成功后、进入 Module 9 前的 7 轴放置准备位（239c401 实测集）
 place_ready_joints_deg = [30.4353, 23.8637, 0.5905, 66.3409, -62.0439, -64.3304, 25.7149]
+# 放置准备位各轴允许的最大到位误差
 place_ready_tolerance_deg = 0.5
 
-[deployment.gzhu.workpiece_2_right_handoff]
-# 广珠工件2右手接住后进入放置准备位的独立示教点。右手“接住”本身的
-# prepare/pregrasp/grasp 三组关节位与公共工件2配置一致；只有该后续位置不同。
+[deployment.gzhu.workpiece_2.left_reverse_grasp]
+# 左臂反抓前的 7 轴预备位
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# 预备位各轴允许的最大到位误差
+arrival_tolerance_deg = 0.5
+# 等待左臂到达预备位的最长时间
+arrival_timeout_s = 90.0
+# 反抓闭爪后沿上方抬升的距离，随后立即做力传感器持件判断
+post_close_lift_m = 0.03
+# 反抓失败时允许的最大抓取尝试次数
+max_grasp_attempts = 5
+
+[deployment.gzhu.workpiece_2.left_handoff]
+# 左臂交接前的 7 轴准备位
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# D435 拍摄交接位姿时的左臂 7 轴观察位
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+# body_base 坐标系下的交接目标中心 [x, y, z]
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+# 交接姿态轴向与目标轴向的最大夹角误差
+axis_tolerance_deg = 2.0
+# 左夹爪工件中心与交接中心的最大位置误差
+center_tolerance_mm = 25.0
+# 左臂释放工件后的 7 轴返回位
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[deployment.gzhu.workpiece_2.right_handoff]
+# 右臂接取工件前的 7 轴准备位
+prepare_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+# 右臂进入最终抓取轨迹前的 7 轴预抓位
+pregrasp_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+# 右臂在交接点夹取工件的 7 轴位姿
+grasp_joints_deg = [163.1305, 59.7847, -70.9730, 79.0452, -21.6032, 0.3420, 79.2925]
+# 右臂交接成功后、进入 Module 9 前的广大专用 7 轴放置准备位
 place_ready_joints_deg = [102.2483, 21.8477, -87.2013, 83.4439, -147.2882, -32.2943, -66.0196]
+# 左爪释放后，左臂沿 body_base -X 方向的避让距离
+post_release_clearance_minus_x_m = 0.03
+# 左爪释放后，左臂沿 body_base +Z 方向的抬升距离
+post_release_clearance_plus_z_m = 0.03
+
+# ============================== 祥鑫现场 ==============================
+
+[deployment.xiangxin.left_observation]
+# 头部云台俯仰观察角
+head_pitch_deg = 25.0
+# 头部云台偏航观察角
+head_yaw_deg = 35.0
+# 头部 D435 手眼标定文件
+alignment = "tools/calibration/head_d435/xiangxin_reverse_observation.json"
+# SAM2 自动标点/掩码配置
+auto_mask_config = "tools/handoff_observation/head_d435_auto_mask_config.json"
+
+[deployment.xiangxin.workpiece_1.left_reverse_grasp]
+# 左臂反抓前的 7 轴预备位
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# 预备位各轴允许的最大到位误差
+arrival_tolerance_deg = 0.5
+# 等待左臂到达预备位的最长时间
+arrival_timeout_s = 90.0
+# 反抓闭爪后沿上方抬升的距离
+post_close_lift_m = 0.03
+# 反抓失败时允许的最大抓取尝试次数
+max_grasp_attempts = 5
+
+[deployment.xiangxin.workpiece_1.left_handoff]
+# 左臂交接前的 7 轴准备位
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# D435 拍摄交接位姿时的左臂 7 轴观察位
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+# 交接姿态轴向与目标轴向的最大夹角误差
+axis_tolerance_deg = 2.0
+# body_base 坐标系下的交接目标中心 [x, y, z]
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+# 左夹爪工件中心与交接中心的最大位置误差
+center_tolerance_mm = 25.0
+# 左臂释放工件后的 7 轴返回位
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[deployment.xiangxin.workpiece_1.right_handoff]
+# 右臂在交接点夹取工件的 7 轴位姿
+grasp_joints_deg = [168.4313, 55.7886, -67.901, 89.9698, -23.648, -3.5541, 71.7984]
+# 右臂交接成功后、进入 Module 9 前的 7 轴放置准备位
+place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
+# 放置准备位各轴允许的最大到位误差
+place_ready_tolerance_deg = 0.5
+
+[deployment.xiangxin.workpiece_2.left_reverse_grasp]
+# 左臂反抓前的 7 轴预备位
+ready_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# 预备位各轴允许的最大到位误差
+arrival_tolerance_deg = 0.5
+# 等待左臂到达预备位的最长时间
+arrival_timeout_s = 90.0
+# 反抓闭爪后沿上方抬升的距离，随后立即做力传感器持件判断
+post_close_lift_m = 0.03
+# 反抓失败时允许的最大抓取尝试次数
+max_grasp_attempts = 5
+
+[deployment.xiangxin.workpiece_2.left_handoff]
+# 左臂交接前的 7 轴准备位
+prepare_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+# D435 拍摄交接位姿时的左臂 7 轴观察位
+observation_joints_deg = [-14.7040, 36.4990, -75.2620, 92.1380, -91.4400, 50.8820, 88.0000]
+# body_base 坐标系下的交接目标中心 [x, y, z]
+handoff_center_body_m = [0.4200, 0.1000, 0.2500]
+# 交接姿态轴向与目标轴向的最大夹角误差
+axis_tolerance_deg = 2.0
+# 左夹爪工件中心与交接中心的最大位置误差
+center_tolerance_mm = 25.0
+# 左臂释放工件后的 7 轴返回位
+left_return_joints_deg = [14.2810, -29.8860, -85.6330, 102.5040, 37.3780, 56.0160, 9.2410]
+
+[deployment.xiangxin.workpiece_2.right_handoff]
+# 右臂接取工件前的 7 轴准备位
+prepare_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+# 右臂进入最终抓取轨迹前的 7 轴预抓位
+pregrasp_joints_deg = [173.9519, 50.8063, -79.5218, 85.0397, -25.3112, 4.5552, 79.6344]
+# 右臂在交接点夹取工件的 7 轴位姿
+grasp_joints_deg = [163.1305, 59.7847, -70.9730, 79.0452, -21.6032, 0.3420, 79.2925]
+# 右臂交接成功后、进入 Module 9 前的 7 轴放置准备位
+place_ready_joints_deg = [22.1484, 10.9122, 42.3263, 107.9434, -97.3484, -25.6449, -24.1054]
+# 左爪释放后，左臂沿 body_base -X 方向的避让距离
+post_release_clearance_minus_x_m = 0.03
+# 左爪释放后，左臂沿 body_base +Z 方向的抬升距离
+post_release_clearance_plus_z_m = 0.03

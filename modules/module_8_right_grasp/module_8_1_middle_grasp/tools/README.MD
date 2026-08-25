@@ -39,7 +39,7 @@ python tools/arm_head_teach.py --arm-id 2
 
 ```bash
 python tools/arm_head_teach.py --arm-id 2 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --planner-host localhost \
   --head-host localhost \
   --gripper-host localhost \

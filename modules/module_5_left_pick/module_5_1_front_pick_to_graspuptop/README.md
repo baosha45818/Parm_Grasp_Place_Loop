@@ -42,8 +42,8 @@ handoff 成功后夹爪保持闭合，`released=false`。桌中放置由 Module 
 默认参数：
 
 - 预抓位：ICP原点沿 `body_base +Z` 抬高5 cm；
-- LIN下探：2 cm；
-- 默认闭爪点：ICP原点上方3 cm；
+- LIN下探：2.5 cm；
+- 默认闭爪点：ICP原点上方2.5 cm；
 - 闭爪后LIN上提：3 cm。
 
 程序根据ICP工件轴生成两个右手夹爪姿态候选，先为每个候选完整规划
@@ -75,9 +75,23 @@ Module 5.1 当前没有 plan-only 模式。真实重抓必须显式传入 `--exe
   --execute
 ```
 
-`gzhu` 环境应由控制器或命令行传入 `--arm-host 192.168.88.1` 和
+`gzhu` 环境应由控制器或命令行传入 `--arm-host 192.168.4.11` 和
 `--gripper-host 127.0.0.1`。相机标定已经由 Module 4.1 固化在其输出位姿中，
 Module 5.1 不按D405序列号重新选择标定。
+
+`gzhu` 环境使用 Module 4.1 本轮检测结果执行真实重抓：
+
+```bash
+PARM_ARM_HOST=192.168.4.11 \
+  .venv/bin/python \
+  modules/module_5_left_pick/module_5_1_front_pick_to_graspuptop/main.py \
+  --buffer-check-result output/module_4_1/captures/head_rgbd_20260824_155708/buffer_face_check.json \
+  --result-file output/module_5_left_pick/front_regrasp_handoff.json \
+  --planner-host 127.0.0.1 \
+  --arm-host 192.168.4.11 \
+  --gripper-host 127.0.0.1 \
+  --execute
+```
 
 ## 返回与输出
 

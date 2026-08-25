@@ -2,7 +2,7 @@
 """正面分支：用 Module 4.1 的 ICP 位姿重抓并交接到 ``graspuptop``。
 
 只接受已经通过 Buffer Check 质量门的唯一 FRONT 结果。以 ICP 原点作为
-抓取参考；预抓高度和 LIN 下移距离独立配置，默认闭爪点为 ICP 上方 3 cm。
+抓取参考；预抓高度和 LIN 下移距离独立配置，默认闭爪点为 ICP 上方 2.5 cm。
 对 ICP 工件轴尝试两个夹爪姿态候选：``(+Z,+Y,+X)=(+X,+Y,-Z)`` 及
 ``(-X,-Y,-Z)``；均可达时选择左臂关节位移较小者。闭爪后 LIN 上提 3 cm。
 持件确认后只移动到标准交接位 ``graspuptop`` 并写出 handoff。桌中放置由
@@ -37,7 +37,7 @@ from placement_parameters import GRASPUP_ABOVE_JOINTS_DEG
 
 
 DEFAULT_PREGRASP_HEIGHT_M = 0.05
-DEFAULT_DESCENT_DISTANCE_M = 0.02
+DEFAULT_DESCENT_DISTANCE_M = 0.025
 POST_GRASP_LIFT_M = 0.03
 # 新左夹爪在桌面反抓到工件后应保留至少 35% 的开度；过小开度表示
 # 夹爪基本闭合，不能把它当作可靠持件。
@@ -77,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--descent-distance-m", type=float, default=DEFAULT_DESCENT_DISTANCE_M,
-        help="从预抓位沿 body_base -Z 的 LIN 下移距离，默认 0.02m",
+        help="从预抓位沿 body_base -Z 的 LIN 下移距离，默认 0.025m",
     )
     return parser.parse_args()
 

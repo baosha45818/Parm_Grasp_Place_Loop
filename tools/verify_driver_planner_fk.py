@@ -41,7 +41,7 @@ FRAME_CANDIDATES = {
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.88.1")
+        "--arm-host", default=os.environ.get("PARM_ARM_HOST", "192.168.4.11")
     )
     parser.add_argument(
         "--planner-host", default=os.environ.get("PARM_PLANNER_HOST", "127.0.0.1")

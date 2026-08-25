@@ -25,7 +25,7 @@ from tools.planner_runtime import PlannerRuntime
 
 # 与 controller 启动归位使用的 module_10_right_idle/right_idle_pose.json
 # 完全一致，保证右臂每轮结束和下一轮开始位于同一个 Idle。
-DEFAULT_IDLE_POSE = ROOT / "modules/module_8_right_grasp/module_8_1_buffer_grasp/saved_poses/4.json"
+DEFAULT_IDLE_POSE = ROOT / "modules/module_8_right_grasp/module_8_1_middle_grasp/saved_poses/4.json"
 DEFAULT_PLACE_READY_JOINTS_DEG = [
     -5.6937, 43.1502, -112.7074, -53.3867, 77.7186, -39.9765, 28.4257,
 ]

@@ -506,7 +506,7 @@ modules/module_3_left_place/run.sh \
   --placement-kind buffer \
   --handoff-file output/module_1_left_grasp/verified_handoff.json \
   --planner-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --gripper-host 127.0.0.1 \
   --result-file output/module_3_left_place/manual_buffer_plan.json
 ```
@@ -521,7 +521,7 @@ modules/module_3_left_place/run.sh \
   --placement-kind buffer \
   --handoff-file output/module_1_left_grasp/verified_handoff.json \
   --planner-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --gripper-host 127.0.0.1 \
   --result-file output/module_3_left_place/manual_buffer_execute.json \
   --execute \
@@ -536,7 +536,7 @@ modules/module_3_left_place/run.sh \
   --placement-kind middle \
   --handoff-file output/module_5_left_pick/front_regrasp_handoff.json \
   --planner-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --gripper-host 127.0.0.1 \
   --result-file output/module_3_left_place/manual_middle_execute.json \
   --execute \

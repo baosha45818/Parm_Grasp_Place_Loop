@@ -2,8 +2,8 @@
 schema_version = 2
 # 工件编号；必须与外层 --workpiece 参数一致。
 workpiece_serial_number = 1
-# 右臂控制器 IP 地址；当前现场机械臂为 192.168.88.1。
-arm_host = "192.168.88.1"
+# 右臂控制器 IP 地址；当前现场机械臂为 192.168.4.11。
+arm_host = "192.168.4.11"
 # 右腕力/扭矩传感器服务地址；当前 88.1 现场由本机服务提供。
 force_sensor_host = "localhost"
 

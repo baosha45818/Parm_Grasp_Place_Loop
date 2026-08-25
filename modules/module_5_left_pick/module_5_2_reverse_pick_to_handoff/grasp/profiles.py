@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
 import math
 from pathlib import Path
 from typing import Any
 
 from modules.module_5_left_pick.module_5_2_reverse_pick_to_handoff.grasp.toml_config import load_config_mapping
+from modules.reverse_grasp_handoff_positions import load_workpiece_handoff_profile
 
 
 MODULE_DIR = Path(__file__).resolve().parent
@@ -21,7 +21,6 @@ EXPECTED_ADAPTERS = {
     "1": "unique_back_prediction",
     "2": "convex_tab_prediction",
 }
-REVERSE_READY_CONFIG = CONFIG_DIR / "reverse_ready.json"
 
 
 @dataclass(frozen=True)
@@ -97,23 +96,10 @@ def load_reverse_grasp_profile(
     )
 
 
-def load_reverse_ready_profile(workpiece: str) -> dict[str, Any]:
-    """只读取 Module 5-1 所需的反抓预备位，不触发交接模块配置校验。"""
+def load_reverse_ready_profile(workpiece: str, *, mode: str | None = None) -> dict[str, Any]:
+    """从统一的四套部署/工件 TOML 读取反抓预备位。"""
     if workpiece not in {"1", "2"}:
         raise ValueError(f"workpiece 必须是 '1' 或 '2'，当前为 {workpiece!r}")
-    payload = json.loads(REVERSE_READY_CONFIG.read_text(encoding="utf-8"))
-    if int(payload.get("schema_version", 0)) != 1:
-        raise RuntimeError(f"不支持的反抓预备位配置版本: {REVERSE_READY_CONFIG}")
-    section = dict((payload.get("workpieces") or {}).get(workpiece) or {})
-    joints = section.get("ready_joints_deg")
-    if not isinstance(joints, list) or len(joints) != 7:
-        raise RuntimeError(f"工件 {workpiece} 反抓预备位必须包含 7 个关节角")
-    section["ready_joints_deg"] = [float(value) for value in joints]
-    if any(not math.isfinite(value) for value in section["ready_joints_deg"]):
-        raise RuntimeError(f"工件 {workpiece} 反抓预备位包含非有限数值")
-    for key in ("arrival_tolerance_deg", "arrival_timeout_s", "post_close_lift_m"):
-        section[key] = _positive_number(section, key, f"workpiece_{workpiece}")
-    attempts = section.get("max_grasp_attempts")
-    if not isinstance(attempts, int) or attempts < 1:
-        raise RuntimeError(f"工件 {workpiece} max_grasp_attempts 必须为正整数")
-    return section
+    return dict(
+        load_workpiece_handoff_profile(workpiece, mode=mode)["left_reverse_grasp"]
+    )

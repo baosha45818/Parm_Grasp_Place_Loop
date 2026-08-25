@@ -32,8 +32,9 @@ class WeightCheckConfig:
     samples: int = 31
     timeout_s: float = 3.0
     settle_s: float = 0.3
-    empty_max_g: float = 50.0
-    single_min_g: float = 50.000000001
+    # 40 g 边界归入 EMPTY；连续 SINGLE 区间从略大于 40 g 开始。
+    empty_max_g: float = 40.0
+    single_min_g: float = 40.000000001
     single_max_g: float = 129.999999999
     multiple_min_g: float = 130.0
     max_axis_mad_n: float = 0.15

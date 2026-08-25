@@ -20,7 +20,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
   --prepare-speed 0.3
 ```
 
-真实执行必须显式带 `--live`。未显式传入的地址由 `--mode` 选择；显式地址优先级更高：
+真实执行必须显式带 `--live`。不传时总控默认 `--mode gzhu --workpiece 1`；未显式传入的地址由 `--mode` 选择；显式地址优先级更高：
 
 ```bash
 ./.venv/bin/python controller/main.py \
@@ -28,7 +28,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
   --workpiece 1 \
   --live \
   --planner-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --gripper-host 127.0.0.1 \
   --force-host 127.0.0.1 \
   --head-host 127.0.0.1 \
@@ -43,7 +43,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 | `--mode` | arm / gripper | force / head | planner |
 | --- | --- | --- | --- |
-| `gzhu` | `192.168.88.1` / `127.0.0.1` | `127.0.0.1` / `127.0.0.1` | `127.0.0.1` |
+| `gzhu` | `192.168.4.11` / `127.0.0.1` | `127.0.0.1` / `127.0.0.1` | `127.0.0.1` |
 | `xiangxin` | `192.168.3.11` / `192.168.3.11` | `192.168.3.22` / `192.168.3.22` | `127.0.0.1` |
 
 `deployment.py` 还会写入 `PARM_DEPLOYMENT_MODE`、各服务地址以及对应的 `PARM_BODY_HEAD_CALIBRATION`。因此反面交接模块继承的头部标定始终与 `--mode` 一致。
@@ -68,12 +68,15 @@ FRONT:
   → 右臂后台：M8.1（内部包含其右侧观察/对齐）→ M9 → M10
 
 BACK:
-  → M5.2：反抓 + 左手交接准备
+  → M5.2：反抓 + 交接观察/ICP
+      1. 左臂到高位交接中心
+      2. 左臂到位后，右臂 Idle → 安全预抓取（缓存回放或 RRTstar）
+     两臂到位屏障
   → M8.2：双臂交接
   → 右臂后台：M9 → M10
 ```
 
-一旦工件成功发布给右臂，左臂可从 M1 开始下一件。左臂即将占用 `middle` 或交接区时，总控才等待上一件右臂任务结束；因此不会让两件工件争用同一物理工位。
+一旦工件成功发布给右臂，左臂可从 M1 开始下一件。正面流程在即将占用 `middle` 时才等待右臂后台任务；反面 M5.2 会在左臂到达高位后实际占用右臂，因此总控在启动 M5.2（及其恢复入口）前就等待上一件右臂任务结束。这样不会让两件工件争用右臂或交接区。
 
 ## 状态、结果与恢复
 
@@ -140,10 +143,10 @@ runtime/<run_id>/
 | `module_3_buffer` / `module_3_middle` | `modules/module_3_left_place/run.sh` | 左臂 | 用 `--placement-kind` 区分目标。 |
 | `module_4_buffer_state` | `.../check_buffer_face.py` | 头部 D435 | 强制模块内 `--max-uncertain-retries 0`，观察预算只由总控计数。 |
 | `module_5_front` | `.../module_5_1.../main.py` | 左臂 | 真实执行附加 `--execute`。 |
-| `module_5_reverse` | `python -m ...module_5_2...pipeline` | 左臂、头部 D435 | 反抓和交接准备的组合入口。 |
-| `module_5_reverse_handoff` | `python -m ...module_5_2...resume_handoff` | 左臂、头部 D435 | 仅恢复交接准备。 |
+| `module_5_reverse` | `python -m ...module_5_2...pipeline` | 左臂、右臂、头部 D435 | 反抓、ICP 后先左臂高位、再右臂预抓取的串行交接准备入口。 |
+| `module_5_reverse_handoff` | `python -m ...module_5_2...resume_handoff` | 左臂、右臂、头部 D435 | 仅恢复交接准备，仍按左臂后右臂的顺序执行到位屏障。 |
 | `module_8_handoff` | `.../module_8_2_left_handoff/main.py` | 左臂、右臂 | 没有原生标准结果文件，由 controller 合成。 |
-| `module_8_right_front` | `.../module_8_1_buffer_grasp/workpiece_pipeline.py` | 右臂、头部 D435 | 原生写入 `--result-file`。 |
+| `module_8_right_front` | `.../module_8_1_middle_grasp/workpiece_pipeline.py` | 右臂、头部 D435 | 原生写入 `--result-file`。 |
 | `module_9_right_place` | `.../module_9_right_place/place_hole_wiggle.py` | 右臂 | 没有原生标准结果文件，由 controller 合成。 |
 | `module_10_right_idle` | `.../module_10_right_idle/main.py` | 右臂 | 没有原生标准结果文件，由 controller 合成。 |
 

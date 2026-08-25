@@ -16,7 +16,7 @@ _PROFILES = {
     },
     "gzhu": {
         "planner_host": "127.0.0.1",
-        "arm_host": "192.168.88.1",
+        "arm_host": "192.168.4.11",
         "gripper_host": "127.0.0.1",
         "force_host": "127.0.0.1",
         # gzhu 的头部云台服务与左/右夹爪服务均在本机。

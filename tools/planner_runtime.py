@@ -16,6 +16,19 @@ from loop_types import ObjectPose
 from tools.planner_task_retry import retry_task_creation
 
 
+# Position bounds from the deployed left/right arm URDFs.  Request-local IK
+# margins shrink these ranges without changing the global MoveIt robot model.
+ARM_JOINT_POSITION_LIMITS_DEG = (
+    (-math.degrees(3.926), math.degrees(3.926)),
+    (-math.degrees(1.745), math.degrees(1.745)),
+    (-math.degrees(3.926), math.degrees(3.926)),
+    (-math.degrees(1.745), math.degrees(2.617)),
+    (-math.degrees(3.926), math.degrees(3.926)),
+    (-math.degrees(1.57), math.degrees(1.57)),
+    (-math.degrees(1.57), math.degrees(1.57)),
+)
+
+
 class TaskBusyError(RuntimeError):
     """The target arm already has a running SDK task."""
 
@@ -472,6 +485,7 @@ class PlannerRuntime:
         start_joints_deg: list[float] | None = None,
         rrtstar_goal_tolerance: bool = False,
         use_left_eef_collision_box: bool = False,
+        joint_limit_margin_deg: float | None = None,
     ) -> dict[str, Any] | None:
         """Plan one explicit Cartesian tool pose without executing it."""
         if planner not in {"ptp", "lin", "ompl", "rrtstar"}:
@@ -482,6 +496,16 @@ class PlannerRuntime:
             )
         if use_left_eef_collision_box and arm != "left":
             raise ValueError("use_left_eef_collision_box 仅支持左臂请求")
+        if joint_limit_margin_deg is not None:
+            if planner != "lin":
+                raise ValueError(
+                    "joint_limit_margin_deg is only valid with planner='lin'"
+                )
+            if (
+                not math.isfinite(joint_limit_margin_deg)
+                or joint_limit_margin_deg <= 0.0
+            ):
+                raise ValueError("joint_limit_margin_deg must be positive")
         self._validate_pose(pose)
         group = self.config.left_group if arm == "left" else self.config.right_group
         tool_frame = (
@@ -501,6 +525,34 @@ class PlannerRuntime:
             "use_left_eef_collision_box": bool(use_left_eef_collision_box),
         }
         recorded_start = self._recorded_start_joints(arm, start_joints_deg)
+        path_constraints = None
+        if joint_limit_margin_deg is not None:
+            constraints = []
+            for index, (lower, upper) in enumerate(
+                ARM_JOINT_POSITION_LIMITS_DEG, start=1
+            ):
+                safe_lower = lower + joint_limit_margin_deg
+                safe_upper = upper - joint_limit_margin_deg
+                if safe_lower >= safe_upper:
+                    raise ValueError(
+                        f"joint_limit_margin_deg={joint_limit_margin_deg} leaves "
+                        f"no range for {arm}_arm_joint{index}"
+                    )
+                center = (safe_lower + safe_upper) / 2.0
+                constraints.append({
+                    "joint_name": f"{arm}_arm_joint{index}",
+                    "position": center,
+                    "tolerance_below": center - safe_lower,
+                    "tolerance_above": safe_upper - center,
+                    "unit": "deg",
+                    "weight": 1.0,
+                })
+            path_constraints = {"joint_constraints": constraints}
+
+        def add_path_constraints(waypoint: dict[str, Any]) -> None:
+            if path_constraints is not None:
+                waypoint["path_constraints"] = path_constraints
+
         def request() -> dict[str, Any]:
             if start_joints_deg is not None:
                 if (
@@ -537,6 +589,7 @@ class PlannerRuntime:
                             "final_phase_oversample": 2.0,
                         },
                     }
+                add_path_constraints(payload["waypoints"][0])
                 if rrtstar_goal_tolerance:
                     payload["rrtstar_goal_tolerance"] = True
                 if use_left_eef_collision_box:
@@ -552,6 +605,7 @@ class PlannerRuntime:
                     planner == "rrtstar"
                     or use_left_eef_collision_box
                     or allow_right_hand_tall_contact
+                    or path_constraints is not None
                 ):
                     return self._planner.plan_cart_trajectory(
                         group=group,
@@ -585,6 +639,7 @@ class PlannerRuntime:
                             "final_phase_oversample": 2.0,
                         },
                     }
+                add_path_constraints(payload["waypoints"][0])
                 if rrtstar_goal_tolerance:
                     payload["rrtstar_goal_tolerance"] = True
                 if use_left_eef_collision_box:

@@ -57,7 +57,7 @@ MODULE1_MODES = {
     "gzhu": {
         "d405_serial": "260322270242",
         "handeye_mode": "bridge",
-        "robot_host": "192.168.88.1",
+        "robot_host": "192.168.4.11",
         "gripper_host": "127.0.0.1",
         "force_sensor_host": "127.0.0.1",
     },

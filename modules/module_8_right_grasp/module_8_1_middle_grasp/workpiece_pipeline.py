@@ -403,7 +403,7 @@ def move_to_saved_pose(number: int, args: argparse.Namespace) -> None:
     arm = planner = None
     try:
         sdk = import_sdk()
-        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.88.1"))
+        arm = sdk.Arm(host=os.environ.get("PARM_ARM_HOST", "192.168.4.11"))
         ensure_ready(arm, args.arm_id)
         planner = sdk.Planner(host=args.planner_host)
         for attempt in range(1, SAVED_POSE_PLAN_RETRIES + 1):

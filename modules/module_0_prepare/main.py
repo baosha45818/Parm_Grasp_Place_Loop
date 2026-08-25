@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Module 0：预检共享服务、打开夹爪并使双臂回到安全初始位。"""
+"""Module 0：预检共享服务，使双臂与夹爪进入安全初始状态。"""
 from __future__ import annotations
 
 import argparse
@@ -118,6 +118,50 @@ def _write(path: Path, outcome: str) -> None:
     path.write_text(json.dumps({"outcome": outcome}, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def prepare_robot(
+    *,
+    planner_host: str,
+    arm_host: str,
+    gripper_host: str,
+    force_host: str,
+    speed: float = 0.3,
+    open_grippers_before_motion: bool = True,
+) -> None:
+    """完成 Module 0 准备；可按调用场景选择夹爪打开时机。"""
+    if not 0.0 < speed <= 1.0:
+        raise ValueError("speed 必须在 (0, 1] 内")
+
+    ensure_sam2_service()
+    preflight_robot_infrastructure(
+        planner_host=planner_host,
+        arm_host=arm_host,
+        gripper_host=gripper_host,
+        force_sensor_host=force_host,
+    )
+    if open_grippers_before_motion:
+        _open_grippers(gripper_host)
+
+    errors: list[BaseException] = []
+
+    def move(side: str, target: list[float], label: str) -> None:
+        try:
+            _move_joint(
+                arm_host=arm_host, planner_host=planner_host,
+                side=side, target=target, speed=speed, label=label,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    left = threading.Thread(target=move, args=("left", LEFT_GRASPUP_DEG, "左臂 graspup"))
+    right = threading.Thread(target=move, args=("right", _right_idle(), "右臂 Idle"))
+    left.start(); right.start(); left.join(); right.join()
+    if errors:
+        raise RuntimeError(f"启动归位失败: {errors[0]}") from errors[0]
+
+    if not open_grippers_before_motion:
+        _open_grippers(gripper_host)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result-file", required=True)
@@ -127,32 +171,13 @@ def main() -> int:
     parser.add_argument("--force-host", required=True)
     parser.add_argument("--speed", type=float, default=0.3)
     args = parser.parse_args()
-    if not 0.0 < args.speed <= 1.0:
-        raise ValueError("--speed 必须在 (0, 1] 内")
-
-    ensure_sam2_service()
-    preflight_robot_infrastructure(
+    prepare_robot(
         planner_host=args.planner_host,
         arm_host=args.arm_host,
         gripper_host=args.gripper_host,
-        force_sensor_host=args.force_host,
+        force_host=args.force_host,
+        speed=args.speed,
     )
-    _open_grippers(args.gripper_host)
-
-    errors: list[BaseException] = []
-    def move(side: str, target: list[float], label: str) -> None:
-        try:
-            _move_joint(
-                arm_host=args.arm_host, planner_host=args.planner_host,
-                side=side, target=target, speed=args.speed, label=label,
-            )
-        except BaseException as exc:
-            errors.append(exc)
-    left = threading.Thread(target=move, args=("left", LEFT_GRASPUP_DEG, "左臂 graspup"))
-    right = threading.Thread(target=move, args=("right", _right_idle(), "右臂 Idle"))
-    left.start(); right.start(); left.join(); right.join()
-    if errors:
-        raise RuntimeError(f"启动归位失败: {errors[0]}") from errors[0]
     _write(Path(args.result_file), "success")
     return 0
 

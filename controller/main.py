@@ -48,8 +48,8 @@ class RightTaskFailure:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("xiangxin", "gzhu"), required=True)
-    parser.add_argument("--workpiece", choices=("1", "2"), required=True)
+    parser.add_argument("--mode", choices=("xiangxin", "gzhu"), default="gzhu")
+    parser.add_argument("--workpiece", choices=("1", "2"), default="1")
     parser.add_argument("--live", action="store_true", help="允许模块传入真实运动授权参数")
     parser.add_argument("--dry-run", action="store_true", help="只演练新总控状态机，不启动任何模块")
     parser.add_argument("--simulate-face", choices=("FRONT", "BACK", "UNCERTAIN"), default="FRONT")
@@ -318,9 +318,13 @@ def main() -> int:
             if collect_right(wait=False) is not None:
                 recover_pending_right()
 
-            # Middle/交接区只有一个物理工位。左臂在发布下一件之前等待右臂
-            # 消费完成；在此之前 M1~M5 可与右臂并行。
-            if next_module in {"module_3_middle", "module_8_handoff"}:
+            # Middle/交接区只有一个物理工位。M5.2 的 ICP 后阶段会在左臂到达
+            # 高位后占用右臂去预抓取，故反面重抓（及其恢复）开始前必须等待上一件右臂消费
+            # 完成；正面 M1~M5.1 仍可与右臂后台放置并行。
+            if next_module in {
+                "module_3_middle", "module_5_reverse", "module_5_reverse_handoff",
+                "module_8_handoff",
+            }:
                 wait_right_clear()
 
             # 交接区不使用文件锁；由单一总控的持久化状态机互斥。M8.2 只可

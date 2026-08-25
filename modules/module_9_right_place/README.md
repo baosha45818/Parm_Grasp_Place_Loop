@@ -49,7 +49,7 @@ python3 modules/module_9_right_place/place_hole_wiggle.py \
 | 规划场景 | `config.hole_a_first_live_fast_return.json` | 用于默认的 `move_j` 回示教起点及避碰规划。 |
 | 右臂状态 | 右臂 SDK | 获取实际 TCP、任务状态及控制状态。 |
 | 力/扭矩 | 右腕 ForceSensor | 建立基线，提供连续进洞判定与安全限数据。 |
-| 网络地址 | 工件 TOML 的 `arm_host`、`force_sensor_host` | 每个工件显式配置；工字工件当前分别为 `192.168.88.1`、`localhost`。 |
+| 网络地址 | 工件 TOML 的 `arm_host`、`force_sensor_host` | 每个工件显式配置；工字工件当前分别为 `192.168.4.11`、`localhost`。 |
 
 工件 TOML 的最小结构为：
 
@@ -57,7 +57,7 @@ python3 modules/module_9_right_place/place_hole_wiggle.py \
 schema_version = 2
 workpiece_serial_number = 1
 # 右臂控制器 IP 地址。
-arm_host = "192.168.88.1"
+arm_host = "192.168.4.11"
 # 右腕力/扭矩传感器的控制器 IP 地址。
 force_sensor_host = "192.168.3.22"
 initial_right_joints_deg = ["J1", "J2", "J3", "J4", "J5", "J6", "J7"]

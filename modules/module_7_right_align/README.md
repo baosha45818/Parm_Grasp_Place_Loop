@@ -19,7 +19,7 @@ python3 /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_7_right_alig
 
 `--workpiece` 会自动选择同编号调整配置，并读取 `output/module_4_2/workpiece_<编号>/` 中最新的 `mask_pose.json`；可用 `--workpiece-pose-file` 显式覆盖，但文件的工件标记必须一致。确认预演结果与现场状态后，追加 `--execute` 才会实际打开夹爪、抓取、翻转、放置并释放。该模块需要可访问的 `parm_sdk`、右臂/夹爪服务和规划器。
 
-这个模块的log日志，只累积统计选择了哪些翻转候选点、以及这个候选点实际规划时的各类信息，便于多次运行得到一些统计数据后的调参。关于这个模块的全部终端打印信息，会被Module 8 的 [workpiece_pipeline.py (line 100)](/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp/workpiece_pipeline.py:100)记录。
+这个模块的log日志，只累积统计选择了哪些翻转候选点、以及这个候选点实际规划时的各类信息，便于多次运行得到一些统计数据后的调参。关于这个模块的全部终端打印信息，会被Module 8 的 [workpiece_pipeline.py (line 100)](/home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_middle_grasp/workpiece_pipeline.py:100)记录。
 
 | 文件 | 写入方式 | 内容 |
 |---|---|---|

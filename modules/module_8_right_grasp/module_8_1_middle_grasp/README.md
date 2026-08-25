@@ -24,7 +24,7 @@
 进入本目录：
 
 ```bash
-cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_middle_grasp
 ```
 
 ### 使用最新视觉结果
@@ -123,7 +123,7 @@ workpiece_pipeline.py
 先进行不接触硬件的流程预演：
 
 ```bash
-cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_buffer_grasp
+cd /home/dainanjun/Public/Parm_Grasp_Place_Loop/modules/module_8_right_grasp/module_8_1_middle_grasp
 
 python3 workpiece_pipeline.py --workpiece 1
 ```

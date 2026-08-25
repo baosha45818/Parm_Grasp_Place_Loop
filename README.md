@@ -69,7 +69,7 @@ Parm_Grasp_Place_Loop/
 | 本机外设 driver | `parm_sdk_1.0.0/start.sh --no-web-demo` | 左右夹爪、力传感器、头部云台、踏板；正常为 5 个 driver。 |
 | Planner | `plucky_hjt_parm/start_planner.sh xuexiao` | 提供规划、TF 和 waypoint 服务。 |
 | SAM2 常驻服务 | `tools/sam2-service/start_uds_server.sh` | 给 Module 1 与 Module 4 提供分割/跟踪能力。 |
-| 机械臂本体 driver | 控制器 `192.168.88.1` | 提供左右臂状态、使能、取消和执行接口。 |
+| 机械臂本体 driver | 控制器 `192.168.4.11` | 提供左右臂状态、使能、取消和执行接口。 |
 
 `controller_prepare` 会对 Planner、双臂、夹爪、力传感器和 SAM2 做只读预检，但不会替代上述
 服务启动。相机也不会在总控预检阶段打开：Module 1 自己打开左腕 D405，Module 4.1 自己
@@ -85,7 +85,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
   --workpiece 1 \
   --live \
   --planner-host 127.0.0.1 \
-  --arm-host 192.168.88.1 \
+  --arm-host 192.168.4.11 \
   --gripper-host 127.0.0.1 \
   --force-host 127.0.0.1 \
   --head-host 127.0.0.1 \
@@ -109,7 +109,7 @@ cd /home/dainanjun/Public/Parm_Grasp_Place_Loop
 
 | 模式 | 左腕 D405 | 头部 D435i | Arm | 本机/远端外设 |
 | --- | --- | --- | --- | --- |
-| `gzhu` | `260322270242` | `261222076212` | `192.168.88.1` | 夹爪、力、云台在本机 `127.0.0.1`。 |
+| `gzhu` | `260322270242` | `261222076212` | `192.168.4.11` | 夹爪、力、云台在本机 `127.0.0.1`。 |
 | `xiangxin` | `260322270600` | `261722072445` | `192.168.3.11` | 夹爪在 `192.168.3.11`；力和云台在 `192.168.3.22`。 |
 
 `--workpiece 1|2` 会同时选择该工件的 CAD、掩膜策略、ICP 初值/粗配准策略、抓取参数和
@@ -176,7 +176,7 @@ flowchart TD
     M4 --> D{方向可信？}
     D -->|FRONT| F5[M5.1：正面重抓到 graspup]
     F5 --> MID[M3：放入 Middle]
-    D -->|BACK| R5[M5.2：反面重抓 + 左手交接准备]
+    D -->|BACK| R5[M5.2：反面重抓、ICP 后双臂串行到交接屏障]
     R5 --> H8[M8.2：双臂交接]
     D -->|UNCERTAIN| O
 
@@ -270,7 +270,7 @@ Handoff: EMPTY → LEFT_READY → TRANSFERRING → EMPTY
 | 资源 | 典型消费者 |
 | --- | --- |
 | `LEFT_ARM` | M1、M3、M5、观察位动作、M8.2。 |
-| `RIGHT_ARM` | 正面右臂复合模块、M8.2、M9、M10。 |
+| `RIGHT_ARM` | 正面右臂复合模块、反面 M5.2（左臂到位后的右臂预抓取）、M8.2、M9、M10。 |
 | `HEAD_D435` | Buffer 观察位、M4.1、M5.2、正面右臂复合模块。 |
 | `LEFT_D405` | M1。 |
 
@@ -354,13 +354,19 @@ M3 的 `middle` 分支负责该固定位置放置。Middle 放好后，总控把
 
 ```text
 M4.1 = BACK
-  → M5.2 左臂反面重抓 + 交接观察准备
+  → M5.2 左臂反面重抓 + 交接观察/ICP
+       1. 左臂：观察位 → 高位交接中心
+       2. 左臂确认到位后，右臂：Idle → 安全预抓取位（缓存回放或 RRTstar）
+     两臂到位屏障
   → M8.2 右臂从左手接取
   → 右臂后台：M9 放置 → M10 Idle
 ```
 
 反面分支中，M5.2 除了按 M4.1 TF 从 Buffer 反抓，还会生成本轮交接所需的头部观察/ICP 结果，
-并让左手到交接准备位。M8.2 是唯一允许同时占用左右臂的模块：右手接取成功后，交接状态从
+随后先让左臂上移并确认到达高位交接中心，再启动右臂 `Idle → 安全预抓取`。右臂缓存命中时直接回放历史轨迹；未命中时，
+按名义高位交接姿态以 RRTstar 规划并在关节到位后写入缓存。M5.2 只有在两臂均到位后才发布
+`LEFT_READY`；M8.2 再以本轮 ICP 和实时左 TCP 执行最终 LIN 抓取。M8.2 是唯一会闭合右夹爪、
+释放左夹爪并转移工件归属的模块：右手接取成功后，交接状态从
 `TRANSFERRING` 变为 `EMPTY`，右臂带件进入后台 M9/M10，左臂可继续下一件。
 
 ### 6.5 左右臂并行与工位限制
@@ -368,8 +374,9 @@ M4.1 = BACK
 右臂一旦接管工件，总控不等待它完成 M9/M10 才让左臂工作：左臂可从 M1 开始准备下一件，
 并可完成 Buffer 放置、观察和 M5 重抓。
 
-但每次只允许一个右臂后台消费任务。左臂若将要占用 **Middle**（正面 M3(Middle)）或进入
-**交接区**（反面 M8.2），总控会等待上一件右臂任务完成并回 Idle。这样既允许前半段并行，
+但每次只允许一个右臂后台消费任务。左臂若将要占用 **Middle**（正面 M3(Middle)）、启动
+**反面 M5.2**（其 ICP 后阶段会使用右臂预抓取）或进入 **交接区**（反面 M8.2），总控会等待
+上一件右臂任务完成并回 Idle。这样既允许正面前半段并行，
 也不会在同一物理工位叠放或交接两件工件。
 
 ## 7. 重试、人工恢复与停止
@@ -415,9 +422,9 @@ M8.2。
 | M3 `module_3_left_place` | 左臂把已在 `graspuptop` 的工件放到固定 Buffer 或固定 Middle，并返回安全上方位。 | M1/M5.1 → Buffer/Middle。 |
 | M4.1 `module_4_1_buffer_state_estimation` | 头部 D435i 对 Buffer 工件做分割、正反判断和 ICP，发布方向与 TF。 | Buffer → M5.1 或 M5.2。 |
 | M4.2 `module_4_2_pose_estimation` | 右臂消费 Middle 工件前的右侧视觉位姿估计。 | 属于正面右臂复合链。 |
-| M5 `module_5_left_pick` | 左臂依据 M4.1 TF 重抓：M5.1 正面回 `graspuptop`；M5.2 反面进入交接准备。 | Buffer → Middle 或交接区。 |
+| M5 `module_5_left_pick` | 左臂依据 M4.1 TF 重抓：M5.1 正面回 `graspuptop`；M5.2 反面在 ICP 后先完成左臂高位交接，再完成右臂安全预抓取，并以两臂到位屏障发布交接准备。 | Buffer → Middle 或交接区。 |
 | M7 `module_7_right_align` | 右臂将 Middle 工件调整到可抓取姿态。 | M4.2 后、M8.1 前；按需执行。 |
-| M8.1 `module_8_1_buffer_grasp` | 右臂从 Middle 抓取正面工件，内部协调 M4.2/M7 的观察和调整。 | 正面 Middle → M9。 |
+| M8.1 `module_8_1_middle_grasp` | 右臂从 Middle 抓取正面工件，内部协调 M4.2/M7 的观察和调整。 | 正面 Middle → M9。 |
 | M8.2 `module_8_2_left_handoff` | 右臂从左手接取反面工件并撤离到右手放置准备状态。 | 反面交接区 → M9。 |
 | M9 `module_9_right_place` | 右臂孔位放置、力控搜索与失败恢复。 | 右手持件 → M10。 |
 | M10 `module_10_right_idle` | 右臂回专用 Idle 位，释放右臂对下一件的占用。 | M9 后结束一件工件的右侧生命周期。 |

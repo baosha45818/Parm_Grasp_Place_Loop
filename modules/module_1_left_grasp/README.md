@@ -22,7 +22,7 @@ D405 RGB-D
 
 | 模式 | D405 | 手眼标定 | FPS | Arm | Gripper | Force sensor |
 | --- | --- | --- | ---: | --- | --- | --- |
-| `gzhu` | `260322270242` | SDK + bridge | 15 | `192.168.88.1` | `127.0.0.1` | `127.0.0.1` |
+| `gzhu` | `260322270242` | SDK + bridge | 15 | `192.168.4.11` | `127.0.0.1` | `127.0.0.1` |
 | `xiangxin` | `260322270600` | planner-direct | 30 | `192.168.3.11` | `192.168.3.11` | `192.168.3.22` |
 
 模式会同时约束 `--d405-serial`、`--handeye-mode`、`--arm-host`、
@@ -114,6 +114,22 @@ output/module_1_left_grasp/verified_handoff.json
 
 Module 3 只接受其中 `weight_check_enabled=true` 且
 `weight_check.classification="SINGLE"` 的结果。
+
+### 重量门控阈值
+
+Module 1 默认从项目级 `config/grasp_weight_thresholds.conf` 读取重量门控参数：
+
+| 分类 | 默认判定条件 |
+| --- | --- |
+| `EMPTY`（抓空） | 估算重量 ≤ 40 g |
+| `SINGLE`（单件） | 40 g < 估算重量 < 130 g |
+| `MULTIPLE`（多件） | 估算重量 ≥ 130 g |
+| `UNKNOWN`（采样不稳定） | 空载或持件窗口任一力轴 MAD > 0.15 N |
+
+40 g 和 130 g 两个边界分别归入 `EMPTY` 和 `MULTIPLE`；配置中的极小数值
+间隔用于保证边界不会同时落入相邻分类。每个空载/持件窗口默认采集 31 帧，
+最长等待 3.0 s，并在采样前静置 0.3 s。上述参数均可通过 `main.py` 的
+`--weight-*` 命令行参数覆盖。
 
 ## 代码结构
 

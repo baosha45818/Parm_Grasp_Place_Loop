@@ -2,7 +2,9 @@
 """反面分支：左手持件观察、ICP定位并移动到右手交接位。
 
 执行前提是 Module 5-1 已完成左手反抓，且工件相对左夹爪保持不动。本模块
-只负责左侧准备工作，不移动右臂、不闭合右夹爪，也不释放左夹爪。
+负责左侧观察和送交接位；ICP成功后先让左臂到高位交接中心，确认成功后
+再让右臂到安全预抓取位，但不闭合右夹爪，也不释放左夹爪。最终 LIN 抓取
+仍由 Module 8-2 在双方到位后执行。
 
 成功后会输出本轮 ``result.json``。传入 ``--handoff-result-file`` 时，还会
 原子写入一个供 Module 8-2 或兼容总控读取的 JSON 握手文件。
@@ -36,7 +38,7 @@ if __name__ == "__main__" and Path(sys.executable).resolve() != PYTHON.resolve()
 
 # 新总控会显式导出 PARM_BODY_HEAD_CALIBRATION。保留按 mode 推导的回退，
 # 让已经启动的总控在人工确认后重试交接时，也不会错误退回 xiangxin 标定。
-_DEPLOYMENT_MODE = os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin")
+_DEPLOYMENT_MODE = os.environ.get("PARM_DEPLOYMENT_MODE", "gzhu")
 _DEFAULT_ALIGNMENT_BY_MODE = {
     "gzhu": ROOT / "tools/calibration/head_d435/gzhu_reverse_observation.json",
     "xiangxin": ROOT / "tools/calibration/head_d435/xiangxin_reverse_observation.json",
@@ -46,7 +48,7 @@ DEFAULT_ALIGNMENT = Path(
         "PARM_BODY_HEAD_CALIBRATION",
         _DEFAULT_ALIGNMENT_BY_MODE.get(
             _DEPLOYMENT_MODE,
-            _DEFAULT_ALIGNMENT_BY_MODE["xiangxin"],
+            _DEFAULT_ALIGNMENT_BY_MODE["gzhu"],
         ),
     )
 ).expanduser().resolve()
@@ -128,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mode",
         choices=("xiangxin", "gzhu"),
-        default=os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin"),
+        default=os.environ.get("PARM_DEPLOYMENT_MODE", "gzhu"),
         help="现场部署；必须与 Module 4-1 的 mode 相同",
     )
     parser.add_argument(
@@ -161,28 +163,36 @@ def run(
     return int(completed.returncode)
 
 
-def cancel_left_arm(arm_host: str) -> None:
+def cancel_arm(arm_host: str, arm_id: int, label: str) -> None:
     try:
         from parm_sdk import Arm
     except Exception as exc:
         print(
-            f"[stop] 无法导入parm_sdk，未能停止左臂：{exc}",
+            f"[stop] 无法导入parm_sdk，未能停止{label}臂：{exc}",
             flush=True,
         )
         return
     arm = None
     try:
         arm = Arm(host=arm_host, status_port=None)
-        arm.cancel_task(1)
-        print("[stop] left arm cancel_task(1) 已发送", flush=True)
+        arm.cancel_task(arm_id)
+        print(f"[stop] {label} arm cancel_task({arm_id}) 已发送", flush=True)
     except Exception as exc:
-        print(f"[stop] left arm cancel_task失败：{exc}", flush=True)
+        print(f"[stop] {label} arm cancel_task失败：{exc}", flush=True)
     finally:
         if arm is not None:
             try:
                 arm.close()
             except Exception:
                 pass
+
+
+def cancel_left_arm(arm_host: str) -> None:
+    cancel_arm(arm_host, 1, "left")
+
+
+def cancel_right_arm(arm_host: str) -> None:
+    cancel_arm(arm_host, 2, "right")
 
 
 def newest_result(output_dir: Path, previous: set[Path]) -> Path:
@@ -209,7 +219,7 @@ def camera_serial_from_alignment(alignment: Path) -> str:
 
 def deployment_observation_profile() -> dict:
     """读取现场专属观察角与可用的 SAM2 自动点配置。"""
-    mode = os.environ.get("PARM_DEPLOYMENT_MODE", "xiangxin").strip()
+    mode = os.environ.get("PARM_DEPLOYMENT_MODE", "gzhu").strip()
     payload = json.loads(DEPLOYMENT_OBSERVATION_PROFILES.read_text(encoding="utf-8"))
     try:
         profile = dict(payload[mode])
@@ -398,24 +408,56 @@ def main() -> int:
     )
     print(f"[module-5-2] 本轮D435结果：{result}", flush=True)
 
-    # 3. 复用拍摄时左TCP到工件的刚性关系，将工件送到交接位。
-    run([
+    # 3. ICP完成后严格串行：先确认左臂已到高位交接中心，再让右臂到
+    # 名义高位预抓取位。双方到位后 Module 8-2 才按本轮 ICP 执行最终 LIN。
+    pregrasp_marker = result.with_name(f"{result.stem}_right_pregrasp_ready.json")
+    pregrasp_command = [
         sys.executable,
         "-m",
-        "tools.handoff_observation.move_object_center",
-        "--result",
-        str(result),
-        "--target-center",
-        *(str(value) for value in handoff_center),
-        "--fixed-handoff-orientation",
-        "--reuse-grasp-relation",
-        "--execute",
-        "--planner-host",
-        args.planner_host,
-        "--speed-multiplier",
-        str(args.speed_multiplier),
-        *([] if args.require_confirmation else ["--auto-confirm"]),
-    ])
+        "modules.module_8_right_grasp.module_8_2_left_handoff.prepare_pregrasp",
+        "--mode", args.mode,
+        "--planner-host", args.planner_host,
+        "--arm-host", args.arm_host,
+        "--gripper-host", args.gripper_host,
+        "--marker-file", str(pregrasp_marker),
+        "--speed-multiplier", str(4.0),
+    ]
+    print("\n[module-5-2] 串行阶段 1/2：左臂观察位→高位交接中心。", flush=True)
+    try:
+        run([
+            sys.executable,
+            "-m",
+            "tools.handoff_observation.move_object_center",
+            "--result",
+            str(result),
+            "--target-center",
+            *(str(value) for value in handoff_center),
+            "--fixed-handoff-orientation",
+            "--reuse-grasp-relation",
+            "--execute",
+            "--planner-host",
+            args.planner_host,
+            "--speed-multiplier",
+            str(args.speed_multiplier),
+            *([] if args.require_confirmation else ["--auto-confirm"]),
+        ])
+    except BaseException:
+        # 串行模式下右臂尚未启动；只停止左臂残留任务。
+        cancel_left_arm(args.arm_host)
+        raise
+
+    print(
+        "\n[module-5-2] 串行阶段 2/2：左臂已到高位，启动右臂 Idle→预抓取："
+        + " ".join(pregrasp_command),
+        flush=True,
+    )
+    try:
+        run(pregrasp_command)
+    except BaseException as exc:
+        cancel_right_arm(args.arm_host)
+        raise RuntimeError(
+            "右臂串行 Idle→预抓取失败；左臂保持高位持件，未进入最终交接"
+        ) from exc
 
     if args.handoff_result_file:
         publish_handoff_result(
@@ -426,7 +468,7 @@ def main() -> int:
         )
     print(
         "[module-5-2] 左手已持工件1到共用高位交接中心="
-        f"{handoff_center}；左夹爪保持夹紧，右臂尚未运动。",
+        f"{handoff_center}；左夹爪保持夹紧，右臂已到安全预抓取位。",
         flush=True,
     )
     print(f"MODULE_5_2_RESULT={result}", flush=True)

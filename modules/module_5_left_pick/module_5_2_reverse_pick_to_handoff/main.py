@@ -135,6 +135,9 @@ def main() -> int:
     args = parse_args()
     payload, diagnostic, T, table_normal = _load_back_icp(args.buffer_check_result)
     mode_name, grasp_config = _mode_grasp_config(payload, args.mode)
+    # 子执行器在 import 时读取统一反抓预备位；直接运行本入口时也必须把
+    # 已校验的 mode 传给子进程，不能依赖其默认值。
+    os.environ["PARM_DEPLOYMENT_MODE"] = mode_name
     capture_dir = Path(payload.get('capture_dir') or '')
     if not capture_dir.is_dir():
         raise RuntimeError(f'Buffer Check capture_dir 不存在: {capture_dir}')
